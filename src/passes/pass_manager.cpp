@@ -1,8 +1,8 @@
 #include "pass_manager.h"
 #include "cse_pass.h"
 #include "expr_recomb.h"
+#include "algebraic_simplify.h"
 #include "../ir/ir_module.h"
-#include <iostream>
 
 namespace cse {
 
@@ -19,6 +19,7 @@ void PassManager::runAll(IRModule& module) {
 PassManager PassManager::createDefault(bool enableRecombine) {
     PassManager pm;
     pm.addPass(createCSEPass());
+    pm.addPass(createAlgebraicSimplifyPass());
     if (enableRecombine) {
         pm.addPass(createExprRecombinePass());
     }

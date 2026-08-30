@@ -20,16 +20,7 @@ private:
     std::string emitExpr(DAGNode* node);
     std::string makeIndent(int level) const;
 
-    void topoSort(DAGNode* node, std::vector<DAGNode*>& order,
-                  std::unordered_set<uint32_t>& visited);
-
-    void analyzeTemporaries(DAGNode* node, std::unordered_set<uint32_t>& needsTemp);
-
-    bool isSimple(DAGNode* node);
-
     std::ostringstream out_;
-    int tempCounter_ = 0;
-    std::unordered_set<uint32_t> assigned_;
 };
 
 } // namespace cse

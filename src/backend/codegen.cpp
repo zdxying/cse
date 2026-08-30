@@ -6,6 +6,27 @@
 
 namespace cse {
 
+static int getPrecedence(char op) {
+    switch (op) {
+        case '*': case '/': case '%': return 2;
+        case '+': case '-': return 1;
+        default: return 0;
+    }
+}
+
+static bool isLeftAssoc(char op) {
+    return op == '+' || op == '-' || op == '*' || op == '/' || op == '%';
+}
+
+static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
+    int pp = getPrecedence(parentOp);
+    int cp = getPrecedence(childOp);
+    if (cp < pp) return true;
+    if (cp > pp) return false;
+    if (isRightChild && !isLeftAssoc(parentOp)) return true;
+    return false;
+}
+
 std::string CodeGen::generate(IRModule& module) {
     out_.str("");
     out_.clear();
@@ -130,18 +151,23 @@ std::string CodeGen::emitExpr(DAGNode* node) {
             std::string lhs = emitExpr(node->operands[0]);
             std::string rhs = emitExpr(node->operands[1]);
 
-            bool needParenL = node->operands[0]->kind == NodeKind::BinaryOp;
-            bool needParenR = node->operands[1]->kind == NodeKind::BinaryOp;
+            char lOp = (node->operands[0]->kind == NodeKind::BinaryOp)
+                       ? node->operands[0]->op : 0;
+            char rOp = (node->operands[1]->kind == NodeKind::BinaryOp)
+                       ? node->operands[1]->op : 0;
+
+            bool parenL = lOp && childNeedsParens(node->op, lOp, false);
+            bool parenR = rOp && childNeedsParens(node->op, rOp, true);
 
             std::string result;
-            if (needParenL) result += "(" + lhs + ")";
+            if (parenL) result += "(" + lhs + ")";
             else result += lhs;
 
             result += " ";
             result += node->op;
             result += " ";
 
-            if (needParenR) result += "(" + rhs + ")";
+            if (parenR) result += "(" + rhs + ")";
             else result += rhs;
 
             return result;
@@ -194,32 +220,6 @@ std::string CodeGen::emitExpr(DAGNode* node) {
 
 std::string CodeGen::makeIndent(int level) const {
     return std::string(level * 4, ' ');
-}
-
-void CodeGen::topoSort(DAGNode* node, std::vector<DAGNode*>& order,
-                       std::unordered_set<uint32_t>& visited) {
-    if (!node || visited.count(node->id)) return;
-    visited.insert(node->id);
-    for (auto* op : node->operands) {
-        topoSort(op, order, visited);
-    }
-    order.push_back(node);
-}
-
-void CodeGen::analyzeTemporaries(DAGNode* node, std::unordered_set<uint32_t>& needsTemp) {
-    if (!node) return;
-    if (node->kind == NodeKind::BinaryOp || node->kind == NodeKind::UnaryOp ||
-        node->kind == NodeKind::ArrayAccess || node->kind == NodeKind::Call ||
-        node->kind == NodeKind::Ternary) {
-        needsTemp.insert(node->id);
-    }
-    for (auto* op : node->operands) {
-        analyzeTemporaries(op, needsTemp);
-    }
-}
-
-bool CodeGen::isSimple(DAGNode* node) {
-    return node->kind == NodeKind::Constant || node->kind == NodeKind::Variable;
 }
 
 } // namespace cse

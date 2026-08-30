@@ -1,5 +1,6 @@
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
+#include "frontend/region_extractor.h"
 #include "ir/ir_module.h"
 #include "ir/ir_builder.h"
 #include "passes/pass_manager.h"
@@ -16,71 +17,6 @@ static void printUsage(const char* prog) {
               << "Options:\n"
               << "  -r, --recombine    Enable expression recombination\n"
               << "  -h, --help         Show this help\n";
-}
-
-// Find //@cse markers in source and extract regions
-struct CSERegion {
-    size_t startLine;  // 1-indexed
-    size_t endLine;    // 1-indexed (exclusive)
-    std::string code;  // the code to optimize
-};
-
-static std::vector<CSERegion> findCSERegions(const std::string& source) {
-    std::vector<CSERegion> regions;
-    std::istringstream iss(source);
-    std::string line;
-    size_t lineNum = 0;
-    bool inCSE = false;
-    size_t cseStart = 0;
-    int braceCount = 0;
-    std::string cseCode;
-
-    while (std::getline(iss, line)) {
-        lineNum++;
-        std::string trimmed = line;
-        // Trim leading whitespace
-        size_t first = trimmed.find_first_not_of(" \t");
-        if (first != std::string::npos) trimmed = trimmed.substr(first);
-
-        if (!inCSE) {
-            if (trimmed == "//@cse" || trimmed.find("//@cse") == 0) {
-                inCSE = true;
-                cseStart = lineNum;
-                braceCount = 0;
-                cseCode.clear();
-                continue;
-            }
-        } else {
-            // Count braces
-            for (char c : line) {
-                if (c == '{') braceCount++;
-                if (c == '}') braceCount--;
-            }
-            cseCode += line + "\n";
-
-            // End of CSE region: when braces balance and we hit a closing brace at top level
-            if (braceCount <= 0 && !cseCode.empty()) {
-                // Check if we've completed a function
-                // Simple heuristic: braces balanced after at least one function
-                bool hasBraces = false;
-                for (char c : cseCode) {
-                    if (c == '{') { hasBraces = true; break; }
-                }
-                if (hasBraces) {
-                    regions.push_back({cseStart, lineNum, cseCode});
-                    inCSE = false;
-                    cseCode.clear();
-                }
-            }
-        }
-    }
-
-    // If we're still in CSE mode, add the remaining
-    if (inCSE && !cseCode.empty()) {
-        regions.push_back({cseStart, lineNum, cseCode});
-    }
-
-    return regions;
 }
 
 // Apply CSE optimization to a region
@@ -158,7 +94,7 @@ int main(int argc, char* argv[]) {
     ifs.close();
 
     // Find CSE regions
-    auto regions = findCSERegions(source);
+    auto regions = cse::RegionExtractor().extract(source);
     if (regions.empty()) {
         std::cerr << "No //@cse markers found in " << inputFile << "\n";
         return 1;
