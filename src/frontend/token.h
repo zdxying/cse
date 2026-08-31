@@ -2,6 +2,8 @@
 #include <string>
 #include <cstdint>
 
+// Token types produced by the Lexer and consumed by the Parser.
+
 namespace cse {
 
 enum class TokenType {
@@ -11,7 +13,7 @@ enum class TokenType {
     String,
 
     // Keywords
-    For, If, Else, Return, Int, Double, Float, Void,
+    For, If, Else, Return, Int, Double, Float, Void, Struct,
 
     // Operators
     Plus, Minus, Star, Slash, Percent,
@@ -54,6 +56,7 @@ inline const char* tokenTypeName(TokenType t) {
         case TokenType::Double: return "Double";
         case TokenType::Float: return "Float";
         case TokenType::Void: return "Void";
+        case TokenType::Struct: return "Struct";
         case TokenType::Plus: return "Plus";
         case TokenType::Minus: return "Minus";
         case TokenType::Star: return "Star";

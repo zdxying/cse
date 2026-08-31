@@ -19,22 +19,48 @@ static void printUsage(const char* prog) {
               << "  -h, --help         Show this help\n";
 }
 
-// Apply CSE optimization to a region
+// Pipeline: source text → Lexer → Parser → IRBuilder → PassManager → CodeGen
+// Each //@cse region is processed independently through this pipeline.
 static std::string optimizeRegion(const std::string& code, bool enableRecombine) {
-    // Lex
+    // 1. Lex: tokenize source
     cse::Lexer lexer(code);
     auto tokens = lexer.tokenize();
 
-    // Parse
+    // 2. Parse: tokens → AST (FunctionDef, StructDef)
     cse::Parser parser(tokens);
     auto result = parser.parseAll();
 
-    if (result.functions.empty()) {
+    if (result.functions.empty() && result.structDefs.empty()) {
         return code;  // Nothing to optimize
     }
 
-    // Build IR for each function
+    // 3. Optimize struct methods (each method gets its own IR pipeline)
+    std::vector<cse::OptimizedStruct> optStructs;
+    for (auto& sd : result.structDefs) {
+        cse::OptimizedStruct os;
+        os.def = sd.get();
+        for (auto& method : sd->methods) {
+            auto methodMod = std::make_unique<cse::IRModule>();
+            cse::IRBuilder builder(methodMod.get());
+            builder.buildFunction(*method);
+            auto pm = cse::PassManager::createDefault(enableRecombine);
+            pm.runAll(*methodMod);
+            os.methodModules.push_back(std::move(methodMod));
+        }
+        optStructs.push_back(std::move(os));
+    }
+
+    // Collect struct definition pointers (for pure data structs)
+    std::vector<cse::StructDef*> structPtrs;
+    for (auto& sd : result.structDefs) {
+        if (sd->methods.empty()) {
+            structPtrs.push_back(sd.get());
+        }
+    }
+
+    // 4. Build IR for each function: AST → DAG-based IR
     std::string optimized;
+    bool emitStructs = true;
     for (auto& func : result.functions) {
         cse::IRModule module;
         cse::IRBuilder builder(&module);
@@ -44,9 +70,21 @@ static std::string optimizeRegion(const std::string& code, bool enableRecombine)
         auto pm = cse::PassManager::createDefault(enableRecombine);
         pm.runAll(module);
 
-        // Generate code
+        // Generate code (emit struct defs only before first function)
         cse::CodeGen codegen;
-        optimized += codegen.generate(module);
+        if (emitStructs) {
+            optimized += codegen.generate(module, structPtrs, optStructs);
+            emitStructs = false;
+        } else {
+            optimized += codegen.generate(module);
+        }
+    }
+
+    // If no functions but have structs, emit structs only
+    if (result.functions.empty() && !optStructs.empty()) {
+        cse::IRModule emptyModule;
+        cse::CodeGen codegen;
+        optimized += codegen.generate(emptyModule, structPtrs, optStructs);
     }
 
     return optimized;

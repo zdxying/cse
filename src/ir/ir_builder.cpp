@@ -108,7 +108,7 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
 
         case ExprKind::ArrowAccess: {
             DAGNode* base = buildExpr(*expr.base);
-            return module_->createMemberAccess(base, expr.memberName);
+            return module_->createArrowAccess(base, expr.memberName);
         }
 
         case ExprKind::Call:

@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "../ir/ir_module.h"
 #include "../ir/statement.h"
+#include "../frontend/ast.h"
 #include <unordered_set>
 #include <algorithm>
 
@@ -27,9 +28,53 @@ static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
     return false;
 }
 
-std::string CodeGen::generate(IRModule& module) {
+std::string CodeGen::generate(IRModule& module,
+                               const std::vector<StructDef*>& structDefs,
+                               const std::vector<OptimizedStruct>& optStructs) {
     out_.str("");
     out_.clear();
+
+    // Emit structs without methods (pure data structs)
+    for (auto* sd : structDefs) {
+        out_ << "struct " << sd->name << " {\n";
+        for (auto& field : sd->fields) {
+            out_ << "    " << field.type << " " << field.name << ";\n";
+        }
+        out_ << "};\n\n";
+    }
+
+    // Emit structs with optimized methods (inline definitions)
+    for (auto& os : optStructs) {
+        auto* sd = os.def;
+        out_ << "struct " << sd->name << " {\n";
+        for (auto& field : sd->fields) {
+            out_ << "    " << field.type << " " << field.name << ";\n";
+        }
+        // Emit optimized method bodies inline
+        for (size_t i = 0; i < sd->methods.size(); i++) {
+            if (i < os.methodModules.size() && os.methodModules[i]) {
+                auto* methodMod = os.methodModules[i].get();
+                out_ << "    " << methodMod->funcSig.returnType << " "
+                     << methodMod->funcSig.name << "(";
+                for (size_t j = 0; j < methodMod->funcSig.params.size(); j++) {
+                    if (j > 0) out_ << ", ";
+                    out_ << methodMod->funcSig.params[j].type << " "
+                         << methodMod->funcSig.params[j].name;
+                }
+                out_ << ") {\n";
+                if (methodMod->body) {
+                    emitStmt(methodMod->body.get(), 1);
+                }
+                out_ << "    }\n";
+            }
+        }
+        out_ << "};\n\n";
+    }
+
+    // Skip main function if funcSig is empty
+    if (module.funcSig.name.empty()) {
+        return out_.str();
+    }
 
     out_ << module.funcSig.returnType << " " << module.funcSig.name << "(";
     for (size_t i = 0; i < module.funcSig.params.size(); i++) {
@@ -190,6 +235,11 @@ std::string CodeGen::emitExpr(DAGNode* node) {
         case NodeKind::MemberAccess: {
             if (node->operands.empty()) return "";
             return emitExpr(node->operands[0]) + "." + node->name;
+        }
+
+        case NodeKind::ArrowAccess: {
+            if (node->operands.empty()) return "";
+            return emitExpr(node->operands[0]) + "->" + node->name;
         }
 
         case NodeKind::Call: {

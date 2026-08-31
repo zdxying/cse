@@ -45,7 +45,11 @@ bool Parser::isTypeKeyword() const {
 
 std::string Parser::parseType() {
     std::string type;
-    if (isTypeKeyword()) {
+    if (check(TokenType::Struct)) {
+        type = advance().text;
+        type += " ";
+        type += expect(TokenType::Identifier).text;
+    } else if (isTypeKeyword()) {
         type = advance().text;
     } else {
         type = advance().text; // custom type name
@@ -277,7 +281,7 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
     if (check(TokenType::For)) return parseFor();
     if (check(TokenType::If)) return parseIf();
     if (check(TokenType::Return)) return parseReturn();
-    if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float)) {
+    if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) || check(TokenType::Struct)) {
         return parseVarDecl();
     }
     return parseExprStmt();
@@ -302,7 +306,7 @@ std::unique_ptr<Stmt> Parser::parseFor() {
     auto forStmt = std::make_unique<Stmt>(StmtKind::ForLoop, loc);
 
     // for init
-    if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float)) {
+    if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) || check(TokenType::Struct)) {
         forStmt->forInit = parseVarDecl();
     } else {
         forStmt->forInit = parseExprStmt();
@@ -402,12 +406,51 @@ std::unique_ptr<FunctionDef> Parser::parseFunction() {
     return func;
 }
 
+std::unique_ptr<StructDef> Parser::parseStructDef() {
+    auto loc = currentLoc();
+    expect(TokenType::Struct);
+    auto def = std::make_unique<StructDef>();
+    def->name = expect(TokenType::Identifier).text;
+    def->loc = loc;
+    expect(TokenType::LBrace);
+    while (!check(TokenType::RBrace) && !check(TokenType::Eof)) {
+        auto returnType = parseType();
+        auto nameTok = expect(TokenType::Identifier);
+
+        if (check(TokenType::LParen)) {
+            auto method = std::make_unique<FunctionDef>();
+            method->returnType = returnType;
+            method->name = nameTok.text;
+            method->loc = {nameTok.line, nameTok.col};
+            method->params = parseParamList();
+            method->body = parseBlock();
+            def->methods.push_back(std::move(method));
+        } else {
+            // Field declaration
+            StructField field;
+            field.type = returnType;
+            field.name = nameTok.text;
+            expect(TokenType::Semicolon);
+            def->fields.push_back(std::move(field));
+        }
+    }
+    expect(TokenType::RBrace);
+    match(TokenType::Semicolon);
+    return def;
+}
+
 // ===== Full parse =====
 
 Parser::ParseResult Parser::parseAll() {
     ParseResult result;
 
     while (!check(TokenType::Eof)) {
+        // Struct definition
+        if (check(TokenType::Struct)) {
+            result.structDefs.push_back(parseStructDef());
+            continue;
+        }
+
         // Parse a function if we see: type[*] name(
         bool isFuncStart = false;
         if (isTypeKeyword()) {

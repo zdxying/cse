@@ -4,6 +4,10 @@
 #include <vector>
 #include <cstddef>
 
+// Lexer — source text → token stream.
+// Skips whitespace and comments; recognizes keywords, identifiers,
+// numbers, strings, operators, and punctuation.
+
 namespace cse {
 
 class Lexer {
@@ -12,16 +16,16 @@ public:
     std::vector<Token> tokenize();
 
 private:
-    char peek() const;
-    char peek2() const;
-    char advance();
-    void skipWhitespace();
+    char peek() const;      // current char
+    char peek2() const;     // next char (for two-char operators like //, /*)
+    char advance();         // consume current char, advance position
+    void skipWhitespace();  // spaces, tabs, newlines, comments
     void skipLineComment();
     void skipBlockComment();
 
-    Token readNumber();
-    Token readIdentifier();
-    Token readString();
+    Token readNumber();     // int or float literal
+    Token readIdentifier(); // keyword or user identifier
+    Token readString();     // "string literal"
 
     Token makeToken(TokenType type, const std::string& text = "");
 

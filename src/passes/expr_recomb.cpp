@@ -92,6 +92,8 @@ private:
         if (a->operands.size() != b->operands.size()) return false;
         if (a->kind == NodeKind::Constant && a->constVal != b->constVal) return false;
         if (a->kind == NodeKind::Variable && a->name != b->name) return false;
+        if (a->kind == NodeKind::MemberAccess && a->name != b->name) return false;
+        if (a->kind == NodeKind::ArrowAccess && a->name != b->name) return false;
         for (size_t i = 0; i < a->operands.size(); i++) {
             if (!sameExpr(a->operands[i], b->operands[i])) return false;
         }

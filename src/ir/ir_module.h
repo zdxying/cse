@@ -20,7 +20,9 @@ struct FuncSignature {
     std::vector<FuncParam> params;
 };
 
-// IR Module: the complete intermediate representation
+// IR Module — owns all DAG nodes and holds the function body.
+// Node pool ensures stable pointers; hashMap_ enables CSE deduplication.
+// createBinaryOp/createMemberAccess/etc. check hashMap_ before creating new nodes.
 class IRModule {
 public:
     IRModule() = default;
@@ -50,6 +52,7 @@ public:
     DAGNode* createVar(const std::string& name);
 
     // Create a binary op node with CSE (hash-based dedup)
+    // Returns existing node if structurally identical node already exists.
     DAGNode* createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs);
 
     // Create a unary op node
@@ -61,10 +64,14 @@ public:
     // Create a member access node
     DAGNode* createMemberAccess(DAGNode* base, const std::string& member);
 
+    // Create an arrow access node
+    DAGNode* createArrowAccess(DAGNode* base, const std::string& member);
+
     // Create a call node
     DAGNode* createCall(DAGNode* callee, const std::vector<DAGNode*>& args);
 
-    // CSE lookup: find existing node with same structural hash
+    // CSE lookup: find existing node with same structural hash.
+    // If found, returns existing (dedup); otherwise registers candidate.
     DAGNode* findExistingNode(DAGNode* candidate);
 
     // Get all nodes (for iteration)

@@ -2,6 +2,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <memory>
 #include <unordered_set>
 #include <cstdint>
 
@@ -10,10 +11,21 @@ namespace cse {
 class IRModule;
 class StmtIR;
 class DAGNode;
+struct StructDef;
 
+// Holds optimized IRModules for struct methods (one per method).
+struct OptimizedStruct {
+    const StructDef* def;
+    std::vector<std::unique_ptr<IRModule>> methodModules;
+};
+
+// Backend: converts optimized IR back to C++ source text.
+// Handles operator precedence for parentheses and emits struct definitions.
 class CodeGen {
 public:
-    std::string generate(IRModule& module);
+    std::string generate(IRModule& module,
+                         const std::vector<StructDef*>& structDefs = {},
+                         const std::vector<OptimizedStruct>& optStructs = {});
 
 private:
     void emitStmt(StmtIR* stmt, int indentLevel);

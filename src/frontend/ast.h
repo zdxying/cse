@@ -4,6 +4,10 @@
 #include <vector>
 #include <cstddef>
 
+// Abstract Syntax Tree — frontend output, input to IRBuilder.
+// Expressions (Expr) and Statements (Stmt) form a tree representing parsed C++ code.
+// Top-level constructs: FunctionDef, StructDef.
+
 namespace cse {
 
 struct SourceLoc {
@@ -120,6 +124,18 @@ struct FunctionDef {
     };
     std::vector<Param> params;
     std::unique_ptr<Stmt> body;
+    SourceLoc loc;
+};
+
+struct StructField {
+    std::string type;
+    std::string name;
+};
+
+struct StructDef {
+    std::string name;
+    std::vector<StructField> fields;
+    std::vector<std::unique_ptr<FunctionDef>> methods;
     SourceLoc loc;
 };
 

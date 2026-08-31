@@ -16,14 +16,7 @@ std::vector<Token> Lexer::tokenize() {
 
         // Check for //@cse marker
         if (c == '/' && peek2() == '/') {
-            size_t savePos = pos_;
-            size_t saveLine = line_;
-            size_t saveCol = col_;
             skipLineComment();
-            // The comment text was already consumed; we need to check
-            // if it contained //@cse. Let's re-read it.
-            // Actually, let's detect the marker differently.
-            // We'll handle CSE marker detection in the parser/main.
             continue;
         }
 
@@ -188,6 +181,7 @@ Token Lexer::readIdentifier() {
     else if (text == "double") type = TokenType::Double;
     else if (text == "float") type = TokenType::Float;
     else if (text == "void") type = TokenType::Void;
+    else if (text == "struct") type = TokenType::Struct;
 
     Token tok;
     tok.type = type;

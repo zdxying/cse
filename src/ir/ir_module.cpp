@@ -51,6 +51,9 @@ std::string DAGNode::toString() const {
         case NodeKind::MemberAccess:
             oss << operands[0]->toString() << "." << name;
             break;
+        case NodeKind::ArrowAccess:
+            oss << operands[0]->toString() << "->" << name;
+            break;
         case NodeKind::Call:
             oss << operands[0]->toString() << "()";
             break;
@@ -83,6 +86,7 @@ bool NodeEqual::operator()(const DAGNode* a, const DAGNode* b) const {
     if (a->kind == NodeKind::Constant && a->constVal != b->constVal) return false;
     if (a->kind == NodeKind::Variable && a->name != b->name) return false;
     if (a->kind == NodeKind::MemberAccess && a->name != b->name) return false;
+    if (a->kind == NodeKind::ArrowAccess && a->name != b->name) return false;
     return true;
 }
 
@@ -139,6 +143,14 @@ DAGNode* IRModule::createArrayAccess(DAGNode* base, DAGNode* index) {
 
 DAGNode* IRModule::createMemberAccess(DAGNode* base, const std::string& member) {
     auto candidate = createNode(NodeKind::MemberAccess);
+    candidate->name = member;
+    candidate->operands = {base};
+    candidate->recomputeHash();
+    return findExistingNode(candidate);
+}
+
+DAGNode* IRModule::createArrowAccess(DAGNode* base, const std::string& member) {
+    auto candidate = createNode(NodeKind::ArrowAccess);
     candidate->name = member;
     candidate->operands = {base};
     candidate->recomputeHash();

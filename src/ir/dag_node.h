@@ -4,6 +4,10 @@
 #include <vector>
 #include <functional>
 
+// Directed Acyclic Graph node — the core of CSE.
+// Each expression is a DAGNode; structurally identical subexpressions
+// share the same node (deduplication at construction time via hash).
+
 namespace cse {
 
 enum class NodeKind {
@@ -13,6 +17,7 @@ enum class NodeKind {
     UnaryOp,
     ArrayAccess,   // base[index]
     MemberAccess,  // base.member
+    ArrowAccess,   // base->member
     Call,
     Ternary,
     Cast,
@@ -36,7 +41,7 @@ public:
 
     NodeKind kind;
     uint32_t id;        // unique node id
-    uint64_t hash;      // structural hash for CSE
+    uint64_t hash;      // structural hash — drives CSE deduplication
 
     // Constant
     double constVal = 0;
@@ -48,7 +53,7 @@ public:
     // BinaryOp / UnaryOp
     char op = 0;
 
-    // Operands (children in DAG)
+    // Operands (children in DAG) — for BinaryOp: [lhs, rhs]; for MemberAccess: [base]
     std::vector<DAGNode*> operands;
 
     // Source location for debugging

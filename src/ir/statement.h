@@ -7,6 +7,8 @@
 namespace cse {
 
 // ===== Structured IR Statements =====
+// Control flow is represented structurally (nested), not as a CFG.
+// Expressions within statements are DAGNode* (shared via CSE).
 
 enum class StmtIRKind {
     ExprStmt,

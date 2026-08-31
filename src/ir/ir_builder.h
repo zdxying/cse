@@ -5,7 +5,9 @@
 
 namespace cse {
 
-// AST → IR transformation
+// AST → IR transformation.
+// Converts frontend AST (Expr/Stmt) into DAG-based IR (DAGNode/StmtIR).
+// This is the bridge between frontend and IR — the only file that depends on both.
 class IRBuilder {
 public:
     explicit IRBuilder(IRModule* module);

@@ -5,7 +5,9 @@ namespace cse {
 
 class IRModule;
 
-// Base class for all optimization passes
+// Base class for all optimization passes.
+// Passes operate on IRModule (DAG nodes + structured statements).
+// Pipeline: CSE → AlgebraicSimplify → ExprRecombine (optional).
 class Pass {
 public:
     virtual ~Pass() = default;
