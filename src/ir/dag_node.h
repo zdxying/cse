@@ -35,8 +35,7 @@ struct NodeEqual {
     bool operator()(const DAGNode* a, const DAGNode* b) const;
 };
 
-class DAGNode {
-public:
+struct DAGNode {
     DAGNode(NodeKind k, uint32_t id);
 
     NodeKind kind;

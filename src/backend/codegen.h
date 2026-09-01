@@ -32,7 +32,7 @@ private:
     std::string emitExpr(DAGNode* node);
     std::string makeIndent(int level) const;
 
-    std::ostringstream out_;
+    std::ostringstream _out;
 };
 
 } // namespace cse

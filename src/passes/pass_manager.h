@@ -19,10 +19,10 @@ public:
     // enableRecombine: whether to enable expression recombination
     static PassManager createDefault(bool enableRecombine = false);
 
-    size_t passCount() const { return passes_.size(); }
+    size_t passCount() const { return _passes.size(); }
 
 private:
-    std::vector<std::unique_ptr<Pass>> passes_;
+    std::vector<std::unique_ptr<Pass>> _passes;
 };
 
 } // namespace cse

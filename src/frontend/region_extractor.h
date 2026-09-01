@@ -15,8 +15,7 @@ struct CSERegion {
     std::string code;  // the code to optimize
 };
 
-class RegionExtractor {
-public:
+struct RegionExtractor {
     std::vector<CSERegion> extract(const std::string& source) const;
 };
 

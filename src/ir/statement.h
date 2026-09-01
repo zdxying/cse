@@ -20,37 +20,32 @@ enum class StmtIRKind {
     Return,
 };
 
-class StmtIR {
-public:
+struct StmtIR {
     explicit StmtIR(StmtIRKind k) : kind(k) {}
     virtual ~StmtIR() = default;
 
     StmtIRKind kind;
 };
 
-class ExprStmtIR : public StmtIR {
-public:
+struct ExprStmtIR : StmtIR {
     ExprStmtIR() : StmtIR(StmtIRKind::ExprStmt) {}
     DAGNode* expr = nullptr;
 };
 
-class AssignIR : public StmtIR {
-public:
+struct AssignIR : StmtIR {
     AssignIR() : StmtIR(StmtIRKind::Assign) {}
     std::string target;
     DAGNode* value = nullptr;
 };
 
-class VarDeclIR : public StmtIR {
-public:
+struct VarDeclIR : StmtIR {
     VarDeclIR() : StmtIR(StmtIRKind::VarDecl) {}
     std::string type;
     std::string name;
     DAGNode* init = nullptr;
 };
 
-class ForLoopIR : public StmtIR {
-public:
+struct ForLoopIR : StmtIR {
     ForLoopIR() : StmtIR(StmtIRKind::ForLoop) {}
     std::unique_ptr<StmtIR> init;
     DAGNode* cond = nullptr;
@@ -61,22 +56,19 @@ public:
     DAGNode* updateRhs = nullptr;
 };
 
-class IfElseIR : public StmtIR {
-public:
+struct IfElseIR : StmtIR {
     IfElseIR() : StmtIR(StmtIRKind::IfElse) {}
     DAGNode* cond = nullptr;
     std::unique_ptr<StmtIR> thenBranch;
     std::unique_ptr<StmtIR> elseBranch;
 };
 
-class BlockIR : public StmtIR {
-public:
+struct BlockIR : StmtIR {
     BlockIR() : StmtIR(StmtIRKind::Block) {}
     std::vector<std::unique_ptr<StmtIR>> stmts;
 };
 
-class ReturnIR : public StmtIR {
-public:
+struct ReturnIR : StmtIR {
     ReturnIR() : StmtIR(StmtIRKind::Return) {}
     DAGNode* value = nullptr;
 };

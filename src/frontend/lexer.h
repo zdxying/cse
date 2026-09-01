@@ -29,10 +29,10 @@ private:
 
     Token makeToken(TokenType type, const std::string& text = "");
 
-    const std::string& src_;
-    size_t pos_ = 0;
-    size_t line_ = 1;
-    size_t col_ = 1;
+    const std::string& _src;
+    size_t _pos = 0;
+    size_t _line = 1;
+    size_t _col = 1;
 };
 
 } // namespace cse

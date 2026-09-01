@@ -7,11 +7,11 @@
 namespace cse {
 
 void PassManager::addPass(std::unique_ptr<Pass> pass) {
-    passes_.push_back(std::move(pass));
+    _passes.push_back(std::move(pass));
 }
 
 void PassManager::runAll(IRModule& module) {
-    for (auto& pass : passes_) {
+    for (auto& pass : _passes) {
         pass->run(module);
     }
 }

@@ -4,14 +4,14 @@
 
 namespace cse {
 
-Parser::Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
+Parser::Parser(const std::vector<Token>& tokens) : _tokens(tokens) {}
 
 Token Parser::peek() const {
-    return tokens_[pos_];
+    return _tokens[_pos];
 }
 
 Token Parser::advance() {
-    return tokens_[pos_++];
+    return _tokens[_pos++];
 }
 
 bool Parser::check(TokenType type) const {
@@ -193,7 +193,7 @@ std::unique_ptr<Expr> Parser::parseUnary() {
     }
     // Cast: (type)expr
     if (check(TokenType::LParen)) {
-        size_t saved = pos_;
+        size_t saved = _pos;
         advance(); // (
         if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float)) {
             auto typeTok = advance();
@@ -205,7 +205,7 @@ std::unique_ptr<Expr> Parser::parseUnary() {
                 return expr;
             }
         }
-        pos_ = saved; // backtrack
+        _pos = saved; // backtrack
     }
     return parsePostfix();
 }
@@ -456,29 +456,29 @@ Parser::ParseResult Parser::parseAll() {
         if (isTypeKeyword()) {
             isFuncStart = true;
         } else if (check(TokenType::Identifier) &&
-                   pos_ + 1 < tokens_.size() &&
-                   tokens_[pos_ + 1].type == TokenType::Identifier) {
+                   _pos + 1 < _tokens.size() &&
+                   _tokens[_pos + 1].type == TokenType::Identifier) {
             isFuncStart = true;
         }
 
         if (isFuncStart) {
             // Look ahead to find identifier then LParen
-            size_t ahead = pos_;
+            size_t ahead = _pos;
             // Skip type tokens (including pointers)
-            while (ahead < tokens_.size() &&
-                   (tokens_[ahead].type == TokenType::Star ||
-                    tokens_[ahead].type == TokenType::Identifier ||
-                    (tokens_[ahead].type == TokenType::Int) ||
-                    (tokens_[ahead].type == TokenType::Double) ||
-                    (tokens_[ahead].type == TokenType::Float) ||
-                    (tokens_[ahead].type == TokenType::Void))) {
+            while (ahead < _tokens.size() &&
+                   (_tokens[ahead].type == TokenType::Star ||
+                    _tokens[ahead].type == TokenType::Identifier ||
+                    (_tokens[ahead].type == TokenType::Int) ||
+                    (_tokens[ahead].type == TokenType::Double) ||
+                    (_tokens[ahead].type == TokenType::Float) ||
+                    (_tokens[ahead].type == TokenType::Void))) {
                 ahead++;
             }
             // Check if we have: type [*...] name (
             if (ahead >= 2 &&
-                ahead < tokens_.size() &&
-                tokens_[ahead - 1].type == TokenType::Identifier &&
-                tokens_[ahead].type == TokenType::LParen) {
+                ahead < _tokens.size() &&
+                _tokens[ahead - 1].type == TokenType::Identifier &&
+                _tokens[ahead].type == TokenType::LParen) {
                 result.functions.push_back(parseFunction());
                 continue;
             }

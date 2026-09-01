@@ -93,9 +93,9 @@ bool NodeEqual::operator()(const DAGNode* a, const DAGNode* b) const {
 // ===== IRModule =====
 
 DAGNode* IRModule::createNode(NodeKind kind) {
-    auto node = std::make_unique<DAGNode>(kind, nextNodeId_++);
+    auto node = std::make_unique<DAGNode>(kind, _next_node_id++);
     DAGNode* ptr = node.get();
-    nodePool.push_back(std::move(node));
+    _node_pool.push_back(std::move(node));
     return ptr;
 }
 
@@ -108,13 +108,13 @@ DAGNode* IRModule::createConst(double val, const std::string& text) {
 }
 
 DAGNode* IRModule::getVar(const std::string& name) {
-    auto it = varCache_.find(name);
-    if (it != varCache_.end()) return it->second;
+    auto it = _var_cache.find(name);
+    if (it != _var_cache.end()) return it->second;
 
     auto node = createNode(NodeKind::Variable);
     node->name = name;
     node->recomputeHash();
-    varCache_[name] = node;
+    _var_cache[name] = node;
     return node;
 }
 
@@ -166,8 +166,8 @@ DAGNode* IRModule::createCall(DAGNode* callee, const std::vector<DAGNode*>& args
 }
 
 DAGNode* IRModule::findExistingNode(DAGNode* candidate) {
-    auto it = hashMap_.find(candidate->hash);
-    if (it != hashMap_.end()) {
+    auto it = _hash_map.find(candidate->hash);
+    if (it != _hash_map.end()) {
         DAGNode* existing = it->second;
         // Verify structural equality (hash collision check)
         NodeEqual eq;
@@ -179,7 +179,7 @@ DAGNode* IRModule::findExistingNode(DAGNode* candidate) {
         }
     }
     // New unique node, add to hash map
-    hashMap_[candidate->hash] = candidate;
+    _hash_map[candidate->hash] = candidate;
     return candidate;
 }
 

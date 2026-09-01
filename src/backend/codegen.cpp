@@ -31,64 +31,64 @@ static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
 std::string CodeGen::generate(IRModule& module,
                                const std::vector<StructDef*>& structDefs,
                                const std::vector<OptimizedStruct>& optStructs) {
-    out_.str("");
-    out_.clear();
+    _out.str("");
+    _out.clear();
 
     // Emit structs without methods (pure data structs)
     for (auto* sd : structDefs) {
-        out_ << "struct " << sd->name << " {\n";
+        _out << "struct " << sd->name << " {\n";
         for (auto& field : sd->fields) {
-            out_ << "    " << field.type << " " << field.name << ";\n";
+            _out << "    " << field.type << " " << field.name << ";\n";
         }
-        out_ << "};\n\n";
+        _out << "};\n\n";
     }
 
     // Emit structs with optimized methods (inline definitions)
     for (auto& os : optStructs) {
         auto* sd = os.def;
-        out_ << "struct " << sd->name << " {\n";
+        _out << "struct " << sd->name << " {\n";
         for (auto& field : sd->fields) {
-            out_ << "    " << field.type << " " << field.name << ";\n";
+            _out << "    " << field.type << " " << field.name << ";\n";
         }
         // Emit optimized method bodies inline
         for (size_t i = 0; i < sd->methods.size(); i++) {
             if (i < os.methodModules.size() && os.methodModules[i]) {
                 auto* methodMod = os.methodModules[i].get();
-                out_ << "    " << methodMod->funcSig.returnType << " "
+                _out << "    " << methodMod->funcSig.returnType << " "
                      << methodMod->funcSig.name << "(";
                 for (size_t j = 0; j < methodMod->funcSig.params.size(); j++) {
-                    if (j > 0) out_ << ", ";
-                    out_ << methodMod->funcSig.params[j].type << " "
+                    if (j > 0) _out << ", ";
+                    _out << methodMod->funcSig.params[j].type << " "
                          << methodMod->funcSig.params[j].name;
                 }
-                out_ << ") {\n";
+                _out << ") {\n";
                 if (methodMod->body) {
                     emitStmt(methodMod->body.get(), 1);
                 }
-                out_ << "    }\n";
+                _out << "    }\n";
             }
         }
-        out_ << "};\n\n";
+        _out << "};\n\n";
     }
 
     // Skip main function if funcSig is empty
     if (module.funcSig.name.empty()) {
-        return out_.str();
+        return _out.str();
     }
 
-    out_ << module.funcSig.returnType << " " << module.funcSig.name << "(";
+    _out << module.funcSig.returnType << " " << module.funcSig.name << "(";
     for (size_t i = 0; i < module.funcSig.params.size(); i++) {
-        if (i > 0) out_ << ", ";
-        out_ << module.funcSig.params[i].type << " " << module.funcSig.params[i].name;
+        if (i > 0) _out << ", ";
+        _out << module.funcSig.params[i].type << " " << module.funcSig.params[i].name;
     }
-    out_ << ") {\n";
+    _out << ") {\n";
 
     if (module.body) {
         emitStmt(module.body.get(), 1);
     }
 
-    out_ << "}\n";
-    return out_.str();
+    _out << "}\n";
+    return _out.str();
 }
 
 void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
@@ -105,77 +105,77 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
         }
         case StmtIRKind::ForLoop: {
             auto* forLoop = static_cast<ForLoopIR*>(stmt);
-            out_ << ind << "for (";
+            _out << ind << "for (";
             if (forLoop->init) {
                 if (forLoop->init->kind == StmtIRKind::VarDecl) {
                     auto* decl = static_cast<VarDeclIR*>(forLoop->init.get());
-                    out_ << decl->type << " " << decl->name;
-                    if (decl->init) out_ << " = " << emitExpr(decl->init);
+                    _out << decl->type << " " << decl->name;
+                    if (decl->init) _out << " = " << emitExpr(decl->init);
                 }
             }
-            out_ << "; ";
-            if (forLoop->cond) out_ << emitExpr(forLoop->cond);
-            out_ << "; ";
+            _out << "; ";
+            if (forLoop->cond) _out << emitExpr(forLoop->cond);
+            _out << "; ";
             if (forLoop->update) {
-                out_ << emitExpr(forLoop->update);
+                _out << emitExpr(forLoop->update);
                 if (forLoop->updateOp == '=' && forLoop->updateRhs) {
-                    out_ << " = " << emitExpr(forLoop->updateRhs);
+                    _out << " = " << emitExpr(forLoop->updateRhs);
                 } else if (forLoop->updateOp == '+' && forLoop->updateRhs) {
-                    out_ << " += " << emitExpr(forLoop->updateRhs);
+                    _out << " += " << emitExpr(forLoop->updateRhs);
                 } else if (forLoop->updateOp == '-' && forLoop->updateRhs) {
-                    out_ << " -= " << emitExpr(forLoop->updateRhs);
+                    _out << " -= " << emitExpr(forLoop->updateRhs);
                 } else if (forLoop->updateOp == '*' && forLoop->updateRhs) {
-                    out_ << " *= " << emitExpr(forLoop->updateRhs);
+                    _out << " *= " << emitExpr(forLoop->updateRhs);
                 } else if (forLoop->updateOp == '/' && forLoop->updateRhs) {
-                    out_ << " /= " << emitExpr(forLoop->updateRhs);
+                    _out << " /= " << emitExpr(forLoop->updateRhs);
                 } else if (forLoop->updateOp == '+') {
-                    out_ << "++";
+                    _out << "++";
                 } else if (forLoop->updateOp == '-') {
-                    out_ << "--";
+                    _out << "--";
                 }
             }
-            out_ << ") {\n";
+            _out << ") {\n";
             emitStmt(forLoop->body.get(), indentLevel + 1);
-            out_ << ind << "}\n";
+            _out << ind << "}\n";
             break;
         }
         case StmtIRKind::IfElse: {
             auto* ifElse = static_cast<IfElseIR*>(stmt);
-            out_ << ind << "if (" << emitExpr(ifElse->cond) << ") {\n";
+            _out << ind << "if (" << emitExpr(ifElse->cond) << ") {\n";
             emitStmt(ifElse->thenBranch.get(), indentLevel + 1);
             if (ifElse->elseBranch) {
-                out_ << ind << "} else {\n";
+                _out << ind << "} else {\n";
                 emitStmt(ifElse->elseBranch.get(), indentLevel + 1);
             }
-            out_ << ind << "}\n";
+            _out << ind << "}\n";
             break;
         }
         case StmtIRKind::VarDecl: {
             auto* decl = static_cast<VarDeclIR*>(stmt);
-            out_ << ind << decl->type << " " << decl->name;
+            _out << ind << decl->type << " " << decl->name;
             if (decl->init) {
-                out_ << " = " << emitExpr(decl->init);
+                _out << " = " << emitExpr(decl->init);
             }
-            out_ << ";\n";
+            _out << ";\n";
             break;
         }
         case StmtIRKind::Assign: {
             auto* assign = static_cast<AssignIR*>(stmt);
-            out_ << ind << assign->target << " = " << emitExpr(assign->value) << ";\n";
+            _out << ind << assign->target << " = " << emitExpr(assign->value) << ";\n";
             break;
         }
         case StmtIRKind::ExprStmt: {
             auto* exprStmt = static_cast<ExprStmtIR*>(stmt);
             if (exprStmt->expr) {
-                out_ << ind << emitExpr(exprStmt->expr) << ";\n";
+                _out << ind << emitExpr(exprStmt->expr) << ";\n";
             }
             break;
         }
         case StmtIRKind::Return: {
             auto* ret = static_cast<ReturnIR*>(stmt);
-            out_ << ind << "return";
-            if (ret->value) out_ << " " << emitExpr(ret->value);
-            out_ << ";\n";
+            _out << ind << "return";
+            if (ret->value) _out << " " << emitExpr(ret->value);
+            _out << ";\n";
             break;
         }
     }

@@ -21,14 +21,11 @@ struct FuncSignature {
 };
 
 // IR Module — owns all DAG nodes and holds the function body.
-// Node pool ensures stable pointers; hashMap_ enables CSE deduplication.
-// createBinaryOp/createMemberAccess/etc. check hashMap_ before creating new nodes.
+// Node pool ensures stable pointers; _hash_map enables CSE deduplication.
+// createBinaryOp/createMemberAccess/etc. check _hash_map before creating new nodes.
 class IRModule {
 public:
     IRModule() = default;
-
-    // Node pool - owns all DAG nodes
-    std::vector<std::unique_ptr<DAGNode>> nodePool;
 
     // Function being processed
     FuncSignature funcSig;
@@ -75,19 +72,22 @@ public:
     DAGNode* findExistingNode(DAGNode* candidate);
 
     // Get all nodes (for iteration)
-    const std::vector<std::unique_ptr<DAGNode>>& getNodes() const { return nodePool; }
+    const std::vector<std::unique_ptr<DAGNode>>& getNodes() const { return _node_pool; }
 
     // Get or create variable
     DAGNode* getVar(const std::string& name);
 
 private:
+    // Node pool - owns all DAG nodes
+    std::vector<std::unique_ptr<DAGNode>> _node_pool;
+
     // Hash map for CSE: hash → node (first node with that hash)
-    std::unordered_map<uint64_t, DAGNode*> hashMap_;
+    std::unordered_map<uint64_t, DAGNode*> _hash_map;
 
     // Variable cache: name → node
-    std::unordered_map<std::string, DAGNode*> varCache_;
+    std::unordered_map<std::string, DAGNode*> _var_cache;
 
-    uint32_t nextNodeId_ = 0;
+    uint32_t _next_node_id = 0;
 };
 
 } // namespace cse

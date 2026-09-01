@@ -4,15 +4,15 @@
 
 namespace cse {
 
-IRBuilder::IRBuilder(IRModule* module) : module_(module) {}
+IRBuilder::IRBuilder(IRModule* module) : _module(module) {}
 
 void IRBuilder::buildFunction(const FunctionDef& func) {
-    module_->funcSig.returnType = func.returnType;
-    module_->funcSig.name = func.name;
+    _module->funcSig.returnType = func.returnType;
+    _module->funcSig.name = func.name;
     for (const auto& p : func.params) {
-        module_->funcSig.params.push_back({p.type, p.name});
+        _module->funcSig.params.push_back({p.type, p.name});
     }
-    module_->body = buildStmt(*func.body);
+    _module->body = buildStmt(*func.body);
 }
 
 std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
@@ -61,7 +61,7 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
             decl->name = stmt.varName;
             if (stmt.init) decl->init = buildExpr(*stmt.init);
             // Register variable in module
-            module_->getVar(stmt.varName);
+            _module->getVar(stmt.varName);
             return decl;
         }
         case StmtKind::Return: {
@@ -87,10 +87,10 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
 DAGNode* IRBuilder::buildExpr(const Expr& expr) {
     switch (expr.kind) {
         case ExprKind::Number:
-            return module_->createConst(expr.numVal, expr.numText);
+            return _module->createConst(expr.numVal, expr.numText);
 
         case ExprKind::Variable:
-            return module_->getVar(expr.name);
+            return _module->getVar(expr.name);
 
         case ExprKind::BinaryOp:
             return buildBinaryOp(expr);
@@ -103,12 +103,12 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
 
         case ExprKind::MemberAccess: {
             DAGNode* base = buildExpr(*expr.base);
-            return module_->createMemberAccess(base, expr.memberName);
+            return _module->createMemberAccess(base, expr.memberName);
         }
 
         case ExprKind::ArrowAccess: {
             DAGNode* base = buildExpr(*expr.base);
-            return module_->createArrowAccess(base, expr.memberName);
+            return _module->createArrowAccess(base, expr.memberName);
         }
 
         case ExprKind::Call:
@@ -118,27 +118,27 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
             DAGNode* cond = buildExpr(*expr.cond);
             DAGNode* trueExpr = buildExpr(*expr.trueExpr);
             DAGNode* falseExpr = buildExpr(*expr.falseExpr);
-            auto node = module_->createNode(NodeKind::Ternary);
+            auto node = _module->createNode(NodeKind::Ternary);
             node->op = '?';
             node->operands = {cond, trueExpr, falseExpr};
-            return module_->findExistingNode(node);
+            return _module->findExistingNode(node);
         }
 
         case ExprKind::Cast: {
             DAGNode* operand = buildExpr(*expr.operand);
-            auto node = module_->createNode(NodeKind::Cast);
+            auto node = _module->createNode(NodeKind::Cast);
             node->name = expr.castType;
             node->operands = {operand};
-            return module_->findExistingNode(node);
+            return _module->findExistingNode(node);
         }
 
         case ExprKind::PostfixOp: {
             DAGNode* operand = buildExpr(*expr.operand);
-            auto node = module_->createNode(NodeKind::UnaryOp);
+            auto node = _module->createNode(NodeKind::UnaryOp);
             node->op = expr.op;
             node->operands = {operand};
             node->name = "postfix";
-            return module_->findExistingNode(node);
+            return _module->findExistingNode(node);
         }
     }
     return nullptr;
@@ -147,12 +147,12 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
 DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
     DAGNode* lhs = buildExpr(*expr.lhs);
     DAGNode* rhs = buildExpr(*expr.rhs);
-    return module_->createBinaryOp(expr.op, lhs, rhs);
+    return _module->createBinaryOp(expr.op, lhs, rhs);
 }
 
 DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
     DAGNode* operand = buildExpr(*expr.operand);
-    return module_->createUnaryOp(expr.op, operand);
+    return _module->createUnaryOp(expr.op, operand);
 }
 
 DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {
@@ -160,7 +160,7 @@ DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {
     DAGNode* result = base;
     for (const auto& idx : expr.indices) {
         DAGNode* index = buildExpr(*idx);
-        result = module_->createArrayAccess(result, index);
+        result = _module->createArrayAccess(result, index);
     }
     return result;
 }
@@ -171,7 +171,7 @@ DAGNode* IRBuilder::buildCall(const Expr& expr) {
     for (const auto& arg : expr.callArgs) {
         args.push_back(buildExpr(*arg));
     }
-    return module_->createCall(callee, args);
+    return _module->createCall(callee, args);
 }
 
 } // namespace cse

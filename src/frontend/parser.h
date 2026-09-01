@@ -65,8 +65,8 @@ private:
     std::vector<FunctionDef::Param> parseParamList(); // (type name, ...)
     std::unique_ptr<StructDef> parseStructDef();      // struct name { members }
 
-    const std::vector<Token>& tokens_;
-    size_t pos_ = 0;
+    const std::vector<Token>& _tokens;
+    size_t _pos = 0;
 };
 
 } // namespace cse

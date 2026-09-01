@@ -31,7 +31,7 @@ private:
     DAGNode* buildArrayAccess(const Expr& expr);
     DAGNode* buildCall(const Expr& expr);
 
-    IRModule* module_;
+    IRModule* _module;
 };
 
 } // namespace cse

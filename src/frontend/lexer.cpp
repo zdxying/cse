@@ -4,13 +4,13 @@
 
 namespace cse {
 
-Lexer::Lexer(const std::string& source) : src_(source) {}
+Lexer::Lexer(const std::string& source) : _src(source) {}
 
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
-    while (pos_ < src_.size()) {
+    while (_pos < _src.size()) {
         skipWhitespace();
-        if (pos_ >= src_.size()) break;
+        if (_pos >= _src.size()) break;
 
         char c = peek();
 
@@ -27,7 +27,7 @@ std::vector<Token> Lexer::tokenize() {
         }
 
         // Number
-        if (std::isdigit(c) || (c == '.' && pos_ + 1 < src_.size() && std::isdigit(src_[pos_ + 1]))) {
+        if (std::isdigit(c) || (c == '.' && _pos + 1 < _src.size() && std::isdigit(_src[_pos + 1]))) {
             tokens.push_back(readNumber());
             continue;
         }
@@ -45,49 +45,49 @@ std::vector<Token> Lexer::tokenize() {
         }
 
         // Operators and punctuation
-        pos_++;
+        _pos++;
         switch (c) {
             case '+':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::PlusAssign, "+=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::PlusAssign, "+=")); }
                 else tokens.push_back(makeToken(TokenType::Plus, "+"));
                 break;
             case '-':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::MinusAssign, "-=")); }
-                else if (peek() == '>') { pos_++; tokens.push_back(makeToken(TokenType::Arrow, "->")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::MinusAssign, "-=")); }
+                else if (peek() == '>') { _pos++; tokens.push_back(makeToken(TokenType::Arrow, "->")); }
                 else tokens.push_back(makeToken(TokenType::Minus, "-"));
                 break;
             case '*':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::StarAssign, "*=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::StarAssign, "*=")); }
                 else tokens.push_back(makeToken(TokenType::Star, "*"));
                 break;
             case '/':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::SlashAssign, "/=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::SlashAssign, "/=")); }
                 else tokens.push_back(makeToken(TokenType::Slash, "/"));
                 break;
             case '%':
                 tokens.push_back(makeToken(TokenType::Percent, "%"));
                 break;
             case '=':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::Equal, "==")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::Equal, "==")); }
                 else tokens.push_back(makeToken(TokenType::Assign, "="));
                 break;
             case '!':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::NotEqual, "!=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::NotEqual, "!=")); }
                 else tokens.push_back(makeToken(TokenType::Not, "!"));
                 break;
             case '<':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::LessEqual, "<=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::LessEqual, "<=")); }
                 else tokens.push_back(makeToken(TokenType::Less, "<"));
                 break;
             case '>':
-                if (peek() == '=') { pos_++; tokens.push_back(makeToken(TokenType::GreaterEqual, ">=")); }
+                if (peek() == '=') { _pos++; tokens.push_back(makeToken(TokenType::GreaterEqual, ">=")); }
                 else tokens.push_back(makeToken(TokenType::Greater, ">"));
                 break;
             case '&':
-                if (peek() == '&') { pos_++; tokens.push_back(makeToken(TokenType::And, "&&")); }
+                if (peek() == '&') { _pos++; tokens.push_back(makeToken(TokenType::And, "&&")); }
                 break;
             case '|':
-                if (peek() == '|') { pos_++; tokens.push_back(makeToken(TokenType::Or, "||")); }
+                if (peek() == '|') { _pos++; tokens.push_back(makeToken(TokenType::Or, "||")); }
                 break;
             case '?': tokens.push_back(makeToken(TokenType::Question, "?")); break;
             case ':': tokens.push_back(makeToken(TokenType::Colon, ":")); break;
@@ -110,22 +110,22 @@ std::vector<Token> Lexer::tokenize() {
 }
 
 char Lexer::peek() const {
-    return pos_ < src_.size() ? src_[pos_] : '\0';
+    return _pos < _src.size() ? _src[_pos] : '\0';
 }
 
 char Lexer::peek2() const {
-    return (pos_ + 1) < src_.size() ? src_[pos_ + 1] : '\0';
+    return (_pos + 1) < _src.size() ? _src[_pos + 1] : '\0';
 }
 
 char Lexer::advance() {
-    char c = src_[pos_++];
-    if (c == '\n') { line_++; col_ = 1; }
-    else col_++;
+    char c = _src[_pos++];
+    if (c == '\n') { _line++; _col = 1; }
+    else _col++;
     return c;
 }
 
 void Lexer::skipWhitespace() {
-    while (pos_ < src_.size()) {
+    while (_pos < _src.size()) {
         char c = peek();
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             advance();
@@ -140,37 +140,37 @@ void Lexer::skipWhitespace() {
 }
 
 void Lexer::skipLineComment() {
-    while (pos_ < src_.size() && peek() != '\n') advance();
+    while (_pos < _src.size() && peek() != '\n') advance();
 }
 
 void Lexer::skipBlockComment() {
     advance(); advance(); // skip /*
-    while (pos_ < src_.size()) {
+    while (_pos < _src.size()) {
         if (peek() == '*' && peek2() == '/') { advance(); advance(); return; }
         advance();
     }
 }
 
 Token Lexer::readNumber() {
-    size_t start = pos_;
-    size_t startCol = col_;
-    while (pos_ < src_.size() && (std::isdigit(peek()) || peek() == '.')) advance();
-    std::string text = src_.substr(start, pos_ - start);
+    size_t start = _pos;
+    size_t startCol = _col;
+    while (_pos < _src.size() && (std::isdigit(peek()) || peek() == '.')) advance();
+    std::string text = _src.substr(start, _pos - start);
     double val = std::stod(text);
     Token tok;
     tok.type = TokenType::Number;
     tok.text = text;
     tok.numVal = val;  // We'll store in a separate field
-    tok.line = line_;
+    tok.line = _line;
     tok.col = startCol;
     return tok;
 }
 
 Token Lexer::readIdentifier() {
-    size_t start = pos_;
-    size_t startCol = col_;
-    while (pos_ < src_.size() && (std::isalnum(peek()) || peek() == '_')) advance();
-    std::string text = src_.substr(start, pos_ - start);
+    size_t start = _pos;
+    size_t startCol = _col;
+    while (_pos < _src.size() && (std::isalnum(peek()) || peek() == '_')) advance();
+    std::string text = _src.substr(start, _pos - start);
 
     TokenType type = TokenType::Identifier;
     if (text == "for") type = TokenType::For;
@@ -186,24 +186,24 @@ Token Lexer::readIdentifier() {
     Token tok;
     tok.type = type;
     tok.text = text;
-    tok.line = line_;
+    tok.line = _line;
     tok.col = startCol;
     return tok;
 }
 
 Token Lexer::readString() {
-    size_t startCol = col_;
+    size_t startCol = _col;
     advance(); // skip opening "
     std::string text;
-    while (pos_ < src_.size() && peek() != '"') {
+    while (_pos < _src.size() && peek() != '"') {
         if (peek() == '\\') { advance(); text += advance(); }
         else text += advance();
     }
-    if (pos_ < src_.size()) advance(); // skip closing "
+    if (_pos < _src.size()) advance(); // skip closing "
     Token tok;
     tok.type = TokenType::String;
     tok.text = text;
-    tok.line = line_;
+    tok.line = _line;
     tok.col = startCol;
     return tok;
 }
@@ -212,8 +212,8 @@ Token Lexer::makeToken(TokenType type, const std::string& text) {
     Token tok;
     tok.type = type;
     tok.text = text;
-    tok.line = line_;
-    tok.col = col_ - text.size();
+    tok.line = _line;
+    tok.col = _col - text.size();
     return tok;
 }
 
