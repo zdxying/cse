@@ -1,6 +1,7 @@
 #pragma once
-#include "pass.h"
 #include <memory>
+
+#include "pass.h"
 
 namespace cse {
 
@@ -10,13 +11,13 @@ namespace cse {
 //   - Identity elimination: a * 1 → a, a + 0 → a
 //   - Zero folding: a * 0 → 0
 class AlgebraicSimplifyPass : public Pass {
-public:
-    std::string name() const override { return "AlgebraicSimplify"; }
-    void run(IRModule& module) override;
+ public:
+  std::string name() const override { return "AlgebraicSimplify"; }
+  void run(IRModule& module) override;
 };
 
 inline std::unique_ptr<Pass> createAlgebraicSimplifyPass() {
-    return std::make_unique<AlgebraicSimplifyPass>();
+  return std::make_unique<AlgebraicSimplifyPass>();
 }
 
-} // namespace cse
+}  // namespace cse

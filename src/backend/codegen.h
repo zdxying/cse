@@ -1,10 +1,10 @@
 #pragma once
-#include <string>
-#include <sstream>
-#include <vector>
-#include <memory>
-#include <unordered_set>
 #include <cstdint>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace cse {
 
@@ -15,24 +15,23 @@ struct StructDef;
 
 // Holds optimized IRModules for struct methods (one per method).
 struct OptimizedStruct {
-    const StructDef* def;
-    std::vector<std::unique_ptr<IRModule>> methodModules;
+  const StructDef* def;
+  std::vector<std::unique_ptr<IRModule>> methodModules;
 };
 
 // Backend: converts optimized IR back to C++ source text.
 // Handles operator precedence for parentheses and emits struct definitions.
 class CodeGen {
-public:
-    std::string generate(IRModule& module,
-                         const std::vector<StructDef*>& structDefs = {},
-                         const std::vector<OptimizedStruct>& optStructs = {});
+ public:
+  std::string generate(IRModule& module, const std::vector<StructDef*>& structDefs = {},
+    const std::vector<OptimizedStruct>& optStructs = {});
 
-private:
-    void emitStmt(StmtIR* stmt, int indentLevel);
-    std::string emitExpr(DAGNode* node);
-    std::string makeIndent(int level) const;
+ private:
+  void emitStmt(StmtIR* stmt, int indentLevel);
+  std::string emitExpr(DAGNode* node);
+  std::string makeIndent(int level) const;
 
-    std::ostringstream _out;
+  std::ostringstream _out;
 };
 
-} // namespace cse
+}  // namespace cse

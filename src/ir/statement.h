@@ -1,8 +1,9 @@
 #pragma once
-#include "dag_node.h"
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "dag_node.h"
 
 namespace cse {
 
@@ -11,66 +12,66 @@ namespace cse {
 // Expressions within statements are DAGNode* (shared via CSE).
 
 enum class StmtIRKind {
-    ExprStmt,
-    Assign,
-    VarDecl,
-    ForLoop,
-    IfElse,
-    Block,
-    Return,
+  ExprStmt,
+  Assign,
+  VarDecl,
+  ForLoop,
+  IfElse,
+  Block,
+  Return,
 };
 
 struct StmtIR {
-    explicit StmtIR(StmtIRKind k) : kind(k) {}
-    virtual ~StmtIR() = default;
+  explicit StmtIR(StmtIRKind k) : kind(k) {}
+  virtual ~StmtIR() = default;
 
-    StmtIRKind kind;
+  StmtIRKind kind;
 };
 
 struct ExprStmtIR : StmtIR {
-    ExprStmtIR() : StmtIR(StmtIRKind::ExprStmt) {}
-    DAGNode* expr = nullptr;
+  ExprStmtIR() : StmtIR(StmtIRKind::ExprStmt) {}
+  DAGNode* expr = nullptr;
 };
 
 struct AssignIR : StmtIR {
-    AssignIR() : StmtIR(StmtIRKind::Assign) {}
-    std::string target;
-    DAGNode* value = nullptr;
+  AssignIR() : StmtIR(StmtIRKind::Assign) {}
+  std::string target;
+  DAGNode* value = nullptr;
 };
 
 struct VarDeclIR : StmtIR {
-    VarDeclIR() : StmtIR(StmtIRKind::VarDecl) {}
-    std::string type;
-    std::string name;
-    DAGNode* init = nullptr;
+  VarDeclIR() : StmtIR(StmtIRKind::VarDecl) {}
+  std::string type;
+  std::string name;
+  DAGNode* init = nullptr;
 };
 
 struct ForLoopIR : StmtIR {
-    ForLoopIR() : StmtIR(StmtIRKind::ForLoop) {}
-    std::unique_ptr<StmtIR> init;
-    DAGNode* cond = nullptr;
-    DAGNode* update = nullptr;
-    std::unique_ptr<StmtIR> body;
-    // Operator for update: '++', '--', '+', '-', '*', '/'
-    char updateOp = 0;
-    DAGNode* updateRhs = nullptr;
+  ForLoopIR() : StmtIR(StmtIRKind::ForLoop) {}
+  std::unique_ptr<StmtIR> init;
+  DAGNode* cond = nullptr;
+  DAGNode* update = nullptr;
+  std::unique_ptr<StmtIR> body;
+  // Operator for update: '++', '--', '+', '-', '*', '/'
+  char updateOp = 0;
+  DAGNode* updateRhs = nullptr;
 };
 
 struct IfElseIR : StmtIR {
-    IfElseIR() : StmtIR(StmtIRKind::IfElse) {}
-    DAGNode* cond = nullptr;
-    std::unique_ptr<StmtIR> thenBranch;
-    std::unique_ptr<StmtIR> elseBranch;
+  IfElseIR() : StmtIR(StmtIRKind::IfElse) {}
+  DAGNode* cond = nullptr;
+  std::unique_ptr<StmtIR> thenBranch;
+  std::unique_ptr<StmtIR> elseBranch;
 };
 
 struct BlockIR : StmtIR {
-    BlockIR() : StmtIR(StmtIRKind::Block) {}
-    std::vector<std::unique_ptr<StmtIR>> stmts;
+  BlockIR() : StmtIR(StmtIRKind::Block) {}
+  std::vector<std::unique_ptr<StmtIR>> stmts;
 };
 
 struct ReturnIR : StmtIR {
-    ReturnIR() : StmtIR(StmtIRKind::Return) {}
-    DAGNode* value = nullptr;
+  ReturnIR() : StmtIR(StmtIRKind::Return) {}
+  DAGNode* value = nullptr;
 };
 
-} // namespace cse
+}  // namespace cse
