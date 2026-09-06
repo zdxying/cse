@@ -74,10 +74,10 @@ static std::string optimizeRegion(const std::string& code, bool enableRecombine)
     // Generate code (emit struct defs only before first function)
     cse::CodeGen codegen;
     if (emitStructs) {
-      optimized += codegen.generate(module, structPtrs, optStructs);
+      optimized += codegen.generate(module, structPtrs, optStructs, func->templateParams);
       emitStructs = false;
     } else {
-      optimized += codegen.generate(module);
+      optimized += codegen.generate(module, {}, {}, func->templateParams);
     }
   }
 

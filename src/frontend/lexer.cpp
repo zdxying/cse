@@ -254,6 +254,8 @@ Token Lexer::readIdentifier() {
     type = TokenType::Void;
   else if (text == "struct")
     type = TokenType::Struct;
+  else if (text == "template")
+    type = TokenType::Template;
 
   Token tok;
   tok.type = type;

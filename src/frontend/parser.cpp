@@ -51,6 +51,29 @@ std::string Parser::parseType() {
   } else {
     type = advance().text;  // custom type name
   }
+  // Handle template arguments: vector<T>, map<string, int>, etc.
+  if (check(TokenType::Less)) {
+    size_t saved = _pos;
+    advance();  // consume <
+    type += "<";
+    int depth = 1;
+    while (!check(TokenType::Eof) && depth > 0) {
+      if (check(TokenType::Less)) depth++;
+      if (check(TokenType::Greater)) depth--;
+      if (depth > 0) {
+        type += advance().text;
+        if (!check(TokenType::Eof) && depth > 0) type += " ";
+      }
+    }
+    if (depth == 0) {
+      advance();  // consume >
+      type += ">";
+    } else {
+      // Not a valid template argument list, backtrack
+      _pos = saved;
+      type = type.substr(0, type.find('<'));
+    }
+  }
   // Handle pointer types: double*, int*, etc.
   while (match(TokenType::Star)) {
     type += "*";
@@ -280,6 +303,12 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
       check(TokenType::Struct)) {
     return parseVarDecl();
   }
+  // Handle identifier as type: T x, MyStruct s, etc.
+  // Heuristic: if we see Identifier followed by Identifier, treat as var decl
+  if (check(TokenType::Identifier) && _pos + 1 < _tokens.size() &&
+      _tokens[_pos + 1].type == TokenType::Identifier) {
+    return parseVarDecl();
+  }
   return parseExprStmt();
 }
 
@@ -391,9 +420,48 @@ std::vector<FunctionDef::Param> Parser::parseParamList() {
   return params;
 }
 
+std::vector<TemplateParam> Parser::parseTemplateParams() {
+  std::vector<TemplateParam> params;
+  expect(TokenType::Less);
+  do {
+    TemplateParam tp;
+    if (check(TokenType::Identifier) &&
+        (peek().text == "typename" || peek().text == "class")) {
+      // typename/class T
+      tp.isType = true;
+      tp.paramType = advance().text;
+      tp.paramName = expect(TokenType::Identifier).text;
+    } else if (isTypeKeyword() || check(TokenType::Identifier)) {
+      // non-type: int N, size_t N, etc.
+      tp.isType = false;
+      tp.paramType = parseType();
+      tp.paramName = expect(TokenType::Identifier).text;
+      if (match(TokenType::Assign)) {
+        // default value: read until comma or >
+        while (!check(TokenType::Greater) && !check(TokenType::Comma) && !check(TokenType::Eof)) {
+          tp.defaultVal += advance().text;
+        }
+      }
+    } else {
+      tp.isType = true;
+      tp.paramType = "typename";
+      tp.paramName = expect(TokenType::Identifier).text;
+    }
+    params.push_back(std::move(tp));
+  } while (match(TokenType::Comma));
+  expect(TokenType::Greater);
+  return params;
+}
+
 std::unique_ptr<FunctionDef> Parser::parseFunction() {
   auto func = std::make_unique<FunctionDef>();
   func->loc = currentLoc();
+
+  // Handle template prefix
+  if (check(TokenType::Template)) {
+    advance();  // consume 'template'
+    func->templateParams = parseTemplateParams();
+  }
 
   func->returnType = parseType();
   func->name = expect(TokenType::Identifier).text;
@@ -405,10 +473,19 @@ std::unique_ptr<FunctionDef> Parser::parseFunction() {
 
 std::unique_ptr<StructDef> Parser::parseStructDef() {
   auto loc = currentLoc();
+
+  // Handle template prefix
+  std::vector<TemplateParam> templateParams;
+  if (check(TokenType::Template)) {
+    advance();  // consume 'template'
+    templateParams = parseTemplateParams();
+  }
+
   expect(TokenType::Struct);
   auto def = std::make_unique<StructDef>();
   def->name = expect(TokenType::Identifier).text;
   def->loc = loc;
+  def->templateParams = std::move(templateParams);
   expect(TokenType::LBrace);
   while (!check(TokenType::RBrace) && !check(TokenType::Eof)) {
     auto returnType = parseType();
@@ -442,6 +519,31 @@ Parser::ParseResult Parser::parseAll() {
   ParseResult result;
 
   while (!check(TokenType::Eof)) {
+    // Template prefix for struct or function
+    if (check(TokenType::Template)) {
+      // Look ahead to see if it's template struct or template function
+      // Skip past template<...> to find what follows
+      size_t ahead = _pos + 1;
+      // Skip template parameter list: < ... >
+      if (ahead < _tokens.size() && _tokens[ahead].type == TokenType::Less) {
+        int depth = 1;
+        ahead++;
+        while (ahead < _tokens.size() && depth > 0) {
+          if (_tokens[ahead].type == TokenType::Less) depth++;
+          if (_tokens[ahead].type == TokenType::Greater) depth--;
+          ahead++;
+        }
+      }
+      // Now ahead points to the token after template<...>
+      if (ahead < _tokens.size() && _tokens[ahead].type == TokenType::Struct) {
+        result.structDefs.push_back(parseStructDef());
+        continue;
+      }
+      // Template function: template<typename T> T foo(...)
+      result.functions.push_back(parseFunction());
+      continue;
+    }
+
     // Struct definition
     if (check(TokenType::Struct)) {
       result.structDefs.push_back(parseStructDef());

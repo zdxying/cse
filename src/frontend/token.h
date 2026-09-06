@@ -22,6 +22,7 @@ enum class TokenType {
   Float,
   Void,
   Struct,
+  Template,
 
   // Operators
   Plus,
@@ -98,6 +99,8 @@ inline const char* tokenTypeName(TokenType t) {
       return "Void";
     case TokenType::Struct:
       return "Struct";
+    case TokenType::Template:
+      return "Template";
     case TokenType::Plus:
       return "Plus";
     case TokenType::Minus:

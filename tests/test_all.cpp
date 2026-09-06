@@ -10,14 +10,6 @@ double compute(double a, double x, double y, double result, int n) {
 }
 
 //@cse
-double recombine(double a, double b, double x, double y, int n) {
-    double sum = 0;
-    double t = a * x + a * y;
-    sum = sum + t;
-    return sum;
-}
-
-//@cse
 double conditional(double a, double x, int n) {
     double result = 0;
     double val = a * x;
@@ -35,12 +27,6 @@ void process(double a, double* x, double* y, double* result, int n) {
         double t = a * x[i] + a * y[i];
         result[i] = t * t;
     }
-}
-
-//@cse
-double debug(double a, double x, double y) {
-    double t = a * x + a * y;
-    return t;
 }
 
 //@cse
@@ -98,6 +84,26 @@ struct Point {
 };
 
 //@cse
-double dotPoints(struct Point* a, struct Point* b) {
-    return a->x * b->x + a->y * b->y;
+template<typename T>
+T templateMax(T a, T b) {
+    return a > b ? a : b;
 }
+
+//@cse
+template<typename T, int N>
+T templateDot(T a, T b) {
+    return a * b + a * b;
+}
+
+//@cse
+template<typename T>
+struct TemplateVec {
+    T x;
+    T y;
+    T sum() {
+        return x + y;
+    }
+    T scale(T s) {
+        return s * x + s * y;
+    }
+};

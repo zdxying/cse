@@ -115,6 +115,13 @@ struct Stmt {
 };
 
 // ===== Top-level =====
+struct TemplateParam {
+  bool isType;             // true: typename/class T, false: int N
+  std::string paramName;   // T, N, etc.
+  std::string paramType;   // typename/class for type params, or int/size_t for non-type
+  std::string defaultVal;  // optional default value (empty if none)
+};
+
 struct FunctionDef {
   std::string returnType;
   std::string name;
@@ -124,6 +131,7 @@ struct FunctionDef {
   };
   std::vector<Param> params;
   std::unique_ptr<Stmt> body;
+  std::vector<TemplateParam> templateParams;
   SourceLoc loc;
 };
 
@@ -136,6 +144,7 @@ struct StructDef {
   std::string name;
   std::vector<StructField> fields;
   std::vector<std::unique_ptr<FunctionDef>> methods;
+  std::vector<TemplateParam> templateParams;
   SourceLoc loc;
 };
 

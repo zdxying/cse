@@ -63,8 +63,9 @@ class Parser {
   std::unique_ptr<Stmt> parseReturn();    // return expr;
   std::unique_ptr<Stmt> parseExprStmt();  // expr;
 
-  std::vector<FunctionDef::Param> parseParamList();  // (type name, ...)
-  std::unique_ptr<StructDef> parseStructDef();       // struct name { members }
+  std::vector<FunctionDef::Param> parseParamList();     // (type name, ...)
+  std::vector<TemplateParam> parseTemplateParams();    // <typename T, int N>
+  std::unique_ptr<StructDef> parseStructDef();         // struct name { members }
 
   const std::vector<Token>& _tokens;
   size_t _pos = 0;

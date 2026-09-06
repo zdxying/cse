@@ -9,6 +9,23 @@
 
 namespace cse {
 
+void CodeGen::emitTemplateParams(const std::vector<TemplateParam>& params) {
+  if (params.empty()) return;
+  _out << "template<";
+  for (size_t i = 0; i < params.size(); i++) {
+    if (i > 0) _out << ", ";
+    if (params[i].isType) {
+      _out << params[i].paramType << " " << params[i].paramName;
+    } else {
+      _out << params[i].paramType << " " << params[i].paramName;
+      if (!params[i].defaultVal.empty()) {
+        _out << " = " << params[i].defaultVal;
+      }
+    }
+  }
+  _out << ">\n";
+}
+
 static int getPrecedence(char op) {
   switch (op) {
     case '*':
@@ -37,12 +54,14 @@ static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
 }
 
 std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& structDefs,
-  const std::vector<OptimizedStruct>& optStructs) {
+  const std::vector<OptimizedStruct>& optStructs,
+  const std::vector<TemplateParam>& funcTemplateParams) {
   _out.str("");
   _out.clear();
 
   // Emit structs without methods (pure data structs)
   for (auto* sd : structDefs) {
+    emitTemplateParams(sd->templateParams);
     _out << "struct " << sd->name << " {\n";
     for (auto& field : sd->fields) {
       _out << "    " << field.type << " " << field.name << ";\n";
@@ -53,6 +72,7 @@ std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& s
   // Emit structs with optimized methods (inline definitions)
   for (auto& os : optStructs) {
     auto* sd = os.def;
+    emitTemplateParams(sd->templateParams);
     _out << "struct " << sd->name << " {\n";
     for (auto& field : sd->fields) {
       _out << "    " << field.type << " " << field.name << ";\n";
@@ -83,6 +103,7 @@ std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& s
     return _out.str();
   }
 
+  emitTemplateParams(funcTemplateParams);
   _out << module.funcSig.returnType << " " << module.funcSig.name << "(";
   for (size_t i = 0; i < module.funcSig.params.size(); i++) {
     if (i > 0) _out << ", ";
