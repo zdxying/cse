@@ -477,7 +477,11 @@ Parser::ParseResult Parser::parseAll() {
         continue;
       }
     }
-    advance();  // skip non-function tokens
+    // Unexpected token at top level
+    std::ostringstream oss;
+    oss << "Line " << peek().line << ":" << peek().col << " unexpected token '"
+        << peek().text << "'";
+    throw std::runtime_error(oss.str());
   }
 
   return result;

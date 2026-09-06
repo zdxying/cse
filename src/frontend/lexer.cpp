@@ -1,6 +1,7 @@
 #include "lexer.h"
 
 #include <cctype>
+#include <sstream>
 #include <stdexcept>
 
 namespace cse {
@@ -156,9 +157,11 @@ std::vector<Token> Lexer::tokenize() {
       case '}':
         tokens.push_back(makeToken(TokenType::RBrace, "}"));
         break;
-      default:
-        // Skip unknown characters
-        break;
+      default: {
+        std::ostringstream oss;
+        oss << "Line " << _line << ":" << _col - 1 << " unexpected character '" << c << "'";
+        throw std::runtime_error(oss.str());
+      }
     }
   }
   tokens.push_back(makeToken(TokenType::Eof, ""));

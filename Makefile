@@ -1,5 +1,5 @@
 CXX      := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -g -Isrc
+CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -Isrc
 SRCDIR   := src
 BUILDDIR := build
 BINDIR   := bin
