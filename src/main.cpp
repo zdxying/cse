@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "analysis/cost_model.h"
 #include "backend/codegen.h"
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
@@ -17,12 +19,21 @@ static void printUsage(const char* prog) {
   std::cerr << "Usage: " << prog << " <input.cpp> [options]\n"
             << "Options:\n"
             << "  -r, --recombine    Enable expression recombination\n"
+            << "  -c, --cost         Analyze and report FLOP cost comparison\n"
+            << "  --json             Output in JSON format (use with -c)\n"
             << "  -h, --help         Show this help\n";
 }
 
+struct OptResult {
+  std::string code;
+  cse::CostResult costBefore;
+  cse::CostResult costAfter;
+};
+
 // Pipeline: source text → Lexer → Parser → IRBuilder → PassManager → CodeGen
 // Each //@cse region is processed independently through this pipeline.
-static std::string optimizeRegion(const std::string& code, bool enableRecombine) {
+static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
+                                bool collectCost) {
   // 1. Lex: tokenize source
   cse::Lexer lexer(code);
   auto tokens = lexer.tokenize();
@@ -32,7 +43,9 @@ static std::string optimizeRegion(const std::string& code, bool enableRecombine)
   auto result = parser.parseAll();
 
   if (result.functions.empty() && result.structDefs.empty()) {
-    return code;  // Nothing to optimize
+    OptResult r;
+    r.code = code;
+    return r;
   }
 
   // 3. Optimize struct methods (each method gets its own IR pipeline)
@@ -60,24 +73,42 @@ static std::string optimizeRegion(const std::string& code, bool enableRecombine)
   }
 
   // 4. Build IR for each function: AST → DAG-based IR
-  std::string optimized;
+  OptResult optResult;
   bool emitStructs = true;
   for (auto& func : result.functions) {
     cse::IRModule module;
     cse::IRBuilder builder(&module);
     builder.buildFunction(*func);
 
+    // Collect cost before optimization
+    if (collectCost) {
+      auto before = cse::analyzeCost(module);
+      optResult.costBefore.flops += before.flops;
+      optResult.costBefore.totalNodes += before.totalNodes;
+      optResult.costBefore.stmts += before.stmts;
+      optResult.costBefore.vars += before.vars;
+    }
+
     // Run passes
     auto pm = cse::PassManager::createDefault(enableRecombine);
     pm.runAll(module);
 
+    // Collect cost after optimization
+    if (collectCost) {
+      auto after = cse::analyzeCost(module);
+      optResult.costAfter.flops += after.flops;
+      optResult.costAfter.totalNodes += after.totalNodes;
+      optResult.costAfter.stmts += after.stmts;
+      optResult.costAfter.vars += after.vars;
+    }
+
     // Generate code (emit struct defs only before first function)
     cse::CodeGen codegen;
     if (emitStructs) {
-      optimized += codegen.generate(module, structPtrs, optStructs, func->templateParams);
+      optResult.code += codegen.generate(module, structPtrs, optStructs, func->templateParams);
       emitStructs = false;
     } else {
-      optimized += codegen.generate(module, {}, {}, func->templateParams);
+      optResult.code += codegen.generate(module, {}, {}, func->templateParams);
     }
   }
 
@@ -85,10 +116,10 @@ static std::string optimizeRegion(const std::string& code, bool enableRecombine)
   if (result.functions.empty() && !optStructs.empty()) {
     cse::IRModule emptyModule;
     cse::CodeGen codegen;
-    optimized += codegen.generate(emptyModule, structPtrs, optStructs);
+    optResult.code += codegen.generate(emptyModule, structPtrs, optStructs);
   }
 
-  return optimized;
+  return optResult;
 }
 
 int main(int argc, char* argv[]) {
@@ -99,6 +130,8 @@ int main(int argc, char* argv[]) {
 
   std::string inputFile;
   bool enableRecombine = false;
+  bool collectCost = false;
+  bool outputJson = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -107,6 +140,10 @@ int main(int argc, char* argv[]) {
       return 0;
     } else if (arg == "-r" || arg == "--recombine") {
       enableRecombine = true;
+    } else if (arg == "-c" || arg == "--cost") {
+      collectCost = true;
+    } else if (arg == "--json") {
+      outputJson = true;
     } else if (arg[0] != '-') {
       inputFile = arg;
     } else {
@@ -149,6 +186,8 @@ int main(int argc, char* argv[]) {
     allLines.push_back(line);
   }
 
+  cse::CostResult totalBefore, totalAfter;
+
   for (const auto& region : regions) {
     // Copy lines before this region
     for (size_t i = lastEnd; i < region.startLine - 1 && i < allLines.size(); i++) {
@@ -161,7 +200,19 @@ int main(int argc, char* argv[]) {
     }
 
     // Optimize and output the region
-    output += optimizeRegion(region.code, enableRecombine);
+    auto opt = optimizeRegion(region.code, enableRecombine, collectCost);
+    output += opt.code;
+
+    if (collectCost) {
+      totalBefore.flops += opt.costBefore.flops;
+      totalBefore.totalNodes += opt.costBefore.totalNodes;
+      totalBefore.stmts += opt.costBefore.stmts;
+      totalBefore.vars += opt.costBefore.vars;
+      totalAfter.flops += opt.costAfter.flops;
+      totalAfter.totalNodes += opt.costAfter.totalNodes;
+      totalAfter.stmts += opt.costAfter.stmts;
+      totalAfter.vars += opt.costAfter.vars;
+    }
 
     lastEnd = region.endLine;
   }
@@ -182,5 +233,45 @@ int main(int argc, char* argv[]) {
   ofs.close();
 
   std::cout << "Optimized output written to " << outputFile << "\n";
+
+  // Cost analysis output
+  if (collectCost) {
+    if (outputJson) {
+      std::cout << "{\n";
+      std::cout << "  \"before\": {\"flops\":" << totalBefore.flops
+                << ",\"nodes\":" << totalBefore.totalNodes
+                << ",\"stmts\":" << totalBefore.stmts
+                << ",\"vars\":" << totalBefore.vars << "},\n";
+      std::cout << "  \"after\": {\"flops\":" << totalAfter.flops
+                << ",\"nodes\":" << totalAfter.totalNodes
+                << ",\"stmts\":" << totalAfter.stmts
+                << ",\"vars\":" << totalAfter.vars << "},\n";
+      int saved = totalBefore.savedFlops(totalAfter);
+      double pct = totalBefore.savedPercent(totalAfter);
+      std::cout << "  \"saved\": {\"flops\":" << saved
+                << ",\"percent\":" << std::round(pct * 10.0) / 10.0 << "}\n";
+      std::cout << "}\n";
+    } else {
+      std::cout << "\n=== FLOP Cost Analysis ===\n";
+      auto printCost = [](const char* label, const cse::CostResult& b,
+                          const cse::CostResult& a) {
+        std::cout << label << ":\n"
+                  << "  Before:  " << b.flops << " flops, "
+                  << b.totalNodes << " nodes, "
+                  << b.stmts << " stmts, "
+                  << b.vars << " vars\n"
+                  << "  After:   " << a.flops << " flops, "
+                  << a.totalNodes << " nodes, "
+                  << a.stmts << " stmts, "
+                  << a.vars << " vars\n";
+        int saved = b.savedFlops(a);
+        double pct = b.savedPercent(a);
+        std::cout << "  Saved:   " << saved << " flops ("
+                  << std::round(pct * 10.0) / 10.0 << "%)\n";
+      };
+      printCost("Total", totalBefore, totalAfter);
+    }
+  }
+
   return 0;
 }

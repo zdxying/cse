@@ -65,6 +65,10 @@ class AlgebraicSimplifyVisitor {
     if (!node) return nullptr;
 
     // Recursively simplify children first
+    if (node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
+      node->operands[0] = simplify(node->operands[0]);
+      node->recomputeHash();
+    }
     if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
       node->operands[0] = simplify(node->operands[0]);
       node->operands[1] = simplify(node->operands[1]);
@@ -74,16 +78,20 @@ class AlgebraicSimplifyVisitor {
     // Apply algebraic simplifications
     if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
       DAGNode* result = applyIdentities(node);
-      if (result != node) {
-        simplifications++;
-        return result;
-      }
-
+      if (result != node) { simplifications++; return result; }
       result = sortCommutative(node);
-      if (result != node) {
-        simplifications++;
-        return result;
-      }
+      if (result != node) { simplifications++; return result; }
+    }
+    // UnaryOp identities (--a → a)
+    if (node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
+      DAGNode* result = applyIdentities(node);
+      if (result != node) { simplifications++; return result; }
+    }
+
+    // Strength reduction
+    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+      DAGNode* result = strengthReduce(node);
+      if (result != node) { simplifications++; return result; }
     }
 
     return node;
@@ -94,53 +102,67 @@ class AlgebraicSimplifyVisitor {
     return n->kind == NodeKind::Constant && n->constVal == val;
   }
 
-  // a * 1 → a, a + 0 → a, a * 0 → 0
+  // x * 2 → x + x, x * 0.5 → x / 2.0
+  DAGNode* strengthReduce(DAGNode* node) {
+    if (node->op != '*') return node;
+    DAGNode* lhs = node->operands[0];
+    DAGNode* rhs = node->operands[1];
+    // x * 2 → x + x
+    if (isConst(rhs, 2)) return module.createBinaryOp('+', lhs, lhs);
+    if (isConst(lhs, 2)) return module.createBinaryOp('+', rhs, rhs);
+    return node;
+  }
+
   DAGNode* applyIdentities(DAGNode* node) {
+    // UnaryOp: --a → a
+    if (node->kind == NodeKind::UnaryOp && node->op == '-' && !node->operands.empty()) {
+      DAGNode* inner = node->operands[0];
+      if (inner->kind == NodeKind::UnaryOp && inner->op == '-') {
+        simplifications++;
+        return inner->operands[0];
+      }
+      return node;
+    }
+
+    if (node->kind != NodeKind::BinaryOp || node->operands.size() != 2)
+      return node;
+
     DAGNode* lhs = node->operands[0];
     DAGNode* rhs = node->operands[1];
 
     if (node->op == '*') {
-      if (isConst(lhs, 1)) {
-        simplifications++;
-        return rhs;
-      }
-      if (isConst(rhs, 1)) {
-        simplifications++;
-        return lhs;
-      }
-      if (isConst(lhs, 0) || isConst(rhs, 0)) {
-        simplifications++;
-        return module.createConst(0, "0");
-      }
+      if (isConst(lhs, 1)) { simplifications++; return rhs; }
+      if (isConst(rhs, 1)) { simplifications++; return lhs; }
+      if (isConst(lhs, 0) || isConst(rhs, 0)) { simplifications++; return module.createConst(0, "0"); }
     }
 
     if (node->op == '+') {
-      if (isConst(lhs, 0)) {
+      if (isConst(lhs, 0)) { simplifications++; return rhs; }
+      if (isConst(rhs, 0)) { simplifications++; return lhs; }
+      // a + (-b) → a - b
+      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-') {
         simplifications++;
-        return rhs;
-      }
-      if (isConst(rhs, 0)) {
-        simplifications++;
-        return lhs;
+        return module.createBinaryOp('-', lhs, rhs->operands[0]);
       }
     }
 
     if (node->op == '-') {
-      if (isConst(rhs, 0)) {
+      if (isConst(rhs, 0)) { simplifications++; return lhs; }
+      if (isConst(lhs, 0)) { simplifications++; return module.createUnaryOp('-', rhs); }
+      // a - a → 0
+      if (lhs->id == rhs->id) { simplifications++; return module.createConst(0, "0"); }
+      // a - (-b) → a + b
+      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-') {
         simplifications++;
-        return lhs;
+        return module.createBinaryOp('+', lhs, rhs->operands[0]);
       }
     }
 
     if (node->op == '/') {
-      if (isConst(rhs, 1)) {
-        simplifications++;
-        return lhs;
-      }
-      if (isConst(lhs, 0)) {
-        simplifications++;
-        return module.createConst(0, "0");
-      }
+      if (isConst(rhs, 1)) { simplifications++; return lhs; }
+      if (isConst(lhs, 0)) { simplifications++; return module.createConst(0, "0"); }
+      // a / a → 1
+      if (lhs->id == rhs->id) { simplifications++; return module.createConst(1, "1"); }
     }
 
     return node;

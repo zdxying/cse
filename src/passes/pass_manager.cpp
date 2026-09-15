@@ -2,8 +2,11 @@
 
 #include "../ir/ir_module.h"
 #include "algebraic_simplify.h"
+#include "constant_fold.h"
 #include "cse_pass.h"
+#include "dce.h"
 #include "expr_recomb.h"
+#include "value_prop.h"
 
 namespace cse {
 
@@ -19,11 +22,13 @@ void PassManager::runAll(IRModule& module) {
 
 PassManager PassManager::createDefault(bool enableRecombine) {
   PassManager pm;
-  pm.addPass(createCSEPass());
+  pm.addPass(createConstantFoldPass());
   pm.addPass(createAlgebraicSimplifyPass());
   if (enableRecombine) {
     pm.addPass(createExprRecombinePass());
   }
+  pm.addPass(createValuePropPass());
+  pm.addPass(createDCEPass());
   return pm;
 }
 

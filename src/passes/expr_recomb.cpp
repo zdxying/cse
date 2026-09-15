@@ -108,37 +108,69 @@ class ExprRecombineVisitor {
 
     if (lhs->kind != NodeKind::BinaryOp || rhs->kind != NodeKind::BinaryOp)
       return addNode;
-    if (lhs->op != '*' || rhs->op != '*') return addNode;
-    if (lhs->operands.size() != 2 || rhs->operands.size() != 2) return addNode;
-
-    DAGNode* la = lhs->operands[0];
-    DAGNode* lb = lhs->operands[1];
-    DAGNode* ra = rhs->operands[0];
-    DAGNode* rb = rhs->operands[1];
 
     char addOp = addNode->op;
 
-    // Pattern 1: la*lb ± la*rb → la*(lb ± rb)
-    if (sameExpr(la, ra)) {
-      auto inner = module.createBinaryOp(addOp, lb, rb);
-      return module.createBinaryOp('*', la, inner);
+    // Pattern: a*x ± a*y → a*(x ± y) and a*x ± b*x → (a ± b)*x
+    if ((lhs->op == '*' || lhs->op == '/') &&
+        (rhs->op == '*' || rhs->op == '/') &&
+        lhs->operands.size() == 2 && rhs->operands.size() == 2) {
+      DAGNode* la = lhs->operands[0];
+      DAGNode* lb = lhs->operands[1];
+      DAGNode* ra = rhs->operands[0];
+      DAGNode* rb = rhs->operands[1];
+
+      // a*x ± a*y → a*(x ± y)
+      if (sameExpr(la, ra)) {
+        auto inner = module.createBinaryOp(addOp, lb, rb);
+        return module.createBinaryOp('*', la, inner);
+      }
+      if (sameExpr(lb, rb)) {
+        auto outer = module.createBinaryOp(addOp, la, ra);
+        return module.createBinaryOp('*', outer, lb);
+      }
+      if (sameExpr(la, rb)) {
+        auto inner = module.createBinaryOp(addOp, lb, ra);
+        return module.createBinaryOp('*', la, inner);
+      }
+      if (sameExpr(lb, ra)) {
+        auto outer = module.createBinaryOp(addOp, la, rb);
+        return module.createBinaryOp('*', outer, lb);
+      }
     }
 
-    // Pattern 2: la*lb ± ra*rb where lb==rb → (la±ra)*lb
-    if (sameExpr(lb, rb)) {
-      auto outer = module.createBinaryOp(addOp, la, ra);
-      return module.createBinaryOp('*', outer, lb);
+    // Pattern: a*x + a → a*(x + 1)
+    if (addOp == '+' && lhs->kind == NodeKind::BinaryOp && lhs->op == '*' &&
+        lhs->operands.size() == 2) {
+      DAGNode* mulA = lhs->operands[0];
+      DAGNode* mulB = lhs->operands[1];
+      if (sameExpr(mulA, rhs)) {
+        auto one = module.createConst(1, "1");
+        auto inner = module.createBinaryOp('+', mulB, one);
+        return module.createBinaryOp('*', mulA, inner);
+      }
+      if (sameExpr(mulB, rhs)) {
+        auto one = module.createConst(1, "1");
+        auto inner = module.createBinaryOp('+', mulA, one);
+        return module.createBinaryOp('*', mulB, inner);
+      }
     }
 
-    // Pattern 3: cross matches
-    if (sameExpr(la, rb)) {
-      auto inner = module.createBinaryOp(addOp, lb, ra);
-      return module.createBinaryOp('*', la, inner);
-    }
-
-    if (sameExpr(lb, ra)) {
-      auto outer = module.createBinaryOp(addOp, la, rb);
-      return module.createBinaryOp('*', outer, lb);
+    // Pattern: a*x - a → a*(x - 1)
+    if (addOp == '-' && lhs->kind == NodeKind::BinaryOp && lhs->op == '*' &&
+        lhs->operands.size() == 2) {
+      DAGNode* mulA = lhs->operands[0];
+      DAGNode* mulB = lhs->operands[1];
+      if (sameExpr(mulA, rhs)) {
+        auto one = module.createConst(1, "1");
+        auto inner = module.createBinaryOp('-', mulB, one);
+        return module.createBinaryOp('*', mulA, inner);
+      }
+      if (sameExpr(mulB, rhs)) {
+        auto one = module.createConst(1, "1");
+        auto inner = module.createBinaryOp('-', mulA, one);
+        return module.createBinaryOp('*', mulB, inner);
+      }
     }
 
     return addNode;

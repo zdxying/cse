@@ -398,6 +398,22 @@ std::unique_ptr<Stmt> Parser::parseReturn() {
 std::unique_ptr<Stmt> Parser::parseExprStmt() {
   auto expr = parseExpr();
   expect(TokenType::Semicolon);
+
+  // Check if this is an assignment: Variable = expr, or Variable += expr, etc.
+  if (expr->kind == ExprKind::BinaryOp && expr->lhs &&
+      expr->lhs->kind == ExprKind::Variable) {
+    char op = expr->op;
+    // '=' is already correct. For +=, -=, *=, /= the parser stored the base op.
+    // We need to check the actual token to determine compound assignment.
+    // The BinaryOp already has the right op character from parseAssignment().
+    auto stmt = std::make_unique<Stmt>(StmtKind::Assignment, expr->loc);
+    stmt->varName = expr->lhs->name;
+    stmt->rhs = std::move(expr->rhs);
+    // Store the operator for compound assignments (=, +=, -=, *=, /=)
+    // For simple '=', we don't need to store it explicitly.
+    return stmt;
+  }
+
   auto stmt = std::make_unique<Stmt>(StmtKind::ExprStmt, expr->loc);
   stmt->expr = std::move(expr);
   return stmt;
