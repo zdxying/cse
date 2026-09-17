@@ -23,6 +23,14 @@ enum class TokenType {
   Void,
   Struct,
   Template,
+  Using,
+  Typename,
+  Class,
+  Namespace,
+  Static,
+  Const,
+  Inline,
+  Unsigned,
 
   // Operators
   Plus,
@@ -46,6 +54,7 @@ enum class TokenType {
   Not,
   Question,
   Colon,
+  DoubleColon,
   Comma,
   Semicolon,
   Dot,
@@ -101,6 +110,22 @@ inline const char* tokenTypeName(TokenType t) {
       return "Struct";
     case TokenType::Template:
       return "Template";
+    case TokenType::Using:
+      return "Using";
+    case TokenType::Typename:
+      return "Typename";
+    case TokenType::Class:
+      return "Class";
+    case TokenType::Namespace:
+      return "Namespace";
+    case TokenType::Static:
+      return "Static";
+    case TokenType::Const:
+      return "Const";
+    case TokenType::Inline:
+      return "Inline";
+    case TokenType::Unsigned:
+      return "Unsigned";
     case TokenType::Plus:
       return "Plus";
     case TokenType::Minus:
@@ -143,6 +168,8 @@ inline const char* tokenTypeName(TokenType t) {
       return "Question";
     case TokenType::Colon:
       return "Colon";
+    case TokenType::DoubleColon:
+      return "DoubleColon";
     case TokenType::Comma:
       return "Comma";
     case TokenType::Semicolon:

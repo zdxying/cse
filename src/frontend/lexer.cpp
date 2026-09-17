@@ -6,7 +6,8 @@
 
 namespace cse {
 
-Lexer::Lexer(const std::string& source) : _src(source) {}
+Lexer::Lexer(const std::string& source, const CSEConfig& config)
+    : _config(config), _src(source) {}
 
 std::vector<Token> Lexer::tokenize() {
   std::vector<Token> tokens;
@@ -37,7 +38,12 @@ std::vector<Token> Lexer::tokenize() {
 
     // Identifier or keyword
     if (std::isalpha(c) || c == '_') {
-      tokens.push_back(readIdentifier());
+      auto tok = readIdentifier();
+      // Apply configurable token filter (e.g., skip __xx__ CUDA annotations)
+      if (_config.tokenFilter && _config.tokenFilter(tok)) {
+        continue;
+      }
+      tokens.push_back(tok);
       continue;
     }
 
@@ -128,7 +134,11 @@ std::vector<Token> Lexer::tokenize() {
         tokens.push_back(makeToken(TokenType::Question, "?"));
         break;
       case ':':
-        tokens.push_back(makeToken(TokenType::Colon, ":"));
+        if (peek() == ':') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::DoubleColon, "::"));
+        } else
+          tokens.push_back(makeToken(TokenType::Colon, ":"));
         break;
       case ',':
         tokens.push_back(makeToken(TokenType::Comma, ","));
@@ -156,6 +166,10 @@ std::vector<Token> Lexer::tokenize() {
         break;
       case '}':
         tokens.push_back(makeToken(TokenType::RBrace, "}"));
+        break;
+      case '#':
+        // Skip preprocessor directives (#include, #ifdef, #else, #endif, #pragma, etc.)
+        while (_pos < _src.size() && peek() != '\n') advance();
         break;
       default: {
         std::ostringstream oss;
@@ -256,6 +270,22 @@ Token Lexer::readIdentifier() {
     type = TokenType::Struct;
   else if (text == "template")
     type = TokenType::Template;
+  else if (text == "using")
+    type = TokenType::Using;
+  else if (text == "typename")
+    type = TokenType::Typename;
+  else if (text == "class")
+    type = TokenType::Class;
+  else if (text == "namespace")
+    type = TokenType::Namespace;
+  else if (text == "static")
+    type = TokenType::Static;
+  else if (text == "const")
+    type = TokenType::Const;
+  else if (text == "inline")
+    type = TokenType::Inline;
+  else if (text == "unsigned")
+    type = TokenType::Unsigned;
 
   Token tok;
   tok.type = type;

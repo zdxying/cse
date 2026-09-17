@@ -152,7 +152,12 @@ DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
 
 DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
   DAGNode* operand = buildExpr(*expr.operand);
-  return _module->createUnaryOp(expr.op, operand);
+  auto node = _module->createUnaryOp(expr.op, operand);
+  // For ++ and -- operators, store the full operator in name field
+  if (expr.name == "++" || expr.name == "--") {
+    node->name = expr.name;
+  }
+  return node;
 }
 
 DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "ast.h"
+#include "cse_config.h"
 #include "token.h"
 
 // Recursive descent parser — tokens → AST.
@@ -13,7 +14,7 @@ namespace cse {
 
 class Parser {
  public:
-  explicit Parser(const std::vector<Token>& tokens);
+  explicit Parser(const std::vector<Token>& tokens, const CSEConfig& config = {});
 
   // Parse a CSE-marked function
   std::unique_ptr<FunctionDef> parseFunction();
@@ -22,6 +23,9 @@ class Parser {
   struct ParseResult {
     std::vector<std::unique_ptr<FunctionDef>> functions;
     std::vector<std::unique_ptr<StructDef>> structDefs;
+    std::vector<std::unique_ptr<UsingDecl>> usingDecls;
+    std::vector<std::unique_ptr<NamespaceDef>> namespaces;
+    std::vector<std::unique_ptr<IncludeDecl>> includes;
   };
 
   // Entry point: parse all top-level constructs (functions + structs)
@@ -66,7 +70,12 @@ class Parser {
   std::vector<FunctionDef::Param> parseParamList();     // (type name, ...)
   std::vector<TemplateParam> parseTemplateParams();    // <typename T, int N>
   std::unique_ptr<StructDef> parseStructDef();         // struct name { members }
+  std::unique_ptr<UsingDecl> parseUsingDecl();         // using T = Type;
+  std::unique_ptr<NamespaceDef> parseNamespaceDef();   // namespace X { ... }
+  std::unique_ptr<IncludeDecl> parseIncludeDecl();     // #include "..."
+  std::string parseFullType();                         // supports typename and :: qualified names
 
+  CSEConfig _config;
   const std::vector<Token>& _tokens;
   size_t _pos = 0;
 };

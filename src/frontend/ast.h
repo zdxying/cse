@@ -145,6 +145,32 @@ struct StructDef {
   std::vector<StructField> fields;
   std::vector<std::unique_ptr<FunctionDef>> methods;
   std::vector<TemplateParam> templateParams;
+  std::vector<std::unique_ptr<struct UsingDecl>> usingDecls;  // using aliases inside struct
+  SourceLoc loc;
+};
+
+// ===== Using Declaration =====
+// using T = typename CELL::FloatType;
+struct UsingDecl {
+  std::string aliasName;
+  std::string underlyingType;
+  std::vector<TemplateParam> templateParams;  // optional: template<typename T> using X = ...
+  SourceLoc loc;
+};
+
+// ===== Namespace =====
+struct NamespaceDef {
+  std::string name;
+  std::vector<std::unique_ptr<Stmt>> stmts;
+  std::vector<std::unique_ptr<UsingDecl>> usingDecls;
+  std::vector<std::unique_ptr<struct FunctionDef>> functions;
+  std::vector<std::unique_ptr<StructDef>> structDefs;
+  SourceLoc loc;
+};
+
+// ===== Include =====
+struct IncludeDecl {
+  std::string path;
   SourceLoc loc;
 };
 

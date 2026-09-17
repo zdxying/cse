@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "cse_config.h"
 #include "token.h"
 
 // Lexer — source text → token stream.
@@ -13,7 +14,7 @@ namespace cse {
 
 class Lexer {
  public:
-  explicit Lexer(const std::string& source);
+  explicit Lexer(const std::string& source, const CSEConfig& config = {});
   std::vector<Token> tokenize();
 
  private:
@@ -30,6 +31,7 @@ class Lexer {
 
   Token makeToken(TokenType type, const std::string& text = "");
 
+  CSEConfig _config;
   const std::string& _src;
   size_t _pos = 0;
   size_t _line = 1;

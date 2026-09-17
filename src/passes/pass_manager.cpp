@@ -24,6 +24,7 @@ PassManager PassManager::createDefault(bool enableRecombine) {
   PassManager pm;
   pm.addPass(createConstantFoldPass());
   pm.addPass(createAlgebraicSimplifyPass());
+  pm.addPass(createCSEPass());
   if (enableRecombine) {
     pm.addPass(createExprRecombinePass());
   }

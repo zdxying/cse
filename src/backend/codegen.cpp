@@ -14,13 +14,9 @@ void CodeGen::emitTemplateParams(const std::vector<TemplateParam>& params) {
   _out << "template<";
   for (size_t i = 0; i < params.size(); i++) {
     if (i > 0) _out << ", ";
-    if (params[i].isType) {
-      _out << params[i].paramType << " " << params[i].paramName;
-    } else {
-      _out << params[i].paramType << " " << params[i].paramName;
-      if (!params[i].defaultVal.empty()) {
-        _out << " = " << params[i].defaultVal;
-      }
+    _out << params[i].paramType << " " << params[i].paramName;
+    if (!params[i].defaultVal.empty()) {
+      _out << " = " << params[i].defaultVal;
     }
   }
   _out << ">\n";
@@ -63,6 +59,10 @@ std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& s
   for (auto* sd : structDefs) {
     emitTemplateParams(sd->templateParams);
     _out << "struct " << sd->name << " {\n";
+    // Emit using declarations inside struct
+    for (auto& usingDecl : sd->usingDecls) {
+      _out << "    using " << usingDecl->aliasName << " = " << usingDecl->underlyingType << ";\n";
+    }
     for (auto& field : sd->fields) {
       _out << "    " << field.type << " " << field.name << ";\n";
     }
@@ -74,6 +74,10 @@ std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& s
     auto* sd = os.def;
     emitTemplateParams(sd->templateParams);
     _out << "struct " << sd->name << " {\n";
+    // Emit using declarations inside struct
+    for (auto& usingDecl : sd->usingDecls) {
+      _out << "    using " << usingDecl->aliasName << " = " << usingDecl->underlyingType << ";\n";
+    }
     for (auto& field : sd->fields) {
       _out << "    " << field.type << " " << field.name << ";\n";
     }
@@ -255,6 +259,10 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       std::string operand = emitExpr(node->operands[0]);
       if (node->name == "postfix") {
         return operand + node->op;
+      }
+      // Check for ++ and -- operators stored in name field
+      if (node->name == "++" || node->name == "--") {
+        return node->name + operand;
       }
       return std::string(1, node->op) + operand;
     }

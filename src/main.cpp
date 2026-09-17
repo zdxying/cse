@@ -8,6 +8,7 @@
 
 #include "analysis/cost_model.h"
 #include "backend/codegen.h"
+#include "frontend/filters.h"
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
 #include "frontend/region_extractor.h"
@@ -34,18 +35,38 @@ struct OptResult {
 // Each //@cse region is processed independently through this pipeline.
 static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
                                 bool collectCost) {
-  // 1. Lex: tokenize source
-  cse::Lexer lexer(code);
+  // 1. Create config with FreeLB defaults (skip __xx__, simplify T{1})
+  cse::CSEConfig config;
+  config.tokenFilter = cse::skipDoubleUnderscoreTokens;
+  config.simplifyBraceInit = true;
+
+  // 2. Lex: tokenize source
+  cse::Lexer lexer(code, config);
   auto tokens = lexer.tokenize();
 
-  // 2. Parse: tokens → AST (FunctionDef, StructDef)
-  cse::Parser parser(tokens);
+  // 3. Parse: tokens → AST (FunctionDef, StructDef)
+  cse::Parser parser(tokens, config);
   auto result = parser.parseAll();
 
-  if (result.functions.empty() && result.structDefs.empty()) {
+  if (result.functions.empty() && result.structDefs.empty() &&
+      result.usingDecls.empty() && result.namespaces.empty()) {
     OptResult r;
     r.code = code;
     return r;
+  }
+
+  // Emit using declarations and namespaces as raw text (not optimized)
+  OptResult optResult;
+  for (auto& ud : result.usingDecls) {
+    optResult.code += "using " + ud->aliasName + " = " + ud->underlyingType + ";\n";
+  }
+  for (auto& ns : result.namespaces) {
+    optResult.code += "namespace " + ns->name + " {\n";
+    // Emit using declarations inside namespace
+    for (auto& ud : ns->usingDecls) {
+      optResult.code += "using " + ud->aliasName + " = " + ud->underlyingType + ";\n";
+    }
+    optResult.code += "}\n";
   }
 
   // 3. Optimize struct methods (each method gets its own IR pipeline)
@@ -57,8 +78,22 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
       auto methodMod = std::make_unique<cse::IRModule>();
       cse::IRBuilder builder(methodMod.get());
       builder.buildFunction(*method);
+      if (collectCost) {
+        auto before = cse::analyzeCost(*methodMod);
+        optResult.costBefore.flops += before.flops;
+        optResult.costBefore.totalNodes += before.totalNodes;
+        optResult.costBefore.stmts += before.stmts;
+        optResult.costBefore.vars += before.vars;
+      }
       auto pm = cse::PassManager::createDefault(enableRecombine);
       pm.runAll(*methodMod);
+      if (collectCost) {
+        auto after = cse::analyzeCost(*methodMod);
+        optResult.costAfter.flops += after.flops;
+        optResult.costAfter.totalNodes += after.totalNodes;
+        optResult.costAfter.stmts += after.stmts;
+        optResult.costAfter.vars += after.vars;
+      }
       os.methodModules.push_back(std::move(methodMod));
     }
     optStructs.push_back(std::move(os));
@@ -73,7 +108,6 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
   }
 
   // 4. Build IR for each function: AST → DAG-based IR
-  OptResult optResult;
   bool emitStructs = true;
   for (auto& func : result.functions) {
     cse::IRModule module;

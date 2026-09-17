@@ -5,7 +5,8 @@
 
 namespace cse {
 
-Parser::Parser(const std::vector<Token>& tokens) : _tokens(tokens) {}
+Parser::Parser(const std::vector<Token>& tokens, const CSEConfig& config)
+    : _config(config), _tokens(tokens) {}
 
 Token Parser::peek() const { return _tokens[_pos]; }
 
@@ -37,20 +38,59 @@ SourceLoc Parser::currentLoc() const {
 
 bool Parser::isTypeKeyword() const {
   return check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) ||
-         check(TokenType::Void);
+         check(TokenType::Void) || check(TokenType::Unsigned);
 }
 
 std::string Parser::parseType() {
   std::string type;
+
+  // Handle static/const/inline prefixes (skip them for type parsing)
+  while (check(TokenType::Static) || check(TokenType::Const) || check(TokenType::Inline)) {
+    type += advance().text + " ";
+  }
+
+  // Handle typename prefix: typename CELL::FloatType
+  if (check(TokenType::Typename)) {
+    advance();  // consume 'typename'
+    type = parseFullType();
+    return type;
+  }
+
   if (check(TokenType::Struct)) {
     type = advance().text;
     type += " ";
     type += expect(TokenType::Identifier).text;
+  } else if (check(TokenType::Unsigned)) {
+    type = advance().text;
+    // Handle unsigned int, unsigned float, unsigned double, unsigned char, etc.
+    if (isTypeKeyword()) {
+      type += " " + advance().text;
+    }
   } else if (isTypeKeyword()) {
     type = advance().text;
+  } else if (check(TokenType::Class)) {
+    type = advance().text;
+    type += " ";
+    type += expect(TokenType::Identifier).text;
   } else {
     type = advance().text;  // custom type name
   }
+
+  // Handle :: qualified names: std::string, LatSet::q, etc.
+  while (check(TokenType::DoubleColon)) {
+    advance();  // consume ::
+    type += "::";
+    // After :: we expect an identifier or a template-qualified name
+    if (check(TokenType::Identifier)) {
+      type += advance().text;
+    } else if (check(TokenType::Template)) {
+      // e.g., ::template_name<...> — rare but handle it
+      break;
+    } else {
+      break;
+    }
+  }
+
   // Handle template arguments: vector<T>, map<string, int>, etc.
   if (check(TokenType::Less)) {
     size_t saved = _pos;
@@ -74,10 +114,78 @@ std::string Parser::parseType() {
       type = type.substr(0, type.find('<'));
     }
   }
+
   // Handle pointer types: double*, int*, etc.
   while (match(TokenType::Star)) {
     type += "*";
   }
+  return type;
+}
+
+// Parse a full type including typename prefix and :: qualified names
+std::string Parser::parseFullType() {
+  std::string type;
+
+  // Optional typename prefix
+  if (check(TokenType::Typename)) {
+    advance();
+    type = "typename ";
+  }
+
+  // Base type (identifier or keyword)
+  if (isTypeKeyword()) {
+    type += advance().text;
+  } else if (check(TokenType::Struct)) {
+    type += advance().text;
+    type += " ";
+    type += expect(TokenType::Identifier).text;
+  } else if (check(TokenType::Class)) {
+    type += advance().text;
+    type += " ";
+    type += expect(TokenType::Identifier).text;
+  } else if (check(TokenType::Identifier)) {
+    type += advance().text;
+  }
+
+  // :: qualified names
+  while (check(TokenType::DoubleColon)) {
+    advance();
+    type += "::";
+    if (check(TokenType::Identifier)) {
+      type += advance().text;
+    } else {
+      break;
+    }
+  }
+
+  // Template arguments
+  if (check(TokenType::Less)) {
+    size_t saved = _pos;
+    advance();
+    type += "<";
+    int depth = 1;
+    while (!check(TokenType::Eof) && depth > 0) {
+      if (check(TokenType::Less)) depth++;
+      if (check(TokenType::Greater)) depth--;
+      if (depth > 0) {
+        type += advance().text;
+        if (!check(TokenType::Eof) && depth > 0) type += " ";
+      }
+    }
+    if (depth == 0) {
+      advance();
+      type += ">";
+    } else {
+      _pos = saved;
+      type = type.substr(0, type.find('<'));
+    }
+  }
+
+  // Pointer
+  while (match(TokenType::Star)) {
+    type += "*";
+  }
+
   return type;
 }
 
@@ -200,6 +308,29 @@ std::unique_ptr<Expr> Parser::parseMulDiv() {
 }
 
 std::unique_ptr<Expr> Parser::parseUnary() {
+  // Handle ++ and -- prefix operators (lexer produces two Plus/Minus tokens)
+  if (check(TokenType::Plus) && _pos + 1 < _tokens.size() &&
+      _tokens[_pos + 1].type == TokenType::Plus) {
+    advance(); advance();  // consume ++
+    auto operand = parseUnary();
+    auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
+    expr->op = '+';
+    expr->name = "++";  // store full operator in name field
+    expr->operand = std::move(operand);
+    expr->prefix = true;
+    return expr;
+  }
+  if (check(TokenType::Minus) && _pos + 1 < _tokens.size() &&
+      _tokens[_pos + 1].type == TokenType::Minus) {
+    advance(); advance();  // consume --
+    auto operand = parseUnary();
+    auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
+    expr->op = '-';
+    expr->name = "--";  // store full operator in name field
+    expr->operand = std::move(operand);
+    expr->prefix = true;
+    return expr;
+  }
   if (check(TokenType::Minus) || check(TokenType::Not)) {
     auto op = advance();
     auto operand = parseUnary();
@@ -277,8 +408,50 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
   }
   if (check(TokenType::Identifier)) {
     auto tok = advance();
+    // Handle brace initialization: T{1} -> optionally simplify for CSE
+    if (check(TokenType::LBrace) && _config.simplifyBraceInit) {
+      advance();  // consume {
+      auto inner = parseExpr();
+      expect(TokenType::RBrace);
+      return inner;
+    }
     auto expr = std::make_unique<Expr>(ExprKind::Variable, currentLoc());
     expr->name = tok.text;
+    // Handle :: qualified names: LatSet::q, std::sin, etc.
+    while (check(TokenType::DoubleColon)) {
+      advance();  // consume ::
+      expr->name += "::";
+      if (check(TokenType::Identifier)) {
+        expr->name += advance().text;
+      } else if (check(TokenType::Template)) {
+        // Handle ::template - skip for now
+        break;
+      } else {
+        break;
+      }
+    }
+    // Handle template arguments in expressions: latset::c<LatSet>(k)
+    if (check(TokenType::Less)) {
+      size_t saved = _pos;
+      advance();  // consume <
+      expr->name += "<";
+      int depth = 1;
+      while (!check(TokenType::Eof) && depth > 0) {
+        if (check(TokenType::Less)) depth++;
+        if (check(TokenType::Greater)) depth--;
+        if (depth > 0) {
+          expr->name += advance().text;
+          if (!check(TokenType::Eof) && depth > 0) expr->name += " ";
+        }
+      }
+      if (depth == 0) {
+        advance();  // consume >
+        expr->name += ">";
+      } else {
+        _pos = saved;
+        expr->name = expr->name.substr(0, expr->name.find('<'));
+      }
+    }
     return expr;
   }
   if (match(TokenType::LParen)) {
@@ -300,7 +473,8 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
   if (check(TokenType::If)) return parseIf();
   if (check(TokenType::Return)) return parseReturn();
   if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) ||
-      check(TokenType::Struct)) {
+      check(TokenType::Struct) || check(TokenType::Const) || check(TokenType::Static) ||
+      check(TokenType::Inline) || check(TokenType::Void) || check(TokenType::Unsigned)) {
     return parseVarDecl();
   }
   // Handle identifier as type: T x, MyStruct s, etc.
@@ -332,7 +506,8 @@ std::unique_ptr<Stmt> Parser::parseFor() {
 
   // for init
   if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) ||
-      check(TokenType::Struct)) {
+      check(TokenType::Struct) || check(TokenType::Unsigned) || check(TokenType::Const) ||
+      check(TokenType::Static) || check(TokenType::Inline) || check(TokenType::Void)) {
     forStmt->forInit = parseVarDecl();
   } else {
     forStmt->forInit = parseExprStmt();
@@ -441,8 +616,8 @@ std::vector<TemplateParam> Parser::parseTemplateParams() {
   expect(TokenType::Less);
   do {
     TemplateParam tp;
-    if (check(TokenType::Identifier) &&
-        (peek().text == "typename" || peek().text == "class")) {
+    if (check(TokenType::Typename) || check(TokenType::Class) ||
+        (check(TokenType::Identifier) && (peek().text == "typename" || peek().text == "class"))) {
       // typename/class T
       tp.isType = true;
       tp.paramType = advance().text;
@@ -504,6 +679,12 @@ std::unique_ptr<StructDef> Parser::parseStructDef() {
   def->templateParams = std::move(templateParams);
   expect(TokenType::LBrace);
   while (!check(TokenType::RBrace) && !check(TokenType::Eof)) {
+    // Handle using declarations inside struct
+    if (check(TokenType::Using)) {
+      def->usingDecls.push_back(parseUsingDecl());
+      continue;
+    }
+
     auto returnType = parseType();
     auto nameTok = expect(TokenType::Identifier);
 
@@ -529,12 +710,103 @@ std::unique_ptr<StructDef> Parser::parseStructDef() {
   return def;
 }
 
+// ===== Using, Namespace, Include =====
+
+std::unique_ptr<UsingDecl> Parser::parseUsingDecl() {
+  auto loc = currentLoc();
+  expect(TokenType::Using);
+  auto decl = std::make_unique<UsingDecl>();
+  decl->loc = loc;
+  decl->aliasName = expect(TokenType::Identifier).text;
+  expect(TokenType::Assign);
+  decl->underlyingType = parseFullType();
+  expect(TokenType::Semicolon);
+  return decl;
+}
+
+std::unique_ptr<NamespaceDef> Parser::parseNamespaceDef() {
+  auto loc = currentLoc();
+  expect(TokenType::Namespace);
+  auto def = std::make_unique<NamespaceDef>();
+  def->loc = loc;
+  def->name = expect(TokenType::Identifier).text;
+  expect(TokenType::LBrace);
+
+  // Parse contents of namespace
+  while (!check(TokenType::RBrace) && !check(TokenType::Eof)) {
+    if (check(TokenType::Using)) {
+      def->usingDecls.push_back(parseUsingDecl());
+    } else if (check(TokenType::Template)) {
+      // Look ahead for template struct or template function
+      size_t ahead = _pos + 1;
+      if (ahead < _tokens.size() && _tokens[ahead].type == TokenType::Less) {
+        int depth = 1;
+        ahead++;
+        while (ahead < _tokens.size() && depth > 0) {
+          if (_tokens[ahead].type == TokenType::Less) depth++;
+          if (_tokens[ahead].type == TokenType::Greater) depth--;
+          ahead++;
+        }
+      }
+      if (ahead < _tokens.size() && _tokens[ahead].type == TokenType::Struct) {
+        def->structDefs.push_back(parseStructDef());
+      } else {
+        def->functions.push_back(parseFunction());
+      }
+    } else if (check(TokenType::Struct)) {
+      def->structDefs.push_back(parseStructDef());
+    } else if (check(TokenType::Identifier) || isTypeKeyword() ||
+               check(TokenType::Void) || check(TokenType::Typename)) {
+      // Function declaration
+      def->functions.push_back(parseFunction());
+    } else {
+      // Skip unexpected tokens
+      advance();
+    }
+  }
+  expect(TokenType::RBrace);
+  match(TokenType::Semicolon);
+  return def;
+}
+
+std::unique_ptr<IncludeDecl> Parser::parseIncludeDecl() {
+  auto loc = currentLoc();
+  // Skip #include
+  while (!check(TokenType::Eof) && !check(TokenType::Semicolon) && !check(TokenType::Newline)) {
+    advance();
+  }
+  match(TokenType::Semicolon);
+  // We don't actually need include declarations for CSE analysis
+  return nullptr;
+}
+
 // ===== Full parse =====
 
 Parser::ParseResult Parser::parseAll() {
   ParseResult result;
 
   while (!check(TokenType::Eof)) {
+    // Skip preprocessor directives (#include, #ifdef, #else, #endif, #pragma, etc.)
+    if (peek().text.size() > 0 && peek().text[0] == '#') {
+      advance();
+      // Skip to end of line / semicolon
+      while (!check(TokenType::Eof) && !check(TokenType::Semicolon)) advance();
+      match(TokenType::Semicolon);
+      continue;
+    }
+
+    // Using declaration
+    if (check(TokenType::Using)) {
+      result.usingDecls.push_back(parseUsingDecl());
+      continue;
+    }
+
+    // Namespace
+    if (check(TokenType::Namespace)) {
+      result.namespaces.push_back(parseNamespaceDef());
+      continue;
+    }
+
     // Template prefix for struct or function
     if (check(TokenType::Template)) {
       // Look ahead to see if it's template struct or template function
@@ -568,19 +840,28 @@ Parser::ParseResult Parser::parseAll() {
 
     // Parse a function if we see: type[*] name(
     bool isFuncStart = false;
-    if (isTypeKeyword()) {
+    if (isTypeKeyword() || check(TokenType::Void) || check(TokenType::Typename)) {
       isFuncStart = true;
     } else if (check(TokenType::Identifier) && _pos + 1 < _tokens.size() &&
                _tokens[_pos + 1].type == TokenType::Identifier) {
+      isFuncStart = true;
+    } else if (check(TokenType::Identifier) && _pos + 1 < _tokens.size() &&
+               _tokens[_pos + 1].type == TokenType::DoubleColon) {
+      // Could be a qualified function like: void N::foo()
       isFuncStart = true;
     }
 
     if (isFuncStart) {
       // Look ahead to find identifier then LParen
       size_t ahead = _pos;
-      // Skip type tokens (including pointers)
+      // Skip type tokens (including pointers, ::, identifiers)
       while (ahead < _tokens.size() && (_tokens[ahead].type == TokenType::Star ||
                                          _tokens[ahead].type == TokenType::Identifier ||
+                                         _tokens[ahead].type == TokenType::DoubleColon ||
+                                         _tokens[ahead].type == TokenType::Less ||
+                                         _tokens[ahead].type == TokenType::Greater ||
+                                         _tokens[ahead].type == TokenType::Typename ||
+                                         _tokens[ahead].type == TokenType::Struct ||
                                          (_tokens[ahead].type == TokenType::Int) ||
                                          (_tokens[ahead].type == TokenType::Double) ||
                                          (_tokens[ahead].type == TokenType::Float) ||
@@ -595,11 +876,9 @@ Parser::ParseResult Parser::parseAll() {
         continue;
       }
     }
-    // Unexpected token at top level
-    std::ostringstream oss;
-    oss << "Line " << peek().line << ":" << peek().col << " unexpected token '"
-        << peek().text << "'";
-    throw std::runtime_error(oss.str());
+
+    // Skip any other token we don't understand (e.g., stray identifiers from skipped code)
+    advance();
   }
 
   return result;
