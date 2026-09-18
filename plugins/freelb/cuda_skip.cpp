@@ -1,6 +1,7 @@
-#include "filters.h"
+#include "cuda_skip.h"
 
 namespace cse {
+namespace freelb {
 
 bool skipDoubleUnderscoreTokens(const Token& tok) {
   const auto& text = tok.text;
@@ -12,4 +13,5 @@ bool skipDoubleUnderscoreTokens(const Token& tok) {
   return false;
 }
 
+}  // namespace freelb
 }  // namespace cse

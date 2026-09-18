@@ -8,10 +8,10 @@
 
 #include "analysis/cost_model.h"
 #include "backend/codegen.h"
-#include "frontend/filters.h"
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
 #include "frontend/region_extractor.h"
+#include "../plugins/freelb/config.h"
 #include "ir/ir_builder.h"
 #include "ir/ir_module.h"
 #include "passes/pass_manager.h"
@@ -36,9 +36,7 @@ struct OptResult {
 static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
                                 bool collectCost) {
   // 1. Create config with FreeLB defaults (skip __xx__, simplify T{1})
-  cse::CSEConfig config;
-  config.tokenFilter = cse::skipDoubleUnderscoreTokens;
-  config.simplifyBraceInit = true;
+  cse::CSEConfig config = cse::freelb::createFreeLBConfig();
 
   // 2. Lex: tokenize source
   cse::Lexer lexer(code, config);

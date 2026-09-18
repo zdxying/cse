@@ -1,13 +1,16 @@
 CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -Isrc
 SRCDIR   := src
+PLUGDIR  := plugins
 BUILDDIR := build
 BINDIR   := bin
 
-# Library sources (everything except main.cpp)
-LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp, $(shell find $(SRCDIR) -name '*.cpp'))
-LIB_OBJECTS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/%.o,$(LIB_SOURCES))
-PIC_OBJECTS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
+# Library sources (everything except main.cpp, includes src/ and plugins/)
+LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp, $(shell find $(SRCDIR) $(PLUGDIR) -name '*.cpp'))
+
+# Map source paths to object paths: src/foo/bar.o -> build/foo/bar.o, plugins/freelb/baz.o -> build/plugins/freelb/baz.o
+LIB_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.o,$(LIB_SOURCES))
+PIC_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
 
 # Targets
 STATIC_LIB  := $(BINDIR)/libcse.a
@@ -27,17 +30,25 @@ $(DYNAMIC_LIB): $(PIC_OBJECTS)
 	$(CXX) -shared -o $@ $^
 
 # Executable (statically linked)
-$(TARGET): $(BUILDDIR)/main.o $(STATIC_LIB)
+$(TARGET): $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB)
 	@mkdir -p $(BINDIR)
-	$(CXX) $(BUILDDIR)/main.o $(STATIC_LIB) -o $@
+	$(CXX) $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB) -o $@
 
 # Normal objects (for static lib and main.o)
-$(BUILDDIR)/%.o: $(SRCDIR)/%.cpp
+$(BUILDDIR)/$(SRCDIR)/%.o: $(SRCDIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILDDIR)/$(PLUGDIR)/%.o: $(PLUGDIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # PIC objects (for dynamic lib)
-$(BUILDDIR)/%.pic.o: $(SRCDIR)/%.cpp
+$(BUILDDIR)/$(SRCDIR)/%.pic.o: $(SRCDIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
+
+$(BUILDDIR)/$(PLUGDIR)/%.pic.o: $(PLUGDIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
 
