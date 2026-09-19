@@ -117,12 +117,14 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    pkg-config/SONAME。
 
 ### 中优先级
-4. **latset 表同步**：`lattice_resolve.cpp` 的速度向量/权重是手抄自
-   `src/lbm/lattice_set.h`，存在漂移风险；应改为从 FreeLB 头生成或加校验。
-   目前仅 6 个 latset（无 D1Q3/D2Q4）。
-5. **`make install-ur` 语义**：`verify` 比较的是 `src/lbm/*.ur.h`（当前
-   `moment.ur.h` 已是生成版），安装后再次验证会退化为“自己比自己”。需要
-   保留手写参考副本或调整流程（verify 用上游参考，再 install）。
+4. ~~latset 表同步~~ **已完成（防漂移）**：`tests/check_lattice.py` 解析
+   FreeLB `latsetdata::c<D,Q>`/`w<D,Q>` 与引擎 `kDxQy{c,w}` 并逐一比对，
+   夹具与权重不一致即失败；`make test` 在存在 FreeLB checkout 时自动运行。
+   仍仅覆盖 6 个 latset（无 D1Q3/D2Q4，两者未被 `.ur.h` 使用）。
+5. ~~`make install-ur` 语义~~ **已完成**：手写参考快照固定到
+   `tools/cse/reference/{moment,equilibrium,force}.ur.h`，`verify` 改为与
+   reference 比较，`install` 覆盖 `src/lbm/*.ur.h` 后再次 verify 仍有意义
+   （reference 变化时用 `make gen-refs` 重新快照）。
 6. **文档**：`tools/cse/DESIGN.md` 的“架构总览”等章节仍是旧解释器描述，
    应整体重写为“引擎 + 驱动”的新结构。
 7. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例；引擎侧跑回归。
