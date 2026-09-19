@@ -53,6 +53,16 @@ int comparisons(int a, int b) {
 }
 
 //@cse
+double loop_impure_init(double x) {
+    double s = 0.0;
+    for (int k = 0; k < 3; ++k) {
+        double v = side_effect(x + (double)k);
+        s = s + v;
+    }
+    return s;
+}
+
+//@cse
 double shadowing(double x) {
     double y = x + 1.0;
     {

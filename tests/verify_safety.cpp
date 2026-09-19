@@ -50,7 +50,17 @@ int main() {
   //    a=5,b=5 -> 1 + 2 + 0 + 8 = 11
   check("comparisons eq", comparisons(5, 5), 11.0);
 
-  // 5. Shadowing: inner y must not clobber the outer y.
+  // 5. A loop with an impure-initialized local must not be unrolled/shared.
+  g_calls = 0;
+  double li = loop_impure_init(1.0);
+  g_calls = 0;
+  double wantLi = 0.0;
+  wantLi += side_effect(1.0);
+  wantLi += side_effect(2.0);
+  wantLi += side_effect(3.0);
+  check("loop_impure", li, wantLi);
+
+  // 6. Shadowing: inner y must not clobber the outer y.
   check("shadowing", shadowing(2.0), 3.0);
 
   std::printf(failures == 0 ? "\nALL SAFETY CHECKS PASSED\n"

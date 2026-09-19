@@ -187,20 +187,80 @@ void collectDeclNames(StmtIR* stmt, std::set<std::string>& out) {
   }
 }
 
+// Record each declared name's initializer (last declaration wins; IRBuilder
+// alpha-renames shadowed names so a name is unique per scope).
+void collectDeclInits(StmtIR* stmt,
+                      std::unordered_map<std::string, DAGNode*>& out) {
+  if (!stmt) return;
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      auto* b = static_cast<BlockIR*>(stmt);
+      for (auto& s : b->stmts) collectDeclInits(s.get(), out);
+      break;
+    }
+    case StmtIRKind::VarDecl: {
+      auto* d = static_cast<VarDeclIR*>(stmt);
+      out[d->name] = d->init;
+      break;
+    }
+    case StmtIRKind::ForLoop: {
+      auto* f = static_cast<ForLoopIR*>(stmt);
+      collectDeclInits(f->init.get(), out);
+      collectDeclInits(f->body.get(), out);
+      break;
+    }
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(stmt);
+      collectDeclInits(ie->thenBranch.get(), out);
+      collectDeclInits(ie->elseBranch.get(), out);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// A body-local declaration can be unrolled only if its initializer can be
+// inlined at every use and the variable is never reassigned.
+bool declInlinable(DAGNode* init) {
+  return init && init->kind != NodeKind::Variable && !hasImpure(init);
+}
+
 // Inline confined local declarations (name -> init) and drop the declarations.
 // `inlinable` holds names whose uses are fully contained in the loop body.
+// Recurses into nested statements so declarations in nested blocks are removed
+// too; IRBuilder alpha-renames shadowed names, so substituting globally within
+// the body is safe.
 void inlineLocalDecls(IRModule& mod, StmtIR* stmt,
                       const std::set<std::string>& inlinable) {
-  if (!stmt || stmt->kind != StmtIRKind::Block) return;
-  auto* b = static_cast<BlockIR*>(stmt);
+  if (!stmt) return;
+  if (stmt->kind != StmtIRKind::Block) {
+    switch (stmt->kind) {
+      case StmtIRKind::ForLoop: {
+        auto* f = static_cast<ForLoopIR*>(stmt);
+        inlineLocalDecls(mod, f->init.get(), inlinable);
+        inlineLocalDecls(mod, f->body.get(), inlinable);
+        break;
+      }
+      case StmtIRKind::IfElse: {
+        auto* ie = static_cast<IfElseIR*>(stmt);
+        inlineLocalDecls(mod, ie->thenBranch.get(), inlinable);
+        inlineLocalDecls(mod, ie->elseBranch.get(), inlinable);
+        break;
+      }
+      default:
+        break;
+    }
+    return;
+  }
 
+  auto* b = static_cast<BlockIR*>(stmt);
   std::unordered_map<std::string, DAGNode*> defs;
   auto it = b->stmts.begin();
   while (it != b->stmts.end()) {
     if ((*it)->kind == StmtIRKind::VarDecl) {
       auto* d = static_cast<VarDeclIR*>(it->get());
-      if (d->init && d->init->kind != NodeKind::Variable &&
-          !hasImpure(d->init) && inlinable.count(d->name)) {
+      if (declInlinable(d->init) && inlinable.count(d->name)) {
         defs[d->name] = d->init;
         it = b->stmts.erase(it);
         continue;
@@ -208,6 +268,14 @@ void inlineLocalDecls(IRModule& mod, StmtIR* stmt,
     }
     ++it;
   }
+
+  // Recurse into nested structured statements to drop their declarations too.
+  for (auto& s : b->stmts) {
+    if (s->kind == StmtIRKind::ForLoop || s->kind == StmtIRKind::IfElse) {
+      inlineLocalDecls(mod, s.get(), inlinable);
+    }
+  }
+
   if (defs.empty()) return;
 
   for (int iter = 0; iter < 4 && !defs.empty(); ++iter) {
@@ -290,10 +358,14 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
     int count = 0;
     if (!matchCountedLoop(f, maxUnroll, var, count)) return stmt;
 
-    // Only unroll if every local declared in the body is confined to the body;
-    // otherwise inlining the declarations would change semantics.
+    // Only unroll if every local declared in the body is confined to the body
+    // *and* can be inlined away. Otherwise the clones would redeclare the same
+    // name and all iterations would share one variable, which later passes
+    // would wrongly treat as loop-invariant.
     std::set<std::string> decls;
     collectDeclNames(f->body.get(), decls);
+    std::unordered_map<std::string, DAGNode*> declInits;
+    collectDeclInits(f->body.get(), declInits);
     auto bodyUses = countUses(f->body.get());
     std::set<std::string> inlinable;
     for (auto& name : decls) {
@@ -301,10 +373,12 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
       auto b = bodyUses.find(name);
       int gv = (g == globalUses.end()) ? 0 : g->second;
       int bv = (b == bodyUses.end()) ? 0 : b->second;
-      if (gv == bv) inlinable.insert(name);
-    }
-    for (auto& name : decls) {
-      if (!inlinable.count(name)) return stmt;  // not safe to unroll
+      if (gv != bv) return stmt;  // used outside the body: cannot unroll
+      auto di = declInits.find(name);
+      DAGNode* init = (di == declInits.end()) ? nullptr : di->second;
+      if (!declInlinable(init)) return stmt;  // initializer cannot be inlined
+      if (reassignedIn(f->body.get(), name)) return stmt;
+      inlinable.insert(name);
     }
 
     auto block = std::make_unique<BlockIR>();
