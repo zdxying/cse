@@ -96,10 +96,13 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 ## 4. 未完成 / TODO
 
 ### 高优先级（发布前）
-1. **推送与依赖 URL**：`freelb-port` 尚未推到引擎远端，FreeLB 的
-   `.gitmodules` 仍指向本地绝对路径 `/home/ym/code/cse`。需要
-   `git push origin freelb-port` 后把 submodule URL 改为远端，并验证
-   `git submodule update --init` 在干净克隆下可用。
+1. ~~推送与依赖 URL~~ **已完成**：`freelb-port` 已推到
+   `/mnt/d/gitservice/cse.git`；FreeLB `.gitmodules` 使用
+   `/mnt/d/gitservice/cse.git`。注意该远端是本地 bare 仓库，克隆
+   FreeLB 时需允许 file 协议：
+   `git -c protocol.file.allow=always submodule update --init`
+   （或 `git config protocol.file.allow always`）。若后续发布到 GitHub，
+   用一条命令改 URL 即可（`git config -f .gitmodules submodule.third_party/cse.url <url>`）。
 2. **统一测试入口**：引擎目前无 `make test`/CI；建议加一个脚本运行
    `cse` 回归 + `csegen tests/ur/*.h` + 三个 Python 验证（需要 FreeLB 参考头）。
 3. **发布构建/安装**：引擎默认 `-O0`；建议提供 `-O2` release、可选
