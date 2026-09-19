@@ -1,12 +1,28 @@
 #include "algebraic_simplify.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "../ir/ir_module.h"
 #include "../ir/statement.h"
 
 namespace cse {
+
+namespace {
+
+// Format a constant for code emission with round-trip precision.
+std::string numText(double v) {
+  if (v == static_cast<long long>(v) && std::abs(v) < 1e15)
+    return std::to_string(static_cast<long long>(v));
+  std::ostringstream oss;
+  oss << std::setprecision(17) << v;
+  return oss.str();
+}
+
+}  // namespace
 
 class AlgebraicSimplifyVisitor {
  public:
@@ -94,6 +110,18 @@ class AlgebraicSimplifyVisitor {
       if (result != node) { simplifications++; return result; }
     }
 
+    // Even-power canonicalization: (-a) * (-a) -> a * a
+    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+      DAGNode* result = evenPower(node);
+      if (result != node) { simplifications++; return result; }
+    }
+
+    // Constant product normalization: fold constant factors, const first.
+    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+      DAGNode* result = normalizeProduct(node);
+      if (result != node) { simplifications++; return result; }
+    }
+
     return node;
   }
 
@@ -111,6 +139,76 @@ class AlgebraicSimplifyVisitor {
     if (isConst(rhs, 2)) return module.createBinaryOp('+', lhs, lhs);
     if (isConst(lhs, 2)) return module.createBinaryOp('+', rhs, rhs);
     return node;
+  }
+
+  // If `n` represents the negation of some expression, return the inner expr.
+  DAGNode* negInner(DAGNode* n) {
+    if (!n) return nullptr;
+    if (n->kind == NodeKind::UnaryOp && n->op == '-' && n->operands.size() == 1) {
+      return n->operands[0];
+    }
+    if (n->kind == NodeKind::BinaryOp && n->op == '*' && n->operands.size() == 2) {
+      if (isConst(n->operands[0], -1)) return n->operands[1];
+      if (isConst(n->operands[1], -1)) return n->operands[0];
+    }
+    return nullptr;
+  }
+
+  // (-a) * (-a) → a * a  (so opposite lattice directions share their square)
+  DAGNode* evenPower(DAGNode* node) {
+    if (node->kind != NodeKind::BinaryOp || node->op != '*') return node;
+    if (node->operands.size() != 2) return node;
+    DAGNode* li = negInner(node->operands[0]);
+    DAGNode* ri = negInner(node->operands[1]);
+    if (li && ri && li->id == ri->id) {
+      return module.createBinaryOp('*', li, li);
+    }
+    return node;
+  }
+
+  void flattenMul(DAGNode* n, std::vector<DAGNode*>& factors) {
+    if (n->kind == NodeKind::BinaryOp && n->op == '*' && n->operands.size() == 2) {
+      flattenMul(n->operands[0], factors);
+      flattenMul(n->operands[1], factors);
+    } else {
+      factors.push_back(n);
+    }
+  }
+
+  // Normalize a multiplication chain: fold all constant factors into a single
+  // leading constant and rebuild left-associatively. Makes `uc*uc*0.5*9.0`
+  // and `uc*uc*4.5` share one DAG node.
+  DAGNode* normalizeProduct(DAGNode* node) {
+    if (node->kind != NodeKind::BinaryOp || node->op != '*') return node;
+    if (node->operands.size() != 2) return node;
+
+    std::vector<DAGNode*> factors;
+    flattenMul(node, factors);
+
+    double constProd = 1.0;
+    bool hasConst = false;
+    std::vector<DAGNode*> nonConst;
+    for (auto* f : factors) {
+      if (f->kind == NodeKind::Constant) {
+        constProd *= f->constVal;
+        hasConst = true;
+      } else {
+        nonConst.push_back(f);
+      }
+    }
+
+    if (nonConst.empty()) {
+      return module.createConst(constProd, numText(constProd));
+    }
+
+    DAGNode* acc = nullptr;
+    if (hasConst && constProd != 1.0) {
+      acc = module.createConst(constProd, numText(constProd));
+    }
+    for (auto* f : nonConst) {
+      acc = acc ? module.createBinaryOp('*', acc, f) : f;
+    }
+    return acc ? acc : node;
   }
 
   DAGNode* applyIdentities(DAGNode* node) {

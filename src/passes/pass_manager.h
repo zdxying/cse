@@ -18,7 +18,11 @@ class PassManager {
 
   // Create a default pass pipeline
   // enableRecombine: whether to enable expression recombination
-  static PassManager createDefault(bool enableRecombine = false);
+  // resolvePass: optional project-specific pass run after loop unrolling and
+  //              before the generic algebraic/CSE pipeline (e.g. lattice
+  //              constant resolution).
+  static PassManager createDefault(bool enableRecombine = false,
+                                   std::unique_ptr<Pass> resolvePass = nullptr);
 
   size_t passCount() const { return _passes.size(); }
 

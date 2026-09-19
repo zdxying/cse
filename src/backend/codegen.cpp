@@ -264,6 +264,11 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       if (node->name == "++" || node->name == "--") {
         return node->name + operand;
       }
+      // Prefix unary: parenthesize compound operands to preserve precedence.
+      if (node->operands[0]->kind == NodeKind::BinaryOp ||
+          node->operands[0]->kind == NodeKind::Ternary) {
+        operand = "(" + operand + ")";
+      }
       return std::string(1, node->op) + operand;
     }
 

@@ -6,6 +6,8 @@
 #include "cse_pass.h"
 #include "dce.h"
 #include "expr_recomb.h"
+#include "loop_unroll.h"
+#include "reassociate.h"
 #include "value_prop.h"
 
 namespace cse {
@@ -20,13 +22,20 @@ void PassManager::runAll(IRModule& module) {
   }
 }
 
-PassManager PassManager::createDefault(bool enableRecombine) {
+PassManager PassManager::createDefault(bool enableRecombine,
+                                      std::unique_ptr<Pass> resolvePass) {
   PassManager pm;
+  pm.addPass(createLoopUnrollPass());
+  if (resolvePass) {
+    pm.addPass(std::move(resolvePass));
+  }
   pm.addPass(createConstantFoldPass());
   pm.addPass(createAlgebraicSimplifyPass());
+  pm.addPass(createReassociatePass());
   pm.addPass(createCSEPass());
   if (enableRecombine) {
     pm.addPass(createExprRecombinePass());
+    pm.addPass(createAlgebraicSimplifyPass());
   }
   pm.addPass(createValuePropPass());
   pm.addPass(createDCEPass());

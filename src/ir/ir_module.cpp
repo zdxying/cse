@@ -1,5 +1,6 @@
 #include "ir_module.h"
 
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <sstream>
@@ -100,9 +101,16 @@ DAGNode* IRModule::createNode(NodeKind kind) {
 DAGNode* IRModule::createConst(double val, const std::string& text) {
   auto node = createNode(NodeKind::Constant);
   node->constVal = val;
-  node->numText = text.empty() ? std::to_string(val) : text;
+  std::string t = text.empty() ? std::to_string(val) : text;
+  // Render integral constants without a trailing ".0" (array indices, etc.).
+  if (val == std::floor(val) && std::fabs(val) < 1e15) {
+    t = std::to_string(static_cast<long long>(val));
+  }
+  node->numText = t;
   node->recomputeHash();
-  return node;
+  // Deduplicate constants by value so that expressions built around the same
+  // literal share a DAG node (enables cross-statement CSE).
+  return findExistingNode(node);
 }
 
 DAGNode* IRModule::getVar(const std::string& name) {

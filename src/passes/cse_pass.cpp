@@ -216,7 +216,7 @@ void CSEPass::run(IRModule& module) {
   // We iterate multiple times because extracting one CSE opportunity
   // may reveal new ones (e.g., after replacing, a previously unique
   // subexpression may now be shared).
-  for (int iteration = 0; iteration < 5; ++iteration) {
+  for (int iteration = 0; iteration < 100; ++iteration) {
     // Phase 1: For each top-level statement, collect all DAG nodes
     // nodeToStmts: maps node -> set of statement indices that use it
     std::unordered_map<DAGNode*, std::vector<size_t>> nodeToStmts;

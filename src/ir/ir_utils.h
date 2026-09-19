@@ -1,5 +1,8 @@
 #pragma once
+#include <cmath>
 #include <functional>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -132,13 +135,13 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
         case '/': result = (r->constVal != 0) ? l->constVal / r->constVal : 0; break;
         default: return node;
       }
-      std::string text = std::to_string(result);
-      // Trim trailing zeros for cleaner output
-      auto pos = text.find('.');
-      if (pos != std::string::npos) {
-        auto last = text.find_last_not_of('0');
-        if (last == pos) text.erase(pos);
-        else text.erase(last + 1);
+      std::string text;
+      if (result == std::floor(result) && std::fabs(result) < 1e15) {
+        text = std::to_string(static_cast<long long>(result));
+      } else {
+        std::ostringstream oss;
+        oss << std::setprecision(17) << result;
+        text = oss.str();
       }
       return mod.createConst(result, text);
     }

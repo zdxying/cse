@@ -12,6 +12,7 @@
 #include "frontend/parser.h"
 #include "frontend/region_extractor.h"
 #include "../plugins/freelb/config.h"
+#include "../plugins/freelb/lattice_resolve.h"
 #include "ir/ir_builder.h"
 #include "ir/ir_module.h"
 #include "passes/pass_manager.h"
@@ -83,7 +84,8 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
         optResult.costBefore.stmts += before.stmts;
         optResult.costBefore.vars += before.vars;
       }
-      auto pm = cse::PassManager::createDefault(enableRecombine);
+      auto pm = cse::PassManager::createDefault(
+          enableRecombine, cse::freelb::createLatticeResolvePass());
       pm.runAll(*methodMod);
       if (collectCost) {
         auto after = cse::analyzeCost(*methodMod);
@@ -122,7 +124,8 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
     }
 
     // Run passes
-    auto pm = cse::PassManager::createDefault(enableRecombine);
+    auto pm = cse::PassManager::createDefault(
+        enableRecombine, cse::freelb::createLatticeResolvePass());
     pm.runAll(module);
 
     // Collect cost after optimization
