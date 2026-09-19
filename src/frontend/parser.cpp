@@ -102,7 +102,7 @@ std::string Parser::parseType() {
     type += advance().text;  // custom type name
   }
 
-  // Handle :: qualified names: std::string, LatSet::q, etc.
+  // Handle :: qualified names: std::string, ns::member, etc.
   while (check(TokenType::DoubleColon)) {
     advance();  // consume ::
     type += "::";
@@ -483,7 +483,7 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
     }
     auto expr = std::make_unique<Expr>(ExprKind::Variable, currentLoc());
     expr->name = tok.text;
-    // Handle :: qualified names: LatSet::q, std::sin, etc.
+    // Handle :: qualified names: ns::member, std::sin, etc.
     while (check(TokenType::DoubleColon)) {
       advance();  // consume ::
       expr->name += "::";
@@ -496,7 +496,7 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         break;
       }
     }
-    // Handle template arguments in expressions: latset::c<LatSet>(k)
+    // Handle template arguments in expressions: ns::f<T>(k)
     if (check(TokenType::Less)) {
       size_t saved = _pos;
       advance();  // consume <

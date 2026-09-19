@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "frontend/cse_config.h"
 #include "ir/dag_node.h"
 #include "ir/ir_module.h"
 #include "ir/statement.h"
@@ -103,17 +102,18 @@ bool isLatticeCall(DAGNode* node, const char* which) {
 
 class LatticeResolveVisitor {
  public:
-  LatticeResolveVisitor(IRModule& mod, const CSEConfig& cfg)
-      : module(mod), config(cfg) {}
+  LatticeResolveVisitor(IRModule& mod, const std::string& alias,
+                        const std::string& setName)
+      : module(mod), alias(alias), setName(setName) {}
   IRModule& module;
-  const CSEConfig& config;
+  std::string alias;
+  std::string setName;
   int resolved = 0;
 
   // Resolve `<alias>` template arguments to the configured concrete lattice.
   const LatticeInfo* latticeFor(const std::string& callee) {
-    if (!config.latsetAlias.empty() &&
-        callee.find(config.latsetAlias) != std::string::npos) {
-      return lookupLattice(config.latsetName);
+    if (!alias.empty() && callee.find(alias) != std::string::npos) {
+      return lookupLattice(setName);
     }
     return lookupLattice(callee);
   }
@@ -321,21 +321,24 @@ class LatticeResolveVisitor {
 
 class LatticeResolvePass : public Pass {
  public:
-  explicit LatticeResolvePass(const CSEConfig& cfg) : config(cfg) {}
+  LatticeResolvePass(std::string alias, std::string setName)
+      : alias(std::move(alias)), setName(std::move(setName)) {}
   std::string name() const override { return "LatticeResolve"; }
   void run(IRModule& module) override {
-    LatticeResolveVisitor visitor(module, config);
+    LatticeResolveVisitor visitor(module, alias, setName);
     visitor.visitStmt(module.body.get());
   }
 
  private:
-  CSEConfig config;
+  std::string alias;
+  std::string setName;
 };
 
 }  // namespace
 
-std::unique_ptr<Pass> createLatticeResolvePass(const CSEConfig& config) {
-  return std::make_unique<LatticeResolvePass>(config);
+std::unique_ptr<Pass> createLatticeResolvePass(const std::string& alias,
+                                               const std::string& setName) {
+  return std::make_unique<LatticeResolvePass>(alias, setName);
 }
 
 }  // namespace freelb

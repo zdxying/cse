@@ -137,8 +137,8 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
     }
     lhs = node->operands[0];
     rhs = node->operands[1];
-    // Do not fold declared/symbolic constants (e.g. latset::w<LatSet>(k)) into
-    // numeric literals; the symbol must survive to code emission.
+    // Do not fold declared/symbolic constants into numeric literals; the
+    // declared symbol must survive to code emission.
     if (lhs->kind == NodeKind::Constant && lhs->symbol.empty() &&
         rhs->kind == NodeKind::Constant && rhs->symbol.empty()) {
       double result = 0;

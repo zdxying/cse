@@ -7,14 +7,15 @@ BUILDDIR := build
 BINDIR   := bin
 
 # Library sources (everything except the two program entry points)
-LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp $(PLUGDIR)/freelb/ur_emit_main.cpp, $(shell find $(SRCDIR) $(PLUGDIR) -name '*.cpp'))
+LIB_SOURCES := $(filter-out $(PLUGDIR)/freelb/cse_main.cpp $(PLUGDIR)/freelb/ur_emit_main.cpp, $(shell find $(SRCDIR) $(PLUGDIR) -name '*.cpp'))
 
 # Map source paths to object paths: src/foo/bar.o -> build/foo/bar.o, plugins/freelb/baz.o -> build/plugins/freelb/baz.o
 LIB_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.o,$(LIB_SOURCES))
 PIC_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
 
 # Auto-generated header dependencies (so header edits trigger rebuilds)
-DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) $(BUILDDIR)/$(SRCDIR)/main.d \
+DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) \
+        $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.d \
         $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.d
 
 # Targets
@@ -36,9 +37,9 @@ $(DYNAMIC_LIB): $(PIC_OBJECTS)
 	$(CXX) -shared -o $@ $^
 
 # Executable (statically linked)
-$(TARGET): $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB)
+$(TARGET): $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.o $(STATIC_LIB)
 	@mkdir -p $(BINDIR)
-	$(CXX) $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB) -o $@
+	$(CXX) $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.o $(STATIC_LIB) -o $@
 
 # FreeLB .ur.h generator (statically linked)
 $(CSEGEN): $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB)

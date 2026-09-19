@@ -7,17 +7,18 @@
 
 namespace cse {
 
+class IRModule;
+struct DAGNode;
+
 // Configuration for the CSE frontend (lexer + parser) and optimization passes.
-// Controls project-specific behavior vs generic C++ behavior, and the level of
-// algebraic assumptions the optimizer is allowed to make.
+// Controls generic C++ behavior, the level of algebraic assumptions the
+// optimizer is allowed to make, and optional project-specific hooks.
 //
 // Defaults are *conservative* (safe for generic C++): the optimizer will not
-// assume numeric commutativity/associativity unless the caller opts in. The
-// FreeLB configuration enables the aggressive rules.
+// assume numeric commutativity/associativity unless the caller opts in.
 struct CSEConfig {
   // Token filter: return true to skip a token during lexing.
   // nullptr = no filtering (pass all tokens through).
-  // Default FreeLB/CUDA: skip __xx__ pattern tokens (__host__, __device__, etc.)
   std::function<bool(const Token&)> tokenFilter = nullptr;
 
   // If true, desugar Type{expr} to just expr (CSE-friendly).
@@ -49,22 +50,29 @@ struct CSEConfig {
   // set of math functions is always considered pure.
   std::function<bool(const std::string&)> isPureFunction = nullptr;
 
-  // ---- FreeLB per-latset instantiation -----------------------------------
-  // When `latsetName` is non-empty, the tool is optimizing a template body for
-  // one concrete lattice set:
-  //   - `<latsetAlias>::q/d/cs2/InvCs2/InvCs4` fold to numbers;
-  //   - `latset::c<latsetAlias>` / `latset::w<latsetAlias>` resolve against
-  //     `latsetName`, so a templated `LatSet` alias works like a concrete set.
-  std::string latsetAlias;  // template alias in the source, e.g. "LatSet"
-  std::string latsetName;   // concrete lattice set, e.g. "D3Q19"
-  int latsetDim = 0;        // d
-  int latsetQ = 0;          // q
-  double latsetCs2 = 1.0 / 3.0;
+  // ---- Project-specific hooks --------------------------------------------
 
-  // Lower FreeLB `Vector<T, LatSet::d>` values to per-component scalars so
-  // vector arithmetic (componentwise +,-,*,/ and dot products) can be CSE'd.
-  // Set for the force/moment structs; leave off for the equilibrium path.
+  // Resolve a source-level name to a constant DAG node (e.g. compile-time
+  // numeric members of a project type). Return nullptr to leave the name as a
+  // variable. Optional.
+  std::function<DAGNode*(IRModule&, const std::string&)> resolveName = nullptr;
+
+  // Lower fixed-size value types (e.g. `Vector<T,N>`) to per-component scalars
+  // so componentwise arithmetic (+, -, *, /) and dot products can be CSE'd.
+  //   - `vectorDim`: number of components.
+  //   - `isVectorType`: classifies a declared type as vector-valued.
+  //   - `isVectorProducingCall`: marks a call whose result is a vector (e.g. a
+  //     project vector accessor such as `ns::c<T>(k)`).
   bool lowerVectors = false;
+  int vectorDim = 0;
+  std::function<bool(const std::string&)> isVectorType = nullptr;
+  std::function<bool(const std::string&)> isVectorProducingCall = nullptr;
+
+  // Name of the scalar variable holding component `idx` of a lowered vector
+  // local, so later passes can fold `v[idx]` to that variable (e.g.
+  // `("unew", 1) -> "unew_1"`). Optional.
+  std::function<std::string(const std::string&, long long)> vectorLocalName =
+      nullptr;
 
   // Values for non-type template parameters or other compile-time names, e.g.
   // the `unsigned int d` of ScalarForcePopImpl. Folded to constants.

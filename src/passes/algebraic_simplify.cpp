@@ -176,7 +176,7 @@ class AlgebraicSimplifyVisitor {
     return nullptr;
   }
 
-  // (-a) * (-a) → a * a  (so opposite lattice directions share their square)
+  // (-a) * (-a) → a * a  (even powers are sign-independent)
   DAGNode* evenPower(DAGNode* node) {
     if (node->kind != NodeKind::BinaryOp || node->op != '*') return node;
     if (node->operands.size() != 2) return node;
@@ -211,8 +211,8 @@ class AlgebraicSimplifyVisitor {
     bool hasConst = false;
     std::vector<DAGNode*> nonConst;
     for (auto* f : factors) {
-      // A symbolic constant (e.g. latset::w<LatSet>(k)) must not be folded into
-      // a numeric product: keep it as a factor so the symbol is preserved.
+      // A symbolic constant (a declared accessor kept for emission) must not be
+      // folded into a numeric product: keep it so the symbol is preserved.
       if (f->kind == NodeKind::Constant && f->symbol.empty()) {
         constProd *= f->constVal;
         hasConst = true;
@@ -238,8 +238,8 @@ class AlgebraicSimplifyVisitor {
   // Factor negations out of a multiplication so opposite signs collapse onto a
   // shared positive subexpression:
   //   a * (-b) → -(a * b),  (-a) * b → -(a * b),  (-a) * (-b) → a * b
-  // Sign moves are exact for IEEE floating point, and this lets e.g. the two
-  // opposite lattice directions share `3 * uc`.
+  // Sign moves are exact for IEEE floating point, and let sign-flipped
+  // subexpressions share a common factor.
   DAGNode* normalizeSign(DAGNode* node) {
     if (node->kind != NodeKind::BinaryOp || node->op != '*') return node;
     if (node->operands.size() != 2) return node;

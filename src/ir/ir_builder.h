@@ -34,7 +34,7 @@ class IRBuilder {
 
  private:
   // A value is either a scalar or a fixed-size vector of scalar components
-  // (used to lower FreeLB `Vector<T, LatSet::d>` arithmetic).
+  // (used to lower project vector types, see CSEConfig::lowerVectors).
   struct VecValue {
     bool vec = false;
     DAGNode* scalar = nullptr;
@@ -64,10 +64,6 @@ class IRBuilder {
   bool isPureCallee(const std::string& callee) const;
   bool isReadOnlyRoot(const std::string& name) const;
   std::string rootName(const Expr& expr) const;
-
-  // Fold `<latsetAlias>::q/d/cs2/InvCs2/InvCs4` to a constant when a per-latset
-  // instantiation context is configured. Returns nullptr otherwise.
-  DAGNode* latsetConst(const std::string& name);
 
   // ---- Scope handling (alpha-renaming) ----
   void pushScope();

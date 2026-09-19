@@ -191,8 +191,8 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
     }
     case StmtIRKind::IfElse: {
       auto* ifElse = static_cast<IfElseIR*>(stmt);
-      // Preserve `if constexpr (...) stmt;` without braces so the FreeLB
-      // verifier (which treats `if` lines as opaque) can see the else branch.
+      // Preserve `if constexpr (...) stmt;` without braces so downstream
+      // tooling that treats `if` lines as opaque can still see the else branch.
       if (ifElse->isConstexpr && ifElse->thenBranch &&
           ifElse->thenBranch->kind != StmtIRKind::Block) {
         _out << ind << "if constexpr (" << emitExpr(ifElse->cond) << ") ";

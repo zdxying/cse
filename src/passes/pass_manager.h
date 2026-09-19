@@ -21,11 +21,15 @@ class PassManager {
   // config: semantic/safety settings (algebraic assumptions, purity, aliasing).
   // enableRecombine: whether to enable expression recombination
   // resolvePass: optional project-specific pass run after loop unrolling and
-  //              before the generic algebraic/CSE pipeline (e.g. lattice
-  //              constant resolution).
+  //              before constant folding/algebraic simplification (e.g.
+  //              resolving project intrinsics to constants).
+  // postAlgebraPass: optional project-specific pass run after algebraic
+  //              simplification and before reassociation/CSE (e.g. propagating
+  //              straight-line counters introduced by loop unrolling).
   static PassManager createDefault(const CSEConfig& config,
                                    bool enableRecombine = false,
-                                   std::unique_ptr<Pass> resolvePass = nullptr);
+                                   std::unique_ptr<Pass> resolvePass = nullptr,
+                                   std::unique_ptr<Pass> postAlgebraPass = nullptr);
 
  private:
   std::vector<std::unique_ptr<Pass>> _passes;

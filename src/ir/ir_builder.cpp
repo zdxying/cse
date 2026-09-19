@@ -186,23 +186,6 @@ std::string IRBuilder::rootName(const Expr& expr) const {
   }
 }
 
-DAGNode* IRBuilder::latsetConst(const std::string& name) {
-  if (_config.latsetAlias.empty() || _config.latsetName.empty()) return nullptr;
-  const std::string prefix = _config.latsetAlias + "::";
-  if (name.compare(0, prefix.size(), prefix) != 0) return nullptr;
-  const std::string member = name.substr(prefix.size());
-
-  if (member == "q")
-    return _module->createConst(_config.latsetQ, std::to_string(_config.latsetQ));
-  if (member == "d")
-    return _module->createConst(_config.latsetDim, std::to_string(_config.latsetDim));
-  const double cs2 = _config.latsetCs2;
-  if (member == "cs2") return _module->createConst(cs2);
-  if (member == "InvCs2") return _module->createConst(1.0 / cs2);
-  if (member == "InvCs4") return _module->createConst(1.0 / (cs2 * cs2));
-  return nullptr;
-}
-
 // ===== Scope handling =====
 
 void IRBuilder::pushScope() { _scopes.emplace_back(); }
@@ -257,12 +240,13 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
   _shadowCounters.clear();
   _vectorVars.clear();
   _vecLocalComps.clear();
-  _vecDim = _config.lowerVectors ? _config.latsetDim : 0;
+  _vecDim = _config.lowerVectors ? _config.vectorDim : 0;
   pushScope();  // parameter/base scope
   for (const auto& p : func.params) {
     _scopes.back()[p.name] = p.name;
     _module->getVar(p.name);
-    if (_config.lowerVectors && p.type.find("Vector") != std::string::npos) {
+    if (_config.lowerVectors && _config.isVectorType &&
+        _config.isVectorType(p.type)) {
       _vectorVars.insert(p.name);
     }
   }
@@ -417,7 +401,9 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
       return _module->createConst(expr.numVal, expr.numText);
 
     case ExprKind::Variable: {
-      if (DAGNode* c = latsetConst(expr.name)) return c;
+      if (_config.resolveName) {
+        if (DAGNode* c = _config.resolveName(*_module, expr.name)) return c;
+      }
       return varRef(expr.name);
     }
 
@@ -490,18 +476,21 @@ IRBuilder::VecValue IRBuilder::makeVector(std::vector<DAGNode*> comps) {
   return v;
 }
 
-// Lower FreeLB `Vector<T, LatSet::d>` arithmetic to component scalars. `vec*vec`
-// is a dot product, `scalar*vec` / `vec*scalar` are componentwise, and
-// `vec[i]` (constant i) selects a component. Lattice direction vectors
-// `latset::c<LatSet>(k)` are treated as vectors, so their components become
-// `latset::c<LatSet>(k)[i]` nodes that LatticeResolve later folds to constants.
+// Lower project vector types to component scalars. `vec*vec` is a dot product,
+// `scalar*vec` / `vec*scalar` are componentwise, and `vec[i]` (constant i)
+// selects a component. Calls classified by isVectorProducingCall are treated as
+// vectors, so their components become `call[i]` nodes that a project pass can
+// later fold to constants.
 IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
   switch (expr.kind) {
     case ExprKind::Number:
       return makeScalar(_module->createConst(expr.numVal, expr.numText));
 
     case ExprKind::Variable: {
-      if (DAGNode* c = latsetConst(expr.name)) return makeScalar(c);
+      if (_config.resolveName) {
+        if (DAGNode* c = _config.resolveName(*_module, expr.name))
+          return makeScalar(c);
+      }
       auto cb = _config.constBindings.find(expr.name);
       if (cb != _config.constBindings.end())
         return makeScalar(_module->createConst(cb->second));
@@ -633,9 +622,9 @@ IRBuilder::VecValue IRBuilder::valueArray(const Expr& expr) {
           return makeScalar(base.comps[i]);
       }
     }
-    // Non-constant index into a vector expression: keep `base[idx]` verbatim
-    // (e.g. `latset::c<LatSet>(k)[alpha]`, later folded by LatticeResolve; or
-    // a lowered vector local `unew[beta]`, resolved once beta is a constant).
+    // Non-constant index into a vector expression: keep `base[idx]` verbatim.
+    // A project pass may fold it later once the index becomes constant, and a
+    // lowered vector local `v[i]` is resolved once `i` is constant.
     result = base.base;
     if (!result) result = varRef(rootName(*expr.base));
   } else {
@@ -658,10 +647,10 @@ IRBuilder::VecValue IRBuilder::valueCall(const Expr& expr) {
              expr.base->kind == ExprKind::ArrowAccess)
       calleeText = expr.base->memberName;
   }
-  bool isLatDir = calleeText.find("latset::") != std::string::npos &&
-                  calleeText.find("::c") != std::string::npos;
+  bool isVecCall = _config.isVectorProducingCall &&
+                   _config.isVectorProducingCall(calleeText);
   DAGNode* call = buildScalarCall(expr);
-  if (isLatDir) {
+  if (isVecCall) {
     std::vector<DAGNode*> comps;
     for (int i = 0; i < _vecDim; ++i) {
       comps.push_back(_module->createArrayAccess(

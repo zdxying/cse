@@ -39,9 +39,9 @@ struct DAGNode {
   // Constant
   double constVal = 0;
   std::string numText;
-  // Optional symbolic form of a constant (e.g. a declared constexpr accessor
-  // such as `latset::w<D3Q19<double>>(1)`). Used for code emission only; the
-  // numeric constVal still drives folding, dedup and CSE.
+  // Optional symbolic form of a constant (a declared accessor kept verbatim,
+  // e.g. `ns::w<T>(1)`). Used for code emission only; the numeric constVal
+  // still drives folding, dedup and CSE.
   std::string symbol;
 
   // Variable

@@ -13,9 +13,16 @@ namespace cse {
 namespace {
 
 using ConstMap = std::unordered_map<std::string, double>;
+using VectorLocalName = CounterPropPass::VectorLocalName;
 
-// Rebuild a DAG subtree replacing array indices that are known constants.
-const std::unordered_set<std::string>* g_varNames = nullptr;
+// Context shared while rewriting a block: the known constant counters plus the
+// information needed to resolve lowered vector locals.
+struct Ctx {
+  IRModule& mod;
+  const ConstMap& known;
+  const std::unordered_set<std::string>& names;
+  const VectorLocalName& vecLocal;
+};
 
 void collectVarNamesExpr(DAGNode* e, std::unordered_set<std::string>& out) {
   if (!e) return;
@@ -68,52 +75,52 @@ void collectVarNamesStmt(StmtIR* s, std::unordered_set<std::string>& out) {
   }
 }
 
-DAGNode* rewriteIndexes(IRModule& mod, DAGNode* n, const ConstMap& known) {
+DAGNode* rewriteIndexes(DAGNode* n, const Ctx& ctx) {
   if (!n) return n;
   bool changed = false;
   std::vector<DAGNode*> ops;
   ops.reserve(n->operands.size());
   for (auto* op : n->operands) {
-    DAGNode* r = rewriteIndexes(mod, op, known);
+    DAGNode* r = rewriteIndexes(op, ctx);
     ops.push_back(r);
     if (r != op) changed = true;
   }
   if (n->kind == NodeKind::ArrayAccess && ops.size() == 2 &&
       ops[1]->kind == NodeKind::Variable) {
-    auto it = known.find(ops[1]->name);
-    if (it != known.end()) {
-      ops[1] = mod.createConst(it->second);
+    auto it = ctx.known.find(ops[1]->name);
+    if (it != ctx.known.end()) {
+      ops[1] = ctx.mod.createConst(it->second);
       changed = true;
     }
   }
-  // Lowered vector local indexed by a now-constant index: `unew[1]` -> `unew_1`.
+  // Lowered vector local indexed by a now-constant index: `v[1]` -> `v_1`.
   if (n->kind == NodeKind::ArrayAccess && ops.size() == 2 &&
       ops[0]->kind == NodeKind::Variable && ops[1]->kind == NodeKind::Constant &&
-      g_varNames) {
-    std::string comp = ops[0]->name + "_" +
-                       std::to_string(static_cast<long long>(ops[1]->constVal));
-    if (g_varNames->count(comp)) return mod.getVar(comp);
+      ctx.vecLocal) {
+    std::string comp =
+        ctx.vecLocal(ops[0]->name, static_cast<long long>(ops[1]->constVal));
+    if (!comp.empty() && ctx.names.count(comp)) return ctx.mod.getVar(comp);
   }
   if (!changed) return n;
   switch (n->kind) {
     case NodeKind::BinaryOp:
-      if (ops.size() == 2) return mod.createBinaryOp(n->op, ops[0], ops[1]);
+      if (ops.size() == 2) return ctx.mod.createBinaryOp(n->op, ops[0], ops[1]);
       break;
     case NodeKind::UnaryOp:
-      if (ops.size() == 1) return mod.createUnaryOp(n->op, ops[0]);
+      if (ops.size() == 1) return ctx.mod.createUnaryOp(n->op, ops[0]);
       break;
     case NodeKind::ArrayAccess:
-      if (ops.size() == 2) return mod.createArrayAccess(ops[0], ops[1], n->pure);
+      if (ops.size() == 2) return ctx.mod.createArrayAccess(ops[0], ops[1], n->pure);
       break;
     case NodeKind::MemberAccess:
-      if (ops.size() == 1) return mod.createMemberAccess(ops[0], n->name, n->pure);
+      if (ops.size() == 1) return ctx.mod.createMemberAccess(ops[0], n->name, n->pure);
       break;
     case NodeKind::ArrowAccess:
-      if (ops.size() == 1) return mod.createArrowAccess(ops[0], n->name, n->pure);
+      if (ops.size() == 1) return ctx.mod.createArrowAccess(ops[0], n->name, n->pure);
       break;
     case NodeKind::Call: {
       std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
-      return mod.createCall(ops[0], args, n->pure);
+      return ctx.mod.createCall(ops[0], args, n->pure);
     }
     default:
       return n;
@@ -121,47 +128,47 @@ DAGNode* rewriteIndexes(IRModule& mod, DAGNode* n, const ConstMap& known) {
   return n;
 }
 
-void rewriteStmt(IRModule& mod, StmtIR* stmt, const ConstMap& known) {
+void rewriteStmt(StmtIR* stmt, const Ctx& ctx) {
   if (!stmt) return;
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) rewriteStmt(mod, s.get(), known);
+      for (auto& s : b->stmts) rewriteStmt(s.get(), ctx);
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      rewriteStmt(mod, f->init.get(), known);
-      if (f->cond) f->cond = rewriteIndexes(mod, f->cond, known);
-      if (f->update) f->update = rewriteIndexes(mod, f->update, known);
-      if (f->updateRhs) f->updateRhs = rewriteIndexes(mod, f->updateRhs, known);
-      rewriteStmt(mod, f->body.get(), known);
+      rewriteStmt(f->init.get(), ctx);
+      if (f->cond) f->cond = rewriteIndexes(f->cond, ctx);
+      if (f->update) f->update = rewriteIndexes(f->update, ctx);
+      if (f->updateRhs) f->updateRhs = rewriteIndexes(f->updateRhs, ctx);
+      rewriteStmt(f->body.get(), ctx);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      if (ie->cond) ie->cond = rewriteIndexes(mod, ie->cond, known);
-      rewriteStmt(mod, ie->thenBranch.get(), known);
-      rewriteStmt(mod, ie->elseBranch.get(), known);
+      if (ie->cond) ie->cond = rewriteIndexes(ie->cond, ctx);
+      rewriteStmt(ie->thenBranch.get(), ctx);
+      rewriteStmt(ie->elseBranch.get(), ctx);
       break;
     }
     case StmtIRKind::ExprStmt:
       if (auto* e = static_cast<ExprStmtIR*>(stmt)->expr)
-        static_cast<ExprStmtIR*>(stmt)->expr = rewriteIndexes(mod, e, known);
+        static_cast<ExprStmtIR*>(stmt)->expr = rewriteIndexes(e, ctx);
       break;
     case StmtIRKind::Assign: {
       auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) a->targetExpr = rewriteIndexes(mod, a->targetExpr, known);
-      if (a->value) a->value = rewriteIndexes(mod, a->value, known);
+      if (a->targetExpr) a->targetExpr = rewriteIndexes(a->targetExpr, ctx);
+      if (a->value) a->value = rewriteIndexes(a->value, ctx);
       break;
     }
     case StmtIRKind::VarDecl:
       if (auto* i = static_cast<VarDeclIR*>(stmt)->init)
-        static_cast<VarDeclIR*>(stmt)->init = rewriteIndexes(mod, i, known);
+        static_cast<VarDeclIR*>(stmt)->init = rewriteIndexes(i, ctx);
       break;
     case StmtIRKind::Return:
       if (auto* r = static_cast<ReturnIR*>(stmt)->value)
-        static_cast<ReturnIR*>(stmt)->value = rewriteIndexes(mod, r, known);
+        static_cast<ReturnIR*>(stmt)->value = rewriteIndexes(r, ctx);
       break;
   }
 }
@@ -172,8 +179,9 @@ bool isConst(DAGNode* n) {
 
 // Process a block in order: rewrite indices, fold constant `if`s, and update
 // the map of known constant counters. Splices folded branches into the block.
-void processBlock(IRModule& mod, BlockIR* block) {
+void processBlock(BlockIR* block, const Ctx& outer) {
   ConstMap known;
+  Ctx ctx{outer.mod, known, outer.names, outer.vecLocal};
   std::vector<std::unique_ptr<StmtIR>> out;
   out.reserve(block->stmts.size());
 
@@ -192,11 +200,11 @@ void processBlock(IRModule& mod, BlockIR* block) {
           if (branch->kind == StmtIRKind::Block) {
             auto* bb = static_cast<BlockIR*>(branch.get());
             for (auto& s : bb->stmts) {
-              rewriteStmt(mod, s.get(), known);
+              rewriteStmt(s.get(), ctx);
               out.push_back(std::move(s));
             }
           } else {
-            rewriteStmt(mod, branch.get(), known);
+            rewriteStmt(branch.get(), ctx);
             out.push_back(std::move(branch));
           }
         }
@@ -204,7 +212,7 @@ void processBlock(IRModule& mod, BlockIR* block) {
       }
     }
 
-    rewriteStmt(mod, stmt, known);
+    rewriteStmt(stmt, ctx);
 
     // Update known constants.
     if (stmt->kind == StmtIRKind::VarDecl) {
@@ -238,11 +246,11 @@ void processBlock(IRModule& mod, BlockIR* block) {
 
   // Recurse into nested blocks that survived.
   for (auto& s : out) {
-    if (s->kind == StmtIRKind::Block) processBlock(mod, static_cast<BlockIR*>(s.get()));
+    if (s->kind == StmtIRKind::Block) processBlock(static_cast<BlockIR*>(s.get()), ctx);
     else if (s->kind == StmtIRKind::ForLoop) {
       auto* f = static_cast<ForLoopIR*>(s.get());
       if (f->body && f->body->kind == StmtIRKind::Block)
-        processBlock(mod, static_cast<BlockIR*>(f->body.get()));
+        processBlock(static_cast<BlockIR*>(f->body.get()), ctx);
     }
   }
 
@@ -254,13 +262,12 @@ void processBlock(IRModule& mod, BlockIR* block) {
 void CounterPropPass::run(IRModule& module) {
   if (!module.body || module.body->kind != StmtIRKind::Block) return;
 
-  // Collect all variable names so lowered vector locals can be resolved:
-  // `unew[1]` -> `unew_1` once the index is a constant.
+  // Collect all variable names so lowered vector locals can be resolved.
   std::unordered_set<std::string> names;
   collectVarNamesStmt(module.body.get(), names);
-  g_varNames = &names;
-  processBlock(module, static_cast<BlockIR*>(module.body.get()));
-  g_varNames = nullptr;
+  ConstMap known;
+  Ctx ctx{module, known, names, _vectorLocalName};
+  processBlock(static_cast<BlockIR*>(module.body.get()), ctx);
 }
 
 }  // namespace cse

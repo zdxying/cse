@@ -18,6 +18,7 @@
 #include "ir/ir_builder.h"
 #include "ir/ir_module.h"
 #include "lattice_resolve.h"
+#include "passes/counter_prop.h"
 #include "passes/pass_manager.h"
 
 namespace cse {
@@ -213,12 +214,8 @@ bool generateUrHeader(const std::string& inputPath,
       }
 
       for (const auto& lat : kLatsets) {
-        CSEConfig base = createFreeLBConfig();
-        base.latsetAlias = "LatSet";
-        base.latsetName = lat.name;
-        base.latsetDim = lat.d;
-        base.latsetQ = lat.q;
-        base.latsetCs2 = 1.0 / 3.0;
+        LatticeConfig latCfg{"LatSet", lat.name, lat.d, lat.q, 1.0 / 3.0};
+        CSEConfig base = createFreeLBConfig(latCfg);
         // Only the force/moment shapes need Vector lowering; keep the
         // equilibrium (CELL) path on the existing lattice-resolve route.
         base.lowerVectors = (kind != StructKind::Cell);
@@ -233,8 +230,13 @@ bool generateUrHeader(const std::string& inputPath,
             IRModule module;
             IRBuilder builder(&module, cfg2);
             builder.buildFunction(*method);
-            auto pm = PassManager::createDefault(cfg2, false,
-                                                 createLatticeResolvePass(cfg2));
+            std::unique_ptr<Pass> counterProp;
+            if (cfg2.lowerVectors) {
+              counterProp = createCounterPropPass(cfg2.vectorLocalName);
+            }
+            auto pm = PassManager::createDefault(
+                cfg2, false, createLatticeResolvePass("LatSet", lat.name),
+                std::move(counterProp));
             pm.runAll(module);
             CodeGen codegen;
             std::string body = codegen.generateBody(module, 2);

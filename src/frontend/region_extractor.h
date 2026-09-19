@@ -5,7 +5,7 @@
 
 // Preprocessor: extracts //@cse-marked regions from raw source text.
 // Uses brace counting to determine function boundaries.
-// Non-CSE regions are passed through unchanged by main.cpp.
+// Non-CSE regions are passed through unchanged by the driver.
 
 namespace cse {
 

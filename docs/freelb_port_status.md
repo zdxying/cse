@@ -90,10 +90,14 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 
 - CLI：`csegen <input.h> <output.h>`；`input` basename 决定 include/namespace
   （仅 `moment.h`/`equilibrium.h`/`force.h`）。
-- `CSEConfig`（`src/frontend/cse_config.h`）：
+- `CSEConfig`（`src/frontend/cse_config.h`，通用，无 FreeLB 语义）：
   - `assumeNumericCommutative/Associative`、`allowFpReassoc`、`noAlias`、`isPureFunction`
-  - `latsetAlias/latsetName/latsetDim/latsetQ/latsetCs2`
-  - `lowerVectors`、`constBindings`
+  - 钩子：`resolveName`、`lowerVectors` + `vectorDim/isVectorType/isVectorProducingCall`、
+    `vectorLocalName`、`constBindings`
+- `plugins/freelb/config.h`：`LatticeConfig`、`resolveLatsetConst`、
+  `createFreeLBConfig(latCfg)`，把 latset 上下文经上述钩子注入。
+- `PassManager::createDefault(config, recombine, resolvePass, postAlgebraPass)`：
+  插件在此注入 `LatticeResolvePass` 与 `CounterPropPass`。
 - `plugins/freelb/ur_emit.{h,cpp}`：`generateUrHeader(in,out)`、`detectUrConfig`。
 - `plugins/freelb/lattice_resolve.{h,cpp}`：`createLatticeResolvePass(config)`。
 - 结构体分类（`ur_emit.cpp`）：`Cell` / `CellType` / `TLatSet` / `TLatSetD`。
@@ -169,13 +173,13 @@ cd ~/FreeLB/examples/cavity3d && make
 
 ## 6. 相关文件
 
-引擎（`main`）：
-- `plugins/freelb/ur_emit.{h,cpp}`、`plugins/freelb/ur_emit_main.cpp`
-- `plugins/freelb/lattice_resolve.{h,cpp}`、`plugins/freelb/config.h`
+引擎（`main`）——`src/` 为通用核心，`plugins/freelb/` 为 FreeLB 集成：
 - `src/frontend/{cse_config.h,lexer.cpp,parser.cpp,parser.h,ast.h,token.h}`
 - `src/ir/{ir_builder.h,ir_builder.cpp,ir_utils.h,statement.h}`
 - `src/backend/codegen.{h,cpp}`
 - `src/passes/{loop_unroll.cpp,counter_prop.h,counter_prop.cpp,pass_manager.cpp,value_prop.cpp,dce.cpp,algebraic_simplify.cpp}`
+- `plugins/freelb/{config.h,lattice_resolve.{h,cpp}}`（配置钩子 + latset 解析）
+- `plugins/freelb/{cse_main.cpp,ur_emit.{h,cpp},ur_emit_main.cpp}`（`bin/cse` 与 `bin/csegen` 驱动）
 - `tests/ur/{moment.h,force.h,equilibrium.h}`
 
 FreeLB（`dev-cse2`）：
@@ -183,11 +187,11 @@ FreeLB（`dev-cse2`）：
 - `tools/cse/{Makefile,DESIGN.md,PORT_STATUS.md,reference/,verify_*.py}`
 - `make.mk`、根 `Makefile`
 
-## 7. 通用 / FreeLB 边界（供未来剥离）
+## 7. 通用 / FreeLB 边界（已完成剥离）
 
-`main` 现为“通用引擎 + FreeLB 插件”，`src/` 中仍带有若干为 FreeLB 服务的
-钩子。若将来出现第二个消费者（如 xcore）需要 FreeLB-free 的核心，可按此边界
-把 B 类抽成插件接口。
+`src/` 现为**零 FreeLB 语义的通用引擎**：`grep -riE "freelb|latset|lattice" src/`
+为空，`src/` 不再 include `plugins/`，`CSEConfig` 无 latset 字段。FreeLB 的全部
+行为经 `CSEConfig` 的通用钩子注入，由 `plugins/freelb/` 提供。
 
 - **A. 通用引擎能力**（与 FreeLB 无关）：
   `src/frontend/{lexer,token,parser,ast}`（引用限定符、`if constexpr`、`T{}`、
@@ -195,14 +199,16 @@ FreeLB（`dev-cse2`）：
   `src/ir/{statement,ir_utils}`（`AssignIR::targetExpr`、`IfElseIR::isConstexpr`、
   `substitute` 重建 `Cast/Ternary` 与保留 `++/--`、比较折叠与符号常量保护）；
   `src/backend/codegen`（`generateBody`、`if constexpr` 发射、`targetExpr` 赋值）；
-  `src/passes/{loop_unroll,dce,value_prop,algebraic_simplify,cse_pass}`；
+  `src/passes/{loop_unroll,counter_prop,dce,value_prop,algebraic_simplify,cse_pass}`；
   `Makefile` 的 `OPT/release/install/test` 与 `tests/run_tests.sh`。
-- **B. 通用机制中的 FreeLB 钩子**（剥离时需要抽接口）：
-  `src/frontend/cse_config.h` 的 `latsetAlias/Name/Dim/Q/Cs2`（`lowerVectors`、
-  `constBindings` 较通用）；`src/ir/ir_builder` 的 `latsetConst`；
-  `src/passes/pass_manager` 仅在 `lowerVectors` 时挂载 `CounterPropPass`；
-  `src/passes/counter_prop` 的 `x[i]→x_i` 向量局部命名约定。
-- **C. FreeLB 专属**（本应留在插件/集成侧）：
-  `plugins/freelb/ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`plugins/freelb/config.h`、
-  `plugins/freelb/lattice_resolve.{h,cpp}` 的实例化扩展、
-  `tests/ur/*.h`、`tests/check_lattice.py`、`Makefile` 的 `csegen` 目标。
+- **B. 通用扩展点**（FreeLB 经此注入，不再内建 FreeLB 语义）：
+  `CSEConfig::resolveName`（名字→常量，FreeLB 用于 `LatSet::q/d/cs2/...`）；
+  `CSEConfig::{lowerVectors,vectorDim,isVectorType,isVectorProducingCall}`
+  （通用向量降级算法，FreeLB 提供 `Vector`/`latset::c` 触发器）；
+  `CSEConfig::vectorLocalName`（降级向量局部命名，供 `CounterPropPass`）；
+  `PassManager::createDefault(..., resolvePass, postAlgebraPass)`（插件注入 pass）。
+- **C. FreeLB 专属**（全部在 `plugins/freelb/`）：
+  `config.h`（`LatticeConfig`、`resolveLatsetConst`、`createFreeLBConfig`）、
+  `ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`cse_main.cpp`、
+  `lattice_resolve.{h,cpp}`、`cuda_skip.{h,cpp}`；
+  以及 `tests/ur/*.h`、`tests/check_lattice.py`、`Makefile` 的 `csegen` 目标。

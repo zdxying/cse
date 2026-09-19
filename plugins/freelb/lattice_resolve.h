@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
+#include <string>
 
-#include "frontend/cse_config.h"
 #include "passes/pass.h"
 
 namespace cse {
@@ -14,10 +14,10 @@ namespace freelb {
 // The index argument must be a compile-time constant (typically produced by
 // LoopUnrollPass). Lattice tables are hardcoded, matching lattice_set.h.
 //
-// When `config` carries a per-latset instantiation context (latsetAlias/
-// latsetName), a templated alias such as `latset::c<LatSet>(k)` resolves
-// against the configured concrete set.
-std::unique_ptr<Pass> createLatticeResolvePass(const CSEConfig& config = CSEConfig());
+// When `alias`/`setName` carry a per-latset instantiation context, a templated
+// alias such as `latset::c<LatSet>(k)` resolves against the concrete `setName`.
+std::unique_ptr<Pass> createLatticeResolvePass(const std::string& alias = "",
+                                               const std::string& setName = "");
 
 }  // namespace freelb
 }  // namespace cse
