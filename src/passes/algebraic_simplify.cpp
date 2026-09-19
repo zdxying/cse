@@ -211,7 +211,9 @@ class AlgebraicSimplifyVisitor {
     bool hasConst = false;
     std::vector<DAGNode*> nonConst;
     for (auto* f : factors) {
-      if (f->kind == NodeKind::Constant) {
+      // A symbolic constant (e.g. latset::w<LatSet>(k)) must not be folded into
+      // a numeric product: keep it as a factor so the symbol is preserved.
+      if (f->kind == NodeKind::Constant && f->symbol.empty()) {
         constProd *= f->constVal;
         hasConst = true;
       } else {

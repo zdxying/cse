@@ -97,6 +97,23 @@ std::string replaceAll(std::string s, const std::string& from,
   return s;
 }
 
+enum class StructKind { Cell, TLatSet, TLatSetD, Unsupported };
+
+// Classify a marked struct by its template parameter list:
+//   <typename CELL>                         -> Cell
+//   <typename T, typename LatSet>           -> TLatSet
+//   <typename T, typename LatSet, <nontype>>-> TLatSetD (nonType = its name)
+StructKind classifyStruct(const StructDef& sd, std::string& nonTypeName) {
+  const auto& tp = sd.templateParams;
+  if (tp.size() == 1 && tp[0].paramName == "CELL") return StructKind::Cell;
+  if (tp.size() == 2 && tp[0].isType && tp[1].isType) return StructKind::TLatSet;
+  if (tp.size() == 3 && tp[0].isType && tp[1].isType && !tp[2].isType) {
+    nonTypeName = tp[2].paramName;
+    return StructKind::TLatSetD;
+  }
+  return StructKind::Unsupported;
+}
+
 std::string emitMethod(const FunctionDef& method, const std::string& body) {
   std::string out;
   out += "  __any__ static " + stripModifiers(method.returnType) + " " +
@@ -184,39 +201,62 @@ bool generateUrHeader(const std::string& inputPath,
 
     for (const auto& sdPtr : parsed.structDefs) {
       const StructDef& sd = *sdPtr;
-      if (sd.templateParams.size() != 1 ||
-          sd.templateParams[0].paramName != "CELL") {
+      std::string nonType;
+      StructKind kind = classifyStruct(sd, nonType);
+      if (kind == StructKind::Unsupported) {
         std::cerr << "csegen: skipping unsupported struct " << sd.name << "\n";
         continue;
       }
 
       for (const auto& lat : kLatsets) {
-        CSEConfig cfg2 = createFreeLBConfig();
-        cfg2.latsetAlias = "LatSet";
-        cfg2.latsetName = lat.name;
-        cfg2.latsetDim = lat.d;
-        cfg2.latsetQ = lat.q;
-        cfg2.latsetCs2 = 1.0 / 3.0;
+        CSEConfig base = createFreeLBConfig();
+        base.latsetAlias = "LatSet";
+        base.latsetName = lat.name;
+        base.latsetDim = lat.d;
+        base.latsetQ = lat.q;
+        base.latsetCs2 = 1.0 / 3.0;
+        // Only the force/moment shapes need Vector lowering; keep the
+        // equilibrium (CELL) path on the existing lattice-resolve route.
+        base.lowerVectors = (kind != StructKind::Cell);
 
-        std::string spec;
-        spec += "template <typename T, typename TypePack>\n";
-        spec += "struct " + sd.name + "<CELL<T, " + lat.name + "<T>, TypePack>>{\n";
-        spec += "using LatSet = " + std::string(lat.name) + "<T>;\n";
+        auto emitOne = [&](const std::string& header, double dVal, bool bindD) {
+          CSEConfig cfg2 = base;
+          if (bindD) cfg2.constBindings[nonType] = dVal;
 
-        for (const auto& method : sd.methods) {
-          IRModule module;
-          IRBuilder builder(&module, cfg2);
-          builder.buildFunction(*method);
-          auto pm = PassManager::createDefault(cfg2, false,
-                                               createLatticeResolvePass(cfg2));
-          pm.runAll(module);
-          CodeGen codegen;
-          std::string body = codegen.generateBody(module, 2);
-          body = replaceAll(body, "auto ", "const T ");
-          spec += emitMethod(*method, body);
+          std::string spec = header;
+          spec += "using LatSet = " + std::string(lat.name) + "<T>;\n";
+          for (const auto& method : sd.methods) {
+            IRModule module;
+            IRBuilder builder(&module, cfg2);
+            builder.buildFunction(*method);
+            auto pm = PassManager::createDefault(cfg2, false,
+                                                 createLatticeResolvePass(cfg2));
+            pm.runAll(module);
+            CodeGen codegen;
+            std::string body = codegen.generateBody(module, 2);
+            body = replaceAll(body, "auto ", "const T ");
+            spec += emitMethod(*method, body);
+          }
+          spec += "};\n\n";
+          out += spec;
+        };
+
+        if (kind == StructKind::Cell) {
+          std::string header = "template <typename T, typename TypePack>\n";
+          header += "struct " + sd.name + "<CELL<T, " + lat.name + "<T>, TypePack>>{\n";
+          emitOne(header, 0, false);
+        } else if (kind == StructKind::TLatSet) {
+          std::string header = "template <typename T>\n";
+          header += "struct " + sd.name + "<T, " + lat.name + "<T>>{\n";
+          emitOne(header, 0, false);
+        } else {  // TLatSetD: one specialization per component index
+          for (int dv = 0; dv < lat.d; ++dv) {
+            std::string header = "template <typename T>\n";
+            header += "struct " + sd.name + "<T, " + lat.name + "<T>, " +
+                      std::to_string(dv) + ">{\n";
+            emitOne(header, dv, true);
+          }
         }
-        spec += "};\n\n";
-        out += spec;
       }
       structCount++;
     }

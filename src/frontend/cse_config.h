@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 #include <string>
+#include <unordered_map>
 
 #include "token.h"
 
@@ -59,6 +60,15 @@ struct CSEConfig {
   int latsetDim = 0;        // d
   int latsetQ = 0;          // q
   double latsetCs2 = 1.0 / 3.0;
+
+  // Lower FreeLB `Vector<T, LatSet::d>` values to per-component scalars so
+  // vector arithmetic (componentwise +,-,*,/ and dot products) can be CSE'd.
+  // Set for the force/moment structs; leave off for the equilibrium path.
+  bool lowerVectors = false;
+
+  // Values for non-type template parameters or other compile-time names, e.g.
+  // the `unsigned int d` of ScalarForcePopImpl. Folded to constants.
+  std::unordered_map<std::string, double> constBindings;
 };
 
 }  // namespace cse

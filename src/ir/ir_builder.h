@@ -33,6 +33,22 @@ class IRBuilder {
   DAGNode* buildExpr(const Expr& expr);
 
  private:
+  // A value is either a scalar or a fixed-size vector of scalar components
+  // (used to lower FreeLB `Vector<T, LatSet::d>` arithmetic).
+  struct VecValue {
+    bool vec = false;
+    DAGNode* scalar = nullptr;
+    std::vector<DAGNode*> comps;
+  };
+  VecValue buildValue(const Expr& expr);
+  VecValue valueBinary(const Expr& expr);
+  VecValue valueUnary(const Expr& expr);
+  VecValue valueCall(const Expr& expr);
+  VecValue valueArray(const Expr& expr);
+  DAGNode* buildScalarCall(const Expr& expr);
+  static VecValue makeScalar(DAGNode* n);
+  static VecValue makeVector(std::vector<DAGNode*> comps);
+
   // Expression builders
   DAGNode* buildBinaryOp(const Expr& expr);
   DAGNode* buildUnaryOp(const Expr& expr);
@@ -72,6 +88,10 @@ class IRBuilder {
   // Scope stack: original name → internal (unique) name
   std::vector<std::unordered_map<std::string, std::string>> _scopes;
   std::unordered_map<std::string, int> _shadowCounters;
+
+  // Vector lowering state (only used when config.lowerVectors is set).
+  int _vecDim = 0;
+  std::unordered_set<std::string> _vectorVars;
 };
 
 }  // namespace cse

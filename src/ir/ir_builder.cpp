@@ -255,10 +255,15 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
 
   _scopes.clear();
   _shadowCounters.clear();
+  _vectorVars.clear();
+  _vecDim = _config.lowerVectors ? _config.latsetDim : 0;
   pushScope();  // parameter/base scope
   for (const auto& p : func.params) {
     _scopes.back()[p.name] = p.name;
     _module->getVar(p.name);
+    if (_config.lowerVectors && p.type.find("Vector") != std::string::npos) {
+      _vectorVars.insert(p.name);
+    }
   }
 
   _module->body = buildStmt(*func.body);
@@ -336,6 +341,9 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
 }
 
 DAGNode* IRBuilder::buildExpr(const Expr& expr) {
+  if (_config.lowerVectors) {
+    return buildValue(expr).scalar;
+  }
   switch (expr.kind) {
     case ExprKind::Number:
       return _module->createConst(expr.numVal, expr.numText);
@@ -399,6 +407,201 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
     }
   }
   return nullptr;
+}
+
+IRBuilder::VecValue IRBuilder::makeScalar(DAGNode* n) {
+  VecValue v;
+  v.scalar = n;
+  return v;
+}
+
+IRBuilder::VecValue IRBuilder::makeVector(std::vector<DAGNode*> comps) {
+  VecValue v;
+  v.vec = true;
+  v.comps = std::move(comps);
+  return v;
+}
+
+// Lower FreeLB `Vector<T, LatSet::d>` arithmetic to component scalars. `vec*vec`
+// is a dot product, `scalar*vec` / `vec*scalar` are componentwise, and
+// `vec[i]` (constant i) selects a component. Lattice direction vectors
+// `latset::c<LatSet>(k)` are treated as vectors, so their components become
+// `latset::c<LatSet>(k)[i]` nodes that LatticeResolve later folds to constants.
+IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
+  switch (expr.kind) {
+    case ExprKind::Number:
+      return makeScalar(_module->createConst(expr.numVal, expr.numText));
+
+    case ExprKind::Variable: {
+      if (DAGNode* c = latsetConst(expr.name)) return makeScalar(c);
+      auto cb = _config.constBindings.find(expr.name);
+      if (cb != _config.constBindings.end())
+        return makeScalar(_module->createConst(cb->second));
+      if (_vectorVars.count(expr.name)) {
+        DAGNode* base = varRef(expr.name);
+        bool share = isReadOnlyRoot(expr.name);
+        std::vector<DAGNode*> comps;
+        for (int i = 0; i < _vecDim; ++i) {
+          comps.push_back(_module->createArrayAccess(
+              base, _module->createConst(i, std::to_string(i)), share));
+        }
+        return makeVector(std::move(comps));
+      }
+      return makeScalar(varRef(expr.name));
+    }
+
+    case ExprKind::BinaryOp:
+      return valueBinary(expr);
+    case ExprKind::UnaryOp:
+      return valueUnary(expr);
+    case ExprKind::ArrayAccess:
+      return valueArray(expr);
+    case ExprKind::Call:
+      return valueCall(expr);
+
+    case ExprKind::MemberAccess:
+    case ExprKind::ArrowAccess: {
+      std::string root = rootName(*expr.base);
+      DAGNode* base =
+          _vectorVars.count(root) ? varRef(root) : buildValue(*expr.base).scalar;
+      bool share = isReadOnlyRoot(rootName(expr));
+      if (expr.kind == ExprKind::MemberAccess)
+        return makeScalar(_module->createMemberAccess(base, expr.memberName, share));
+      return makeScalar(_module->createArrowAccess(base, expr.memberName, share));
+    }
+
+    case ExprKind::Cast: {
+      DAGNode* op = buildValue(*expr.operand).scalar;
+      auto node = _module->createNode(NodeKind::Cast);
+      node->name = expr.castType;
+      node->operands = {op};
+      return makeScalar(_module->findExistingNode(node));
+    }
+
+    case ExprKind::Ternary: {
+      DAGNode* cond = buildValue(*expr.cond).scalar;
+      DAGNode* t = buildValue(*expr.trueExpr).scalar;
+      DAGNode* f = buildValue(*expr.falseExpr).scalar;
+      auto node = _module->createNode(NodeKind::Ternary);
+      node->op = '?';
+      node->operands = {cond, t, f};
+      return makeScalar(_module->findExistingNode(node));
+    }
+
+    case ExprKind::PostfixOp: {
+      DAGNode* op = buildValue(*expr.operand).scalar;
+      auto node = _module->createNode(NodeKind::UnaryOp);
+      node->op = expr.op;
+      node->operands = {op};
+      node->name = "postfix";
+      return makeScalar(_module->findExistingNode(node));
+    }
+  }
+  return makeScalar(nullptr);
+}
+
+IRBuilder::VecValue IRBuilder::valueBinary(const Expr& expr) {
+  VecValue a = buildValue(*expr.lhs);
+  VecValue b = buildValue(*expr.rhs);
+  const char op = expr.op;
+
+  auto scale = [&](VecValue& v, DAGNode* s, bool scalarOnLeft) {
+    std::vector<DAGNode*> comps;
+    for (auto* ci : v.comps) {
+      comps.push_back(scalarOnLeft
+                          ? _module->createBinaryOp(op, s, ci)
+                          : _module->createBinaryOp(op, ci, s));
+    }
+    return makeVector(std::move(comps));
+  };
+
+  if (a.vec && b.vec) {
+    if (op == '*') {  // dot product
+      DAGNode* sum = nullptr;
+      for (size_t i = 0; i < a.comps.size() && i < b.comps.size(); ++i) {
+        DAGNode* p = _module->createBinaryOp('*', a.comps[i], b.comps[i]);
+        sum = sum ? _module->createBinaryOp('+', sum, p) : p;
+      }
+      return makeScalar(sum);
+    }
+    std::vector<DAGNode*> comps;
+    for (size_t i = 0; i < a.comps.size() && i < b.comps.size(); ++i)
+      comps.push_back(_module->createBinaryOp(op, a.comps[i], b.comps[i]));
+    return makeVector(std::move(comps));
+  }
+  if (a.vec && !b.vec) return scale(a, b.scalar, false);
+  if (!a.vec && b.vec) return scale(b, a.scalar, true);
+  return makeScalar(_module->createBinaryOp(op, a.scalar, b.scalar));
+}
+
+IRBuilder::VecValue IRBuilder::valueUnary(const Expr& expr) {
+  VecValue a = buildValue(*expr.operand);
+  if (a.vec) {
+    std::vector<DAGNode*> comps;
+    for (auto* ci : a.comps) comps.push_back(_module->createUnaryOp(expr.op, ci));
+    return makeVector(std::move(comps));
+  }
+  DAGNode* n = _module->createUnaryOp(expr.op, a.scalar);
+  if (expr.name == "++" || expr.name == "--") n->name = expr.name;
+  return makeScalar(n);
+}
+
+IRBuilder::VecValue IRBuilder::valueArray(const Expr& expr) {
+  VecValue base = buildValue(*expr.base);
+  if (base.vec && expr.indices.size() == 1) {
+    VecValue idx = buildValue(*expr.indices[0]);
+    if (idx.scalar && idx.scalar->kind == NodeKind::Constant) {
+      int i = static_cast<int>(idx.scalar->constVal);
+      if (i >= 0 && i < static_cast<int>(base.comps.size()))
+        return makeScalar(base.comps[i]);
+    }
+  }
+  DAGNode* result = base.scalar;
+  if (!result) return makeScalar(nullptr);
+  bool share = isReadOnlyRoot(rootName(expr));
+  for (const auto& idx : expr.indices) {
+    result = _module->createArrayAccess(result, buildValue(*idx).scalar, share);
+  }
+  return makeScalar(result);
+}
+
+IRBuilder::VecValue IRBuilder::valueCall(const Expr& expr) {
+  std::string calleeText;
+  if (expr.base) {
+    if (expr.base->kind == ExprKind::Variable)
+      calleeText = expr.base->name;
+    else if (expr.base->kind == ExprKind::MemberAccess ||
+             expr.base->kind == ExprKind::ArrowAccess)
+      calleeText = expr.base->memberName;
+  }
+  bool isLatDir = calleeText.find("latset::") != std::string::npos &&
+                  calleeText.find("::c") != std::string::npos;
+  DAGNode* call = buildScalarCall(expr);
+  if (isLatDir) {
+    std::vector<DAGNode*> comps;
+    for (int i = 0; i < _vecDim; ++i) {
+      comps.push_back(_module->createArrayAccess(
+          call, _module->createConst(i, std::to_string(i)), /*shareable=*/true));
+    }
+    return makeVector(std::move(comps));
+  }
+  return makeScalar(call);
+}
+
+DAGNode* IRBuilder::buildScalarCall(const Expr& expr) {
+  DAGNode* callee = expr.base ? buildValue(*expr.base).scalar : nullptr;
+  std::string calleeText;
+  if (expr.base) {
+    if (expr.base->kind == ExprKind::Variable)
+      calleeText = expr.base->name;
+    else if (expr.base->kind == ExprKind::MemberAccess ||
+             expr.base->kind == ExprKind::ArrowAccess)
+      calleeText = expr.base->memberName;
+  }
+  bool pure = isPureCallee(calleeText);
+  std::vector<DAGNode*> args;
+  for (const auto& arg : expr.callArgs) args.push_back(buildValue(*arg).scalar);
+  return _module->createCall(callee, args, pure);
 }
 
 DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
