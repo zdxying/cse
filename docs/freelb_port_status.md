@@ -103,10 +103,18 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    `git -c protocol.file.allow=always submodule update --init`
    （或 `git config protocol.file.allow always`）。若后续发布到 GitHub，
    用一条命令改 URL 即可（`git config -f .gitmodules submodule.third_party/cse.url <url>`）。
-2. **统一测试入口**：引擎目前无 `make test`/CI；建议加一个脚本运行
-   `cse` 回归 + `csegen tests/ur/*.h` + 三个 Python 验证（需要 FreeLB 参考头）。
-3. **发布构建/安装**：引擎默认 `-O0`；建议提供 `-O2` release、可选
-   `install`（头 + 库 + pkg-config）与版本/SONAME，便于作为库复用（方案 2）。
+2. ~~统一测试入口~~ **已完成**：`make test`（`tests/run_tests.sh`）执行
+   FLOP 代价回归 + `verify_equilibrium`/`verify_safety` 数值校验 +
+   `csegen tests/ur/*.h` 冒烟；若存在 FreeLB checkout（`FREELB=` 或
+   `~/FreeLB`）再跑 `tools/cse/verify_{moment,equilibrium,force}.py`。
+   CI 接入仍可后续补。
+   - 顺带修复了 `cse_pass` 的**候选选择不确定性**（仅按语句数排序，平局时保留
+     `unordered_map`（指针键）遍历序），使输出依赖堆布局/输入路径；现按
+     `node->id` 断平局，输出确定且与路径无关。
+3. ~~发布构建/安装~~ **已完成**：`make release`（`OPT=-O2` 重新构建）、
+   `make install PREFIX=... DESTDIR=...` 安装 `cse`/`csegen` 与
+   `libcse.a/.so`。头文件仍以 submodule + 源码编译方式消费，未提供
+   pkg-config/SONAME。
 
 ### 中优先级
 4. **latset 表同步**：`lattice_resolve.cpp` 的速度向量/权重是手抄自

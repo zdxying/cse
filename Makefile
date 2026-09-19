@@ -1,5 +1,6 @@
 CXX      := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -Isrc -MMD -MP
+OPT      ?= -O0
+CXXFLAGS := -std=c++17 -Wall -Wextra -g $(OPT) -Isrc -MMD -MP
 SRCDIR   := src
 PLUGDIR  := plugins
 BUILDDIR := build
@@ -65,10 +66,23 @@ $(BUILDDIR)/$(PLUGDIR)/%.pic.o: $(PLUGDIR)/%.cpp
 test: all
 	@tests/run_tests.sh
 
+# Optimized rebuild. Kept separate so the default build stays debug-friendly.
+release:
+	$(MAKE) clean
+	$(MAKE) OPT=-O2 all
+
+PREFIX  ?= /usr/local
+DESTDIR ?=
+install: all
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib"
+	install -m 0755 $(TARGET) $(CSEGEN) "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 0644 $(STATIC_LIB) "$(DESTDIR)$(PREFIX)/lib/"
+	install -m 0755 $(DYNAMIC_LIB) "$(DESTDIR)$(PREFIX)/lib/"
+
 clean:
 	rm -rf $(BUILDDIR) $(BINDIR)
 
 # Include header dependencies last so the default goal stays `all`.
 -include $(DEPS)
 
-.PHONY: all test clean
+.PHONY: all test release install clean
