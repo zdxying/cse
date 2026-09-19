@@ -66,6 +66,9 @@ for h in "$ROOT"/tests/ur/*.h; do
 done
 
 if [[ -d "$FREELB/src/lbm" && -f "$FREELB/tools/cse/verify_moment.py" ]]; then
+  echo "=== lattice table drift guard ($FREELB) ==="
+  python3 "$ROOT/tests/check_lattice.py" --freelb "$FREELB"
+
   echo "=== FreeLB verifiers ($FREELB) ==="
   for v in moment equilibrium force; do
     "$CSEGEN" "$FREELB/src/lbm/$v.h" "$TMP/$v.ur.h" >/dev/null
