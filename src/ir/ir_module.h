@@ -46,6 +46,11 @@ class IRModule {
   // Create a constant node
   DAGNode* createConst(double val, const std::string& text = "");
 
+  // Create a constant node that carries a symbolic (declared) form for code
+  // emission. Deduplicated by value like createConst; if a node with the same
+  // value exists without a symbol, the symbol is attached to it.
+  DAGNode* createSymbolicConst(double val, const std::string& symbol);
+
   // Create a variable node
   DAGNode* createVar(const std::string& name);
 

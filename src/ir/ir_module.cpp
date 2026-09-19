@@ -3,9 +3,23 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <sstream>
 
 namespace cse {
+
+namespace {
+
+// Format a constant for code emission with round-trip precision.
+std::string formatConst(double val) {
+  if (val == std::floor(val) && std::fabs(val) < 1e15)
+    return std::to_string(static_cast<long long>(val));
+  std::ostringstream oss;
+  oss << std::setprecision(17) << val;
+  return oss.str();
+}
+
+}  // namespace
 
 // ===== DAGNode =====
 
@@ -101,7 +115,7 @@ DAGNode* IRModule::createNode(NodeKind kind) {
 DAGNode* IRModule::createConst(double val, const std::string& text) {
   auto node = createNode(NodeKind::Constant);
   node->constVal = val;
-  std::string t = text.empty() ? std::to_string(val) : text;
+  std::string t = text.empty() ? formatConst(val) : text;
   // Render integral constants without a trailing ".0" (array indices, etc.).
   if (val == std::floor(val) && std::fabs(val) < 1e15) {
     t = std::to_string(static_cast<long long>(val));
@@ -111,6 +125,22 @@ DAGNode* IRModule::createConst(double val, const std::string& text) {
   // Deduplicate constants by value so that expressions built around the same
   // literal share a DAG node (enables cross-statement CSE).
   return findExistingNode(node);
+}
+
+DAGNode* IRModule::createSymbolicConst(double val, const std::string& symbol) {
+  auto candidate = createNode(NodeKind::Constant);
+  candidate->constVal = val;
+  candidate->numText = formatConst(val);
+  candidate->symbol = symbol;
+  candidate->recomputeHash();
+
+  DAGNode* existing = findExistingNode(candidate);
+  if (existing != candidate && existing->symbol.empty() && !symbol.empty()) {
+    // Keep the numeric form for analysis, but reuse the declared symbol for
+    // code emission on the canonical (value-equal) node.
+    existing->symbol = symbol;
+  }
+  return existing;
 }
 
 DAGNode* IRModule::getVar(const std::string& name) {

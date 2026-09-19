@@ -1,5 +1,5 @@
 CXX      := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -Isrc
+CXXFLAGS := -std=c++17 -Wall -Wextra -g -O0 -Isrc -MMD -MP
 SRCDIR   := src
 PLUGDIR  := plugins
 BUILDDIR := build
@@ -11,6 +11,10 @@ LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp, $(shell find $(SRCDIR) $(PLUGDIR
 # Map source paths to object paths: src/foo/bar.o -> build/foo/bar.o, plugins/freelb/baz.o -> build/plugins/freelb/baz.o
 LIB_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.o,$(LIB_SOURCES))
 PIC_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
+
+# Auto-generated header dependencies (so header edits trigger rebuilds)
+DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) $(BUILDDIR)/$(SRCDIR)/main.d
+-include $(DEPS)
 
 # Targets
 STATIC_LIB  := $(BINDIR)/libcse.a

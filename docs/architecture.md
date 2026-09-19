@@ -278,8 +278,10 @@ bin/
 ### 14. FreeLB 常量解析 (plugins/freelb/lattice_resolve)
 
 - 硬编码 D3Q19 / D2Q9 方向向量与权重查找表（与 `lattice_set.h` 一致）
-- `latset::w<LatSet>(k)` → 常量权重
-- `latset::c<LatSet>(k)[i]` → 常量分量
+- `latset::w<LatSet>(k)` → 数值用于权重分组，**代码输出保留声明的访问器形式**
+  （如 `latset::w<D3Q19<double>>(1)`），避免烘焙十进制字面量带来的精度/类型转换
+  问题；同值权重收敛到代表索引，权重分组不受影响
+- `latset::c<LatSet>(k)[i]` → 常量分量（整数，精确）
 - `u * latset::c<LatSet>(k)` → 标量点积 `u[0]*cx + u[1]*cy + u[2]*cz`
 - 对方向向量做符号规范化（提取前导 -1），使相反方向成为精确取反，
   配合 `(-a)*(-a)→a*a` 共享 `uc²`

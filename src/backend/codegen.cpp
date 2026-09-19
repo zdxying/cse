@@ -218,7 +218,7 @@ std::string CodeGen::emitExpr(DAGNode* node) {
 
   switch (node->kind) {
     case NodeKind::Constant:
-      return node->numText;
+      return node->symbol.empty() ? node->numText : node->symbol;
 
     case NodeKind::Variable:
       return node->name;

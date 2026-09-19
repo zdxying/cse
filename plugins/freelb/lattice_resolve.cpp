@@ -154,13 +154,23 @@ class LatticeResolveVisitor {
       }
     }
 
-    // latset::w<...>(k) -> constant weight
+    // latset::w<...>(k) -> declared constant weight, emitted symbolically.
     if (isLatticeCall(node, "::w")) {
       const LatticeInfo* lat = lookupLattice(calleeName(node));
       int k = constIndex(node);
       if (lat && k >= 0 && k < lat->q) {
         resolved++;
-        return module.createConst(lat->w[k], numText(lat->w[k]));
+        // Canonical representative index for this weight value so that all
+        // directions sharing a weight collapse to one node (weight grouping).
+        int rep = k;
+        for (int j = 0; j < k; ++j) {
+          if (lat->w[j] == lat->w[k]) {
+            rep = j;
+            break;
+          }
+        }
+        std::string sym = calleeName(node) + "(" + std::to_string(rep) + ")";
+        return module.createSymbolicConst(lat->w[k], sym);
       }
     }
 

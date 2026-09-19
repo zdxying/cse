@@ -451,3 +451,10 @@ feq[2] = _cse_1 * (_cse_3 - 3 * u0);
 - `IRModule::createConst` 现在按值去重，使常量参与的表达式能跨语句共享
 - Codegen 对前缀一元运算的复合操作数补括号，修正 `-(u0+u1)` 的优先级
 - 常量输出使用 17 位有效数字，避免 lattice 权重精度损失
+
+**权重符号化：**
+- 常量节点新增 `symbol` 字段：`constVal` 供分析（去重/分组/CSE），`symbol` 供输出
+- `latset::w<LatSet>(k)` 解析后输出原始访问器（如 `latset::w<D3Q19<double>>(1)`），
+  由编译器按 `T` 精确求值（保留 `Fraction::operator()<T>()` 语义），避免十进制
+  字面量的二次舍入与类型转换偏差
+- 同值权重收敛到代表索引，权重分组与 FLOP（93）保持不变
