@@ -316,11 +316,14 @@ void CSEPass::run(IRModule& module) {
 
     if (candidates.empty()) break;
 
-    // Sort by benefit: prefer nodes that appear in more statements
-    // and have larger subtrees (more savings)
+    // Sort by benefit: prefer nodes that appear in more statements, breaking
+    // ties by node id. The candidate vector is built by iterating an
+    // unordered_map keyed on pointers, so without a deterministic tie-break the
+    // chosen extraction (and thus the emitted code) would depend on heap layout.
     std::sort(candidates.begin(), candidates.end(),
               [](const CSECandidate& a, const CSECandidate& b) {
-                return a.stmtCount > b.stmtCount;
+                if (a.stmtCount != b.stmtCount) return a.stmtCount > b.stmtCount;
+                return a.node->id < b.node->id;
               });
 
     bool changed = false;

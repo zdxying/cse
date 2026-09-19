@@ -62,10 +62,13 @@ $(BUILDDIR)/$(PLUGDIR)/%.pic.o: $(PLUGDIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
 
+test: all
+	@tests/run_tests.sh
+
 clean:
 	rm -rf $(BUILDDIR) $(BINDIR)
 
 # Include header dependencies last so the default goal stays `all`.
 -include $(DEPS)
 
-.PHONY: all clean
+.PHONY: all test clean
