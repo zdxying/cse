@@ -22,20 +22,25 @@ void PassManager::runAll(IRModule& module) {
   }
 }
 
-PassManager PassManager::createDefault(bool enableRecombine,
+PassManager PassManager::createDefault(const CSEConfig& config,
+                                      bool enableRecombine,
                                       std::unique_ptr<Pass> resolvePass) {
   PassManager pm;
   pm.addPass(createLoopUnrollPass());
   if (resolvePass) {
     pm.addPass(std::move(resolvePass));
   }
+  const bool comm = config.assumeNumericCommutative;
+  const bool assoc = config.assumeNumericAssociative;
   pm.addPass(createConstantFoldPass());
-  pm.addPass(createAlgebraicSimplifyPass());
-  pm.addPass(createReassociatePass());
+  pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
+  if (assoc) {
+    pm.addPass(createReassociatePass());
+  }
   pm.addPass(createCSEPass());
   if (enableRecombine) {
     pm.addPass(createExprRecombinePass());
-    pm.addPass(createAlgebraicSimplifyPass());
+    pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
   }
   pm.addPass(createValuePropPass());
   pm.addPass(createDCEPass());

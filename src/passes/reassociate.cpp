@@ -205,17 +205,20 @@ class ReassociateVisitor {
         if (newOps.size() == 1) return module.createUnaryOp(node->op, newOps[0]);
         break;
       case NodeKind::ArrayAccess:
-        if (newOps.size() == 2) return module.createArrayAccess(newOps[0], newOps[1]);
+        if (newOps.size() == 2)
+          return module.createArrayAccess(newOps[0], newOps[1], node->pure);
         break;
       case NodeKind::MemberAccess:
-        if (newOps.size() == 1) return module.createMemberAccess(newOps[0], node->name);
+        if (newOps.size() == 1)
+          return module.createMemberAccess(newOps[0], node->name, node->pure);
         break;
       case NodeKind::ArrowAccess:
-        if (newOps.size() == 1) return module.createArrowAccess(newOps[0], node->name);
+        if (newOps.size() == 1)
+          return module.createArrowAccess(newOps[0], node->name, node->pure);
         break;
       case NodeKind::Call: {
         std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
-        return module.createCall(newOps[0], args);
+        return module.createCall(newOps[0], args, node->pure);
       }
       default:
         break;

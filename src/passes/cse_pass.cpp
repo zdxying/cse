@@ -135,6 +135,64 @@ static void collectNodesFromStmt(StmtIR* stmt,
   }
 }
 
+// ===== Nested (conditionally executed) node collection =====
+// A subexpression that appears in a nested statement (inside an if/else/loop)
+// must not be hoisted to the top level by CSE: that would speculate the
+// computation. Such nodes are excluded from extraction.
+
+static void collectExprNodes(DAGNode* root, std::unordered_set<DAGNode*>& out) {
+  if (!root) return;
+  std::vector<DAGNode*> stack = {root};
+  while (!stack.empty()) {
+    DAGNode* n = stack.back();
+    stack.pop_back();
+    if (out.insert(n).second) {
+      for (auto* op : n->operands) stack.push_back(op);
+    }
+  }
+}
+
+static void collectNestedNodes(StmtIR* stmt, bool nested,
+                               std::unordered_set<DAGNode*>& out) {
+  if (!stmt) return;
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      auto* b = static_cast<BlockIR*>(stmt);
+      for (auto& s : b->stmts) collectNestedNodes(s.get(), nested, out);
+      break;
+    }
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(stmt);
+      if (nested) collectExprNodes(ie->cond, out);
+      collectNestedNodes(ie->thenBranch.get(), true, out);
+      collectNestedNodes(ie->elseBranch.get(), true, out);
+      break;
+    }
+    case StmtIRKind::ForLoop: {
+      auto* f = static_cast<ForLoopIR*>(stmt);
+      // Loop internals are conservatively treated as nested.
+      collectExprNodes(f->cond, out);
+      collectExprNodes(f->update, out);
+      collectExprNodes(f->updateRhs, out);
+      collectNestedNodes(f->init.get(), true, out);
+      collectNestedNodes(f->body.get(), true, out);
+      break;
+    }
+    case StmtIRKind::ExprStmt:
+      if (nested) collectExprNodes(static_cast<ExprStmtIR*>(stmt)->expr, out);
+      break;
+    case StmtIRKind::Assign:
+      if (nested) collectExprNodes(static_cast<AssignIR*>(stmt)->value, out);
+      break;
+    case StmtIRKind::VarDecl:
+      if (nested) collectExprNodes(static_cast<VarDeclIR*>(stmt)->init, out);
+      break;
+    case StmtIRKind::Return:
+      if (nested) collectExprNodes(static_cast<ReturnIR*>(stmt)->value, out);
+      break;
+  }
+}
+
 // ===== Phase 2: Replace all references to a target node with a variable =====
 
 // Recursively walk a statement tree and replace all DAGNode* that match
@@ -232,6 +290,11 @@ void CSEPass::run(IRModule& module) {
       }
     }
 
+    // Nodes used inside nested (conditionally executed) statements must not be
+    // hoisted to the top level. Collect them once and exclude from extraction.
+    std::unordered_set<DAGNode*> nestedNodes;
+    for (auto& s : block->stmts) collectNestedNodes(s.get(), false, nestedNodes);
+
     // Phase 2: Find nodes used in >= 2 different statements
     struct CSECandidate {
       DAGNode* node;
@@ -244,7 +307,7 @@ void CSEPass::run(IRModule& module) {
       std::sort(stmtIndices.begin(), stmtIndices.end());
       stmtIndices.erase(std::unique(stmtIndices.begin(), stmtIndices.end()),
                         stmtIndices.end());
-      if (stmtIndices.size() >= 2) {
+      if (stmtIndices.size() >= 2 && !nestedNodes.count(node)) {
         candidates.push_back({node, stmtIndices.size()});
       }
     }

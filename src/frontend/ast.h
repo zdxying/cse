@@ -53,6 +53,10 @@ struct Expr {
 
   // BinaryOp
   char op = 0;
+  // True when this BinaryOp is an assignment (`=`, `+=`, ...). Distinguishes
+  // assignment from an equality comparison, which shares the '=' character
+  // only in the operator spelling.
+  bool isAssignment = false;
   std::unique_ptr<Expr> lhs, rhs;
 
   // UnaryOp

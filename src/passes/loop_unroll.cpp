@@ -13,6 +13,15 @@ namespace cse {
 
 namespace {
 
+// Does the expression contain an impure (side-effecting) call?
+bool hasImpure(DAGNode* e) {
+  if (!e) return false;
+  if (e->kind == NodeKind::Call && !e->pure) return true;
+  for (auto* op : e->operands)
+    if (hasImpure(op)) return true;
+  return false;
+}
+
 // Deep-copy a statement tree. DAGNode* pointers are shared (the module owns
 // them), so cloning only duplicates the statement structure, not the DAG.
 std::unique_ptr<StmtIR> cloneStmt(const StmtIR* stmt) {
@@ -191,7 +200,7 @@ void inlineLocalDecls(IRModule& mod, StmtIR* stmt,
     if ((*it)->kind == StmtIRKind::VarDecl) {
       auto* d = static_cast<VarDeclIR*>(it->get());
       if (d->init && d->init->kind != NodeKind::Variable &&
-          inlinable.count(d->name)) {
+          !hasImpure(d->init) && inlinable.count(d->name)) {
         defs[d->name] = d->init;
         it = b->stmts.erase(it);
         continue;

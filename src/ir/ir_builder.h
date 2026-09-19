@@ -1,7 +1,12 @@
 #pragma once
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "../frontend/ast.h"
+#include "../frontend/cse_config.h"
 #include "ir_module.h"
 
 namespace cse {
@@ -9,9 +14,14 @@ namespace cse {
 // AST → IR transformation.
 // Converts frontend AST (Expr/Stmt) into DAG-based IR (DAGNode/StmtIR).
 // This is the bridge between frontend and IR — the only file that depends on both.
+//
+// The builder is effect-aware: a pre-scan of the function AST determines which
+// locations are read-only and which calls are pure, so that loads and calls are
+// only deduplicated when it is semantically safe. It also resolves lexical
+// scopes and alpha-renames shadowed variables.
 class IRBuilder {
  public:
-  explicit IRBuilder(IRModule* module);
+  explicit IRBuilder(IRModule* module, const CSEConfig& config = CSEConfig());
 
   // Build IR from a function AST
   void buildFunction(const FunctionDef& func);
@@ -32,7 +42,36 @@ class IRBuilder {
   DAGNode* buildArrayAccess(const Expr& expr);
   DAGNode* buildCall(const Expr& expr);
 
+  // ---- Effect / scope analysis ----
+  void prescanStmt(const Stmt& stmt);
+  void prescanExpr(const Expr& expr);
+  void prescanFunction(const FunctionDef& func);
+
+  bool isPureCallee(const std::string& callee) const;
+  bool isReadOnlyRoot(const std::string& name) const;
+  std::string rootName(const Expr& expr) const;
+
+  // ---- Scope handling (alpha-renaming) ----
+  void pushScope();
+  void popScope();
+  std::string declare(const std::string& name);
+  std::string resolve(const std::string& name) const;
+  DAGNode* varRef(const std::string& name);
+
   IRModule* _module;
+  CSEConfig _config;
+
+  // Pre-scan results
+  std::unordered_set<std::string> _declared;
+  std::unordered_set<std::string> _constParams;
+  std::unordered_set<std::string> _pointerParams;
+  std::unordered_set<std::string> _written;
+  std::unordered_set<std::string> _passedToCall;
+  bool _hasImpureCall = false;
+
+  // Scope stack: original name → internal (unique) name
+  std::vector<std::unordered_map<std::string, std::string>> _scopes;
+  std::unordered_map<std::string, int> _shadowCounters;
 };
 
 }  // namespace cse

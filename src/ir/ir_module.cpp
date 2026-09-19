@@ -170,35 +170,44 @@ DAGNode* IRModule::createUnaryOp(char op, DAGNode* operand) {
   return findExistingNode(candidate);
 }
 
-DAGNode* IRModule::createArrayAccess(DAGNode* base, DAGNode* index) {
+DAGNode* IRModule::createArrayAccess(DAGNode* base, DAGNode* index,
+                                     bool shareable) {
   auto candidate = createNode(NodeKind::ArrayAccess);
   candidate->operands = {base, index};
+  candidate->pure = shareable;
   candidate->recomputeHash();
-  return findExistingNode(candidate);
+  return shareable ? findExistingNode(candidate) : candidate;
 }
 
-DAGNode* IRModule::createMemberAccess(DAGNode* base, const std::string& member) {
+DAGNode* IRModule::createMemberAccess(DAGNode* base, const std::string& member,
+                                      bool shareable) {
   auto candidate = createNode(NodeKind::MemberAccess);
   candidate->name = member;
   candidate->operands = {base};
+  candidate->pure = shareable;
   candidate->recomputeHash();
-  return findExistingNode(candidate);
+  return shareable ? findExistingNode(candidate) : candidate;
 }
 
-DAGNode* IRModule::createArrowAccess(DAGNode* base, const std::string& member) {
+DAGNode* IRModule::createArrowAccess(DAGNode* base, const std::string& member,
+                                     bool shareable) {
   auto candidate = createNode(NodeKind::ArrowAccess);
   candidate->name = member;
   candidate->operands = {base};
+  candidate->pure = shareable;
   candidate->recomputeHash();
-  return findExistingNode(candidate);
+  return shareable ? findExistingNode(candidate) : candidate;
 }
 
-DAGNode* IRModule::createCall(DAGNode* callee, const std::vector<DAGNode*>& args) {
+DAGNode* IRModule::createCall(DAGNode* callee, const std::vector<DAGNode*>& args,
+                              bool pure) {
   auto candidate = createNode(NodeKind::Call);
   candidate->operands.push_back(callee);
   for (auto* a : args) candidate->operands.push_back(a);
+  candidate->pure = pure;
   candidate->recomputeHash();
-  return findExistingNode(candidate);
+  // Impure calls are kept distinct: sharing them could drop or reorder effects.
+  return pure ? findExistingNode(candidate) : candidate;
 }
 
 DAGNode* IRModule::findExistingNode(DAGNode* candidate) {

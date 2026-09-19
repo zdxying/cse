@@ -61,17 +61,24 @@ class IRModule {
   // Create a unary op node
   DAGNode* createUnaryOp(char op, DAGNode* operand);
 
-  // Create an array access node
-  DAGNode* createArrayAccess(DAGNode* base, DAGNode* index);
+  // Create an array access node.
+  // `shareable`: if true, structurally identical loads share a node. Only safe
+  // for loads from read-only locations; otherwise each load is kept distinct.
+  DAGNode* createArrayAccess(DAGNode* base, DAGNode* index, bool shareable = true);
 
-  // Create a member access node
-  DAGNode* createMemberAccess(DAGNode* base, const std::string& member);
+  // Create a member access node (see createArrayAccess for `shareable`).
+  DAGNode* createMemberAccess(DAGNode* base, const std::string& member,
+                              bool shareable = true);
 
-  // Create an arrow access node
-  DAGNode* createArrowAccess(DAGNode* base, const std::string& member);
+  // Create an arrow access node (see createArrayAccess for `shareable`).
+  DAGNode* createArrowAccess(DAGNode* base, const std::string& member,
+                             bool shareable = true);
 
-  // Create a call node
-  DAGNode* createCall(DAGNode* callee, const std::vector<DAGNode*>& args);
+  // Create a call node.
+  // `pure`: if true, identical calls share a node. Impure calls are never
+  // deduplicated (they may have side effects / observe mutable state).
+  DAGNode* createCall(DAGNode* callee, const std::vector<DAGNode*>& args,
+                      bool pure = true);
 
   // CSE lookup: find existing node with same structural hash.
   // If found, returns existing (dedup); otherwise registers candidate.

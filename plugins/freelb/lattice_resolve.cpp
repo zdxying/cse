@@ -238,17 +238,20 @@ class LatticeResolveVisitor {
         if (ops.size() == 1) return module.createUnaryOp(node->op, ops[0]);
         break;
       case NodeKind::ArrayAccess:
-        if (ops.size() == 2) return module.createArrayAccess(ops[0], ops[1]);
+        if (ops.size() == 2)
+          return module.createArrayAccess(ops[0], ops[1], node->pure);
         break;
       case NodeKind::MemberAccess:
-        if (ops.size() == 1) return module.createMemberAccess(ops[0], node->name);
+        if (ops.size() == 1)
+          return module.createMemberAccess(ops[0], node->name, node->pure);
         break;
       case NodeKind::ArrowAccess:
-        if (ops.size() == 1) return module.createArrowAccess(ops[0], node->name);
+        if (ops.size() == 1)
+          return module.createArrowAccess(ops[0], node->name, node->pure);
         break;
       case NodeKind::Call: {
         std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
-        return module.createCall(ops[0], args);
+        return module.createCall(ops[0], args, node->pure);
       }
       default:
         break;

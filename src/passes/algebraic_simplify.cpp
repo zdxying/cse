@@ -26,9 +26,16 @@ std::string numText(double v) {
 
 class AlgebraicSimplifyVisitor {
  public:
-  explicit AlgebraicSimplifyVisitor(IRModule& mod) : module(mod) {}
+  AlgebraicSimplifyVisitor(IRModule& mod, bool commutative, bool associative)
+      : module(mod),
+        commutative_(commutative),
+        associative_(associative),
+        numeric_(commutative && associative) {}
   IRModule& module;
   int simplifications = 0;
+  bool commutative_;
+  bool associative_;
+  bool numeric_;
 
   void visitStmt(StmtIR* stmt) {
     if (!stmt) return;
@@ -91,33 +98,39 @@ class AlgebraicSimplifyVisitor {
       node->recomputeHash();
     }
 
-    // Apply algebraic simplifications
-    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+    // Apply algebraic simplifications. All of these assume numeric semantics
+    // (identity elements, commutativity) and are skipped unless the caller has
+    // opted in via the config.
+    if (numeric_ && node->kind == NodeKind::BinaryOp &&
+        node->operands.size() == 2) {
       DAGNode* result = applyIdentities(node);
       if (result != node) { simplifications++; return result; }
       result = sortCommutative(node);
       if (result != node) { simplifications++; return result; }
     }
     // UnaryOp identities (--a → a)
-    if (node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
+    if (numeric_ && node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
       DAGNode* result = applyIdentities(node);
       if (result != node) { simplifications++; return result; }
     }
 
     // Strength reduction
-    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+    if (numeric_ && node->kind == NodeKind::BinaryOp &&
+        node->operands.size() == 2) {
       DAGNode* result = strengthReduce(node);
       if (result != node) { simplifications++; return result; }
     }
 
     // Even-power canonicalization: (-a) * (-a) -> a * a
-    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+    if (numeric_ && node->kind == NodeKind::BinaryOp &&
+        node->operands.size() == 2) {
       DAGNode* result = evenPower(node);
       if (result != node) { simplifications++; return result; }
     }
 
     // Constant product normalization: fold constant factors, const first.
-    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+    if (numeric_ && node->kind == NodeKind::BinaryOp &&
+        node->operands.size() == 2) {
       DAGNode* result = normalizeProduct(node);
       if (result != node) { simplifications++; return result; }
     }
@@ -313,7 +326,7 @@ class AlgebraicSimplifyVisitor {
 };
 
 void AlgebraicSimplifyPass::run(IRModule& module) {
-  AlgebraicSimplifyVisitor visitor(module);
+  AlgebraicSimplifyVisitor visitor(module, _commutative, _associative);
   visitor.visitStmt(module.body.get());
 }
 

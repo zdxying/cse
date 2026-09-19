@@ -22,6 +22,7 @@ static void printUsage(const char* prog) {
             << "Options:\n"
             << "  -r, --recombine    Enable expression recombination\n"
             << "  -c, --cost         Analyze and report FLOP cost comparison\n"
+            << "  -s, --safe         Conservative mode (no unsafe algebraic rules)\n"
             << "  --json             Output in JSON format (use with -c)\n"
             << "  -h, --help         Show this help\n";
 }
@@ -34,11 +35,9 @@ struct OptResult {
 
 // Pipeline: source text → Lexer → Parser → IRBuilder → PassManager → CodeGen
 // Each //@cse region is processed independently through this pipeline.
-static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
-                                bool collectCost) {
-  // 1. Create config with FreeLB defaults (skip __xx__, simplify T{1})
-  cse::CSEConfig config = cse::freelb::createFreeLBConfig();
-
+static OptResult optimizeRegion(const std::string& code,
+                                const cse::CSEConfig& config,
+                                bool enableRecombine, bool collectCost) {
   // 2. Lex: tokenize source
   cse::Lexer lexer(code, config);
   auto tokens = lexer.tokenize();
@@ -75,7 +74,7 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
     os.def = sd.get();
     for (auto& method : sd->methods) {
       auto methodMod = std::make_unique<cse::IRModule>();
-      cse::IRBuilder builder(methodMod.get());
+      cse::IRBuilder builder(methodMod.get(), config);
       builder.buildFunction(*method);
       if (collectCost) {
         auto before = cse::analyzeCost(*methodMod);
@@ -85,6 +84,7 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
         optResult.costBefore.vars += before.vars;
       }
       auto pm = cse::PassManager::createDefault(
+          config,
           enableRecombine, cse::freelb::createLatticeResolvePass());
       pm.runAll(*methodMod);
       if (collectCost) {
@@ -111,7 +111,7 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
   bool emitStructs = true;
   for (auto& func : result.functions) {
     cse::IRModule module;
-    cse::IRBuilder builder(&module);
+    cse::IRBuilder builder(&module, config);
     builder.buildFunction(*func);
 
     // Collect cost before optimization
@@ -125,6 +125,7 @@ static OptResult optimizeRegion(const std::string& code, bool enableRecombine,
 
     // Run passes
     auto pm = cse::PassManager::createDefault(
+          config,
         enableRecombine, cse::freelb::createLatticeResolvePass());
     pm.runAll(module);
 
@@ -167,6 +168,7 @@ int main(int argc, char* argv[]) {
   bool enableRecombine = false;
   bool collectCost = false;
   bool outputJson = false;
+  bool safeMode = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -177,6 +179,8 @@ int main(int argc, char* argv[]) {
       enableRecombine = true;
     } else if (arg == "-c" || arg == "--cost") {
       collectCost = true;
+    } else if (arg == "-s" || arg == "--safe") {
+      safeMode = true;
     } else if (arg == "--json") {
       outputJson = true;
     } else if (arg[0] != '-') {
@@ -186,6 +190,21 @@ int main(int argc, char* argv[]) {
       printUsage(argv[0]);
       return 1;
     }
+  }
+
+  // Default configuration is FreeLB-flavored (aggressive algebraic rules). The
+  // generic/safe mode disables assumptions that are unsafe for arbitrary C++.
+  cse::CSEConfig config = cse::freelb::createFreeLBConfig();
+  if (safeMode) {
+    cse::CSEConfig safe;
+    safe.tokenFilter = config.tokenFilter;  // keep parsing behavior
+    safe.simplifyBraceInit = false;
+    safe.assumeNumericCommutative = false;
+    safe.assumeNumericAssociative = false;
+    safe.allowFpReassoc = false;
+    safe.noAlias = false;
+    safe.isPureFunction = nullptr;
+    config = safe;
   }
 
   if (inputFile.empty()) {
@@ -235,7 +254,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Optimize and output the region
-    auto opt = optimizeRegion(region.code, enableRecombine, collectCost);
+    auto opt = optimizeRegion(region.code, config, enableRecombine, collectCost);
     output += opt.code;
 
     if (collectCost) {

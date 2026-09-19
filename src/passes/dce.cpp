@@ -10,6 +10,15 @@ namespace cse {
 
 namespace {
 
+// Does the expression contain any impure (side-effecting) call?
+bool hasImpureCall(DAGNode* e) {
+  if (!e) return false;
+  if (e->kind == NodeKind::Call && !e->pure) return true;
+  for (auto* op : e->operands)
+    if (hasImpureCall(op)) return true;
+  return false;
+}
+
 // Count variable uses in a DAG subtree (excludes the VarDecl name itself).
 void countExprUses(DAGNode* e, std::unordered_map<std::string, int>& counts) {
   if (!e) return;
@@ -76,7 +85,9 @@ bool pruneBlock(BlockIR* block, const std::unordered_map<std::string, int>& uses
     } else if ((*it)->kind == StmtIRKind::Assign) {
       auto* assign = static_cast<AssignIR*>(it->get());
       auto uit = uses.find(assign->target);
-      if (uit == uses.end() || uit->second == 0) remove = true;
+      // Only drop the assignment if the RHS has no side effects.
+      if ((uit == uses.end() || uit->second == 0) && !hasImpureCall(assign->value))
+        remove = true;
     }
     if (remove) {
       it = block->stmts.erase(it);

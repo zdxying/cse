@@ -59,6 +59,11 @@ struct DAGNode {
   // Operands (children in DAG) — for BinaryOp: [lhs, rhs]; for MemberAccess: [base]
   std::vector<DAGNode*> operands;
 
+  // For Call / memory-load nodes: the value is referentially transparent
+  // (pure call, or load from a read-only location). Non-pure nodes are never
+  // deduplicated and must not be reordered across effects.
+  bool pure = true;
+
   // Source location for debugging
   size_t srcLine = 0;
 

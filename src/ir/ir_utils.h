@@ -104,14 +104,14 @@ inline DAGNode* substitute(IRModule& mod, DAGNode* root,
     case NodeKind::UnaryOp:
       return mod.createUnaryOp(root->op, newOps[0]);
     case NodeKind::ArrayAccess:
-      return mod.createArrayAccess(newOps[0], newOps[1]);
+      return mod.createArrayAccess(newOps[0], newOps[1], root->pure);
     case NodeKind::MemberAccess:
-      return mod.createMemberAccess(newOps[0], root->name);
+      return mod.createMemberAccess(newOps[0], root->name, root->pure);
     case NodeKind::ArrowAccess:
-      return mod.createArrowAccess(newOps[0], root->name);
+      return mod.createArrowAccess(newOps[0], root->name, root->pure);
     case NodeKind::Call: {
       std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
-      return mod.createCall(newOps[0], args);
+      return mod.createCall(newOps[0], args, root->pure);
     }
     default:
       return root;

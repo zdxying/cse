@@ -64,25 +64,51 @@ CSE 工具通过 `CSEConfig` 结构支持多种项目配置：
 
 ```cpp
 struct CSEConfig {
+  // 前端
   std::function<bool(const Token&)> tokenFilter;  // token 过滤器
-  bool simplifyBraceInit = false;                  // T{expr} → expr
+  bool simplifyBraceInit = true;                  // T{expr} → expr
+
+  // 语义/安全（默认保守，通用 C++ 安全）
+  bool assumeNumericCommutative = false;          // 允许 +/* 交换律重排
+  bool assumeNumericAssociative = false;          // 允许结合律/重结合
+  bool allowFpReassoc = false;                    // 允许浮点重结合
+  bool noAlias = false;                           // 假设不同指针参数不别名
+  std::function<bool(const std::string&)> isPureFunction;  // 纯函数判定
 };
 ```
 
 ### 使用方式
 
 ```cpp
-// 通用 C++ 模式
+// 通用 C++ 模式（保守）：不假设交换/结合，未知调用视为有副作用
 cse::CSEConfig config;
 
-// FreeLB/CUDA 模式
+// FreeLB/CUDA 模式（激进）：开启数值代数规则，注册 lattice 访问器为纯函数
 cse::CSEConfig config = cse::freelb::createFreeLBConfig();
-// → tokenFilter = skipDoubleUnderscoreTokens, simplifyBraceInit = true
 ```
+
+CLI：默认使用 FreeLB 配置；`-s/--safe` 切换到保守语义（保留 token 过滤）。
 
 FreeLB 特定逻辑位于 `plugins/freelb/`：
 - `cuda_skip.h/cpp` — 过滤 `__any__`、`__host__`、`__device__` 等 CUDA 注解
-- `config.h` — FreeLB 默认配置工厂函数
+- `config.h` — FreeLB 默认配置工厂函数 + 纯函数注册
+- `lattice_resolve.h/cpp` — lattice 常量/点积解析
+
+## 正确性与安全模型
+
+通用模式下优化保持行为等价，四条机制：
+
+1. **效果/纯度**：调用默认视为有副作用，`createCall` 仅对纯调用去重；不纯调用不被合并、
+   不跨语句提取。内置数学函数 + `isPureFunction` 白名单视为纯。
+2. **内存屏障**：IRBuilder 预扫描得到只读根（`const` 参数、未被写且未传入调用的变量）；
+   仅只读根的 load 可去重/跨语句共享，可变/未知根的 load 每次独立，避免跨 store 复用。
+3. **支配安全**：出现在 `if`/`else`/循环内的子表达式标记为 nested，不参与顶层提取，
+   避免把条件执行的计算提升为无条件计算。
+4. **作用域**：IRBuilder 维护作用域栈并对遮蔽变量 alpha-rename（如 `y__s1`），
+   保证同名变量不跨作用域误合并。
+
+代数规则（恒等消除、交换/结合律、`Reassociate`）默认关闭，仅在
+`assumeNumericCommutative/Associative` 打开时启用；浮点重结合另有 `allowFpReassoc`。
 
 ## 优化管线
 
@@ -295,8 +321,12 @@ bin/
 | **类型系统不完整** | 类型用字符串表示 | 不支持类型检查、模板实例化、类型推导 |
 | **无错误恢复** | 解析错误抛异常后终止 | 一次只能报告一个错误 |
 | **仅处理标记区域** | 只解析 `//@cse` 标记的代码 | 无法跨区域优化 |
-| **重结合改变浮点舍入** | 加法项重排不满足 IEEE 结合律 | 对 LBM 核可接受，通用代码需谨慎 |
+| **作用域实现较浅** | alpha-rename 处理遮蔽；`for` 内声明简化为同一作用域 | 复杂的声明/生命周期场景可能不准 |
+| **数组复合赋值未建模** | `a[i] += x` 未展开为 `a[i] = a[i] + x` | 仅与变量 `x += y` 等价 |
 | **无通用 constexpr** | 仅模式匹配已知 lattice | 其他 constexpr 调用仍不透明 |
+
+> 注：不纯调用合并、跨 store 复用 load、分支外提、遮蔽、`==`/`<=` 运算符等
+> 正确性问题已在通用安全模式下修复（见「正确性与安全模型」）。
 
 ## 未来优化方向
 
@@ -329,6 +359,8 @@ bin/
 | `tests/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合 |
 | `tests/equilibrium_ref.cpp` | 手写展开版基线（89 flops） |
 | `tests/verify_equilibrium.cpp` | 生成代码与参考实现数值一致性校验 |
+| `tests/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽 |
+| `tests/verify_safety.cpp` | 安全用例的差分执行校验 |
 
 ### D3Q19 equilibrium 实测（cse -c，成本模型已计入循环次数）
 
@@ -347,6 +379,7 @@ bin/
 ```bash
 make          # 构建静态库、动态库和可执行文件
 make clean    # 清理
-./bin/cse input.cpp -c    # 分析 FLOP 成本
-./bin/cse input.cpp -r    # 优化文件，启用表达式重组
+./bin/cse input.cpp -c         # 分析 FLOP 成本
+./bin/cse input.cpp -r         # 优化文件，启用表达式重组
+./bin/cse input.cpp -s         # 保守模式（不启用不安全的代数规则）
 ```

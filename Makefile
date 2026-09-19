@@ -14,7 +14,6 @@ PIC_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
 
 # Auto-generated header dependencies (so header edits trigger rebuilds)
 DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) $(BUILDDIR)/$(SRCDIR)/main.d
--include $(DEPS)
 
 # Targets
 STATIC_LIB  := $(BINDIR)/libcse.a
@@ -58,5 +57,8 @@ $(BUILDDIR)/$(PLUGDIR)/%.pic.o: $(PLUGDIR)/%.cpp
 
 clean:
 	rm -rf $(BUILDDIR) $(BINDIR)
+
+# Include header dependencies last so the default goal stays `all`.
+-include $(DEPS)
 
 .PHONY: all clean

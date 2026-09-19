@@ -40,6 +40,17 @@ static bool isLeftAssoc(char op) {
   return op == '+' || op == '-' || op == '*' || op == '/' || op == '%';
 }
 
+// Map the internal operator encoding back to C++ spelling.
+static std::string opText(char op) {
+  switch (op) {
+    case 'e': return "==";
+    case 'n': return "!=";
+    case 'l': return "<=";
+    case 'g': return ">=";
+    default: return std::string(1, op);
+  }
+}
+
 static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
   int pp = getPrecedence(parentOp);
   int cp = getPrecedence(childOp);
@@ -243,7 +254,7 @@ std::string CodeGen::emitExpr(DAGNode* node) {
         result += lhs;
 
       result += " ";
-      result += node->op;
+      result += opText(node->op);
       result += " ";
 
       if (parenR)

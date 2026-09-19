@@ -201,7 +201,8 @@ std::unique_ptr<Expr> Parser::parseAssignment() {
     auto op = advance();
     auto rhs = parseAssignment();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
-    expr->op = op.text[0];
+    expr->op = (op.type == TokenType::Assign) ? '=' : op.text[0];
+    expr->isAssignment = true;
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     return expr;
@@ -256,7 +257,7 @@ std::unique_ptr<Expr> Parser::parseEquality() {
     auto op = advance();
     auto rhs = parseComparison();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
-    expr->op = (op.type == TokenType::Equal) ? '=' : '!';
+    expr->op = (op.type == TokenType::Equal) ? 'e' : 'n';
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     lhs = std::move(expr);
@@ -271,7 +272,13 @@ std::unique_ptr<Expr> Parser::parseComparison() {
     auto op = advance();
     auto rhs = parseAddSub();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
-    expr->op = op.text[0];
+    switch (op.type) {
+      case TokenType::Less: expr->op = '<'; break;
+      case TokenType::Greater: expr->op = '>'; break;
+      case TokenType::LessEqual: expr->op = 'l'; break;
+      case TokenType::GreaterEqual: expr->op = 'g'; break;
+      default: expr->op = op.text[0]; break;
+    }
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     lhs = std::move(expr);
@@ -575,17 +582,24 @@ std::unique_ptr<Stmt> Parser::parseExprStmt() {
   expect(TokenType::Semicolon);
 
   // Check if this is an assignment: Variable = expr, or Variable += expr, etc.
-  if (expr->kind == ExprKind::BinaryOp && expr->lhs &&
+  // Only genuine assignment expressions (not `==`, `+`, ...) with a simple
+  // variable target become Assignment statements.
+  if (expr->kind == ExprKind::BinaryOp && expr->isAssignment && expr->lhs &&
       expr->lhs->kind == ExprKind::Variable) {
-    char op = expr->op;
-    // '=' is already correct. For +=, -=, *=, /= the parser stored the base op.
-    // We need to check the actual token to determine compound assignment.
-    // The BinaryOp already has the right op character from parseAssignment().
     auto stmt = std::make_unique<Stmt>(StmtKind::Assignment, expr->loc);
     stmt->varName = expr->lhs->name;
-    stmt->rhs = std::move(expr->rhs);
-    // Store the operator for compound assignments (=, +=, -=, *=, /=)
-    // For simple '=', we don't need to store it explicitly.
+    if (expr->op == '=') {
+      stmt->rhs = std::move(expr->rhs);
+    } else {
+      // Expand `x op= y` to `x = x op y`.
+      auto lhsCopy = std::make_unique<Expr>(ExprKind::Variable, expr->lhs->loc);
+      lhsCopy->name = expr->lhs->name;
+      auto combined = std::make_unique<Expr>(ExprKind::BinaryOp, expr->loc);
+      combined->op = expr->op;
+      combined->lhs = std::move(lhsCopy);
+      combined->rhs = std::move(expr->rhs);
+      stmt->rhs = std::move(combined);
+    }
     return stmt;
   }
 
