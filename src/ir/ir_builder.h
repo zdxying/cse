@@ -48,6 +48,10 @@ class IRBuilder {
   bool isReadOnlyRoot(const std::string& name) const;
   std::string rootName(const Expr& expr) const;
 
+  // Fold `<latsetAlias>::q/d/cs2/InvCs2/InvCs4` to a constant when a per-latset
+  // instantiation context is configured. Returns nullptr otherwise.
+  DAGNode* latsetConst(const std::string& name);
+
   // ---- Scope handling (alpha-renaming) ----
   void pushScope();
   void popScope();

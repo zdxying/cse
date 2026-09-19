@@ -28,6 +28,10 @@ class CodeGen {
     const std::vector<OptimizedStruct>& optStructs = {},
     const std::vector<TemplateParam>& funcTemplateParams = {});
 
+  // Emit only the statements of `module.body` at `indentLevel` indentation.
+  // Used by the FreeLB .ur.h emitter to wrap an optimized method body.
+  std::string generateBody(IRModule& module, int indentLevel = 1);
+
  private:
   void emitStmt(StmtIR* stmt, int indentLevel);
   std::string emitExpr(DAGNode* node);

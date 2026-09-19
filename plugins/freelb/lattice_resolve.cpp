@@ -1,5 +1,6 @@
 #include "lattice_resolve.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <iomanip>
@@ -7,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "frontend/cse_config.h"
 #include "ir/dag_node.h"
 #include "ir/ir_module.h"
 #include "ir/statement.h"
@@ -24,6 +26,31 @@ struct LatticeInfo {
   const double* w;    // q
 };
 
+// Direction vectors (q * dim, row-major) and weights, mirrored from
+// src/lbm/lattice_set.h. Fixed 1/3 sound speed for every set.
+const int kD2Q5c[] = {0, 0, 1, 0, -1, 0, 0, 1, 0, -1};
+const double kD2Q5w[] = {1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0};
+
+const int kD2Q9c[] = {0, 0, 1, 0, -1, 0, 0, 1, 0, -1,
+                      1, 1, -1, -1, 1, -1, -1, 1};
+const double kD2Q9w[] = {4.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,
+                         1.0 / 9.0,  1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0,
+                         1.0 / 36.0};
+
+const int kD3Q7c[] = {0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0,
+                      0, -1, 0, 0, 0, 1, 0, 0, -1};
+const double kD3Q7w[] = {1.0 / 4.0, 1.0 / 8.0, 1.0 / 8.0, 1.0 / 8.0,
+                         1.0 / 8.0, 1.0 / 8.0, 1.0 / 8.0};
+
+const int kD3Q15c[] = {
+    0, 0, 0,   1, 0, 0,   -1, 0, 0,   0, 1, 0,    0, -1, 0,   0, 0, 1,
+    0, 0, -1,  1, 1, 1,   -1, -1, -1, 1, 1, -1,   -1, -1, 1,  1, -1, 1,
+    -1, 1, -1, -1, 1, 1,  1, -1, -1};
+const double kD3Q15w[] = {
+    2.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,
+    1.0 / 9.0,  1.0 / 9.0,  1.0 / 72.0, 1.0 / 72.0, 1.0 / 72.0,
+    1.0 / 72.0, 1.0 / 72.0, 1.0 / 72.0, 1.0 / 72.0, 1.0 / 72.0};
+
 const int kD3Q19c[] = {
     0, 0, 0,   1, 0, 0,   -1, 0, 0,  0, 1, 0,   0, -1, 0,  0, 0, 1,  0, 0, -1,
     1, 1, 0,   -1, -1, 0, 1, 0, 1,   -1, 0, -1, 0, 1, 1,  0, -1, -1, 1, -1, 0,
@@ -35,17 +62,29 @@ const double kD3Q19w[] = {
     1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0,
     1.0 / 36.0};
 
-const int kD2Q9c[] = {0, 0, 1, 0, -1, 0, 0, 1, 0, -1,
-                      1, 1, -1, -1, 1, -1, -1, 1};
-const double kD2Q9w[] = {4.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,  1.0 / 9.0,
-                         1.0 / 9.0,  1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0,
-                         1.0 / 36.0};
+const int kD3Q27c[] = {
+    0, 0, 0,   1, 0, 0,   -1, 0, 0,   0, 1, 0,    0, -1, 0,   0, 0, 1,
+    0, 0, -1,  1, 1, 0,   -1, -1, 0,  1, 0, 1,    -1, 0, -1,  0, 1, 1,
+    0, -1, -1, 1, -1, 0,  -1, 1, 0,   1, 0, -1,   -1, 0, 1,   0, 1, -1,
+    0, -1, 1,  1, 1, 1,   -1, -1, -1, 1, 1, -1,   -1, -1, 1,  1, -1, 1,
+    -1, 1, -1, -1, 1, 1,  1, -1, -1};
+const double kD3Q27w[] = {
+    8.0 / 27.0,  2.0 / 27.0,  2.0 / 27.0,  2.0 / 27.0,  2.0 / 27.0,
+    2.0 / 27.0,  2.0 / 27.0,  1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,
+    1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,
+    1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,  1.0 / 54.0,  1.0 / 216.0,
+    1.0 / 216.0, 1.0 / 216.0, 1.0 / 216.0, 1.0 / 216.0, 1.0 / 216.0,
+    1.0 / 216.0, 1.0 / 216.0};
 
 const LatticeInfo* lookupLattice(const std::string& name) {
-  static const LatticeInfo d3q19{3, 19, kD3Q19c, kD3Q19w};
-  static const LatticeInfo d2q9{2, 9, kD2Q9c, kD2Q9w};
-  if (name.find("D3Q19") != std::string::npos) return &d3q19;
-  if (name.find("D2Q9") != std::string::npos) return &d2q9;
+  static const LatticeInfo sets[] = {
+      {2, 5, kD2Q5c, kD2Q5w},   {2, 9, kD2Q9c, kD2Q9w},
+      {3, 7, kD3Q7c, kD3Q7w},   {3, 15, kD3Q15c, kD3Q15w},
+      {3, 19, kD3Q19c, kD3Q19w}, {3, 27, kD3Q27c, kD3Q27w}};
+  for (const auto& s : sets) {
+    std::string tag = "D" + std::to_string(s.dim) + "Q" + std::to_string(s.q);
+    if (name.find(tag) != std::string::npos) return &s;
+  }
   return nullptr;
 }
 
@@ -64,9 +103,20 @@ bool isLatticeCall(DAGNode* node, const char* which) {
 
 class LatticeResolveVisitor {
  public:
-  explicit LatticeResolveVisitor(IRModule& mod) : module(mod) {}
+  LatticeResolveVisitor(IRModule& mod, const CSEConfig& cfg)
+      : module(mod), config(cfg) {}
   IRModule& module;
+  const CSEConfig& config;
   int resolved = 0;
+
+  // Resolve `<alias>` template arguments to the configured concrete lattice.
+  const LatticeInfo* latticeFor(const std::string& callee) {
+    if (!config.latsetAlias.empty() &&
+        callee.find(config.latsetAlias) != std::string::npos) {
+      return lookupLattice(config.latsetName);
+    }
+    return lookupLattice(callee);
+  }
 
   void visitStmt(StmtIR* stmt) {
     if (!stmt) return;
@@ -129,7 +179,7 @@ class LatticeResolveVisitor {
         isLatticeCall(node->operands[0], "::c")) {
       DAGNode* call = node->operands[0];
       DAGNode* idx = node->operands[1];
-      const LatticeInfo* lat = lookupLattice(calleeName(call));
+      const LatticeInfo* lat = latticeFor(calleeName(call));
       int k = constIndex(call);
       if (lat && idx->kind == NodeKind::Constant && k >= 0 && k < lat->q) {
         int comp = static_cast<int>(idx->constVal);
@@ -156,7 +206,7 @@ class LatticeResolveVisitor {
 
     // latset::w<...>(k) -> declared constant weight, emitted symbolically.
     if (isLatticeCall(node, "::w")) {
-      const LatticeInfo* lat = lookupLattice(calleeName(node));
+      const LatticeInfo* lat = latticeFor(calleeName(node));
       int k = constIndex(node);
       if (lat && k >= 0 && k < lat->q) {
         resolved++;
@@ -169,7 +219,9 @@ class LatticeResolveVisitor {
             break;
           }
         }
-        std::string sym = calleeName(node) + "(" + std::to_string(rep) + ")";
+        std::string callee = calleeName(node);
+        callee.erase(std::remove(callee.begin(), callee.end(), ' '), callee.end());
+        std::string sym = callee + "(" + std::to_string(rep) + ")";
         return module.createSymbolicConst(lat->w[k], sym);
       }
     }
@@ -193,7 +245,7 @@ class LatticeResolveVisitor {
   }
 
   DAGNode* buildDot(DAGNode* vec, DAGNode* call) {
-    const LatticeInfo* lat = lookupLattice(calleeName(call));
+    const LatticeInfo* lat = latticeFor(calleeName(call));
     int k = constIndex(call);
     if (!lat || k < 0 || k >= lat->q) return nullptr;
 
@@ -269,17 +321,21 @@ class LatticeResolveVisitor {
 
 class LatticeResolvePass : public Pass {
  public:
+  explicit LatticeResolvePass(const CSEConfig& cfg) : config(cfg) {}
   std::string name() const override { return "LatticeResolve"; }
   void run(IRModule& module) override {
-    LatticeResolveVisitor visitor(module);
+    LatticeResolveVisitor visitor(module, config);
     visitor.visitStmt(module.body.get());
   }
+
+ private:
+  CSEConfig config;
 };
 
 }  // namespace
 
-std::unique_ptr<Pass> createLatticeResolvePass() {
-  return std::make_unique<LatticeResolvePass>();
+std::unique_ptr<Pass> createLatticeResolvePass(const CSEConfig& config) {
+  return std::make_unique<LatticeResolvePass>(config);
 }
 
 }  // namespace freelb

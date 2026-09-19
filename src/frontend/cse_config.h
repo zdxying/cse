@@ -47,6 +47,18 @@ struct CSEConfig {
   // depends only on arguments). Unknown calls are treated as impure. A built-in
   // set of math functions is always considered pure.
   std::function<bool(const std::string&)> isPureFunction = nullptr;
+
+  // ---- FreeLB per-latset instantiation -----------------------------------
+  // When `latsetName` is non-empty, the tool is optimizing a template body for
+  // one concrete lattice set:
+  //   - `<latsetAlias>::q/d/cs2/InvCs2/InvCs4` fold to numbers;
+  //   - `latset::c<latsetAlias>` / `latset::w<latsetAlias>` resolve against
+  //     `latsetName`, so a templated `LatSet` alias works like a concrete set.
+  std::string latsetAlias;  // template alias in the source, e.g. "LatSet"
+  std::string latsetName;   // concrete lattice set, e.g. "D3Q19"
+  int latsetDim = 0;        // d
+  int latsetQ = 0;          // q
+  double latsetCs2 = 1.0 / 3.0;
 };
 
 }  // namespace cse

@@ -5,22 +5,24 @@ PLUGDIR  := plugins
 BUILDDIR := build
 BINDIR   := bin
 
-# Library sources (everything except main.cpp, includes src/ and plugins/)
-LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp, $(shell find $(SRCDIR) $(PLUGDIR) -name '*.cpp'))
+# Library sources (everything except the two program entry points)
+LIB_SOURCES := $(filter-out $(SRCDIR)/main.cpp $(PLUGDIR)/freelb/ur_emit_main.cpp, $(shell find $(SRCDIR) $(PLUGDIR) -name '*.cpp'))
 
 # Map source paths to object paths: src/foo/bar.o -> build/foo/bar.o, plugins/freelb/baz.o -> build/plugins/freelb/baz.o
 LIB_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.o,$(LIB_SOURCES))
 PIC_OBJECTS := $(patsubst %.cpp,$(BUILDDIR)/%.pic.o,$(LIB_SOURCES))
 
 # Auto-generated header dependencies (so header edits trigger rebuilds)
-DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) $(BUILDDIR)/$(SRCDIR)/main.d
+DEPS := $(LIB_OBJECTS:.o=.d) $(PIC_OBJECTS:.o=.d) $(BUILDDIR)/$(SRCDIR)/main.d \
+        $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.d
 
 # Targets
 STATIC_LIB  := $(BINDIR)/libcse.a
 DYNAMIC_LIB := $(BINDIR)/libcse.so
 TARGET      := $(BINDIR)/cse
+CSEGEN      := $(BINDIR)/csegen
 
-all: $(STATIC_LIB) $(DYNAMIC_LIB) $(TARGET)
+all: $(STATIC_LIB) $(DYNAMIC_LIB) $(TARGET) $(CSEGEN)
 
 # Static library
 $(STATIC_LIB): $(LIB_OBJECTS)
@@ -36,6 +38,11 @@ $(DYNAMIC_LIB): $(PIC_OBJECTS)
 $(TARGET): $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB)
 	@mkdir -p $(BINDIR)
 	$(CXX) $(BUILDDIR)/$(SRCDIR)/main.o $(STATIC_LIB) -o $@
+
+# FreeLB .ur.h generator (statically linked)
+$(CSEGEN): $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB)
+	@mkdir -p $(BINDIR)
+	$(CXX) $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB) -o $@
 
 # Normal objects (for static lib and main.o)
 $(BUILDDIR)/$(SRCDIR)/%.o: $(SRCDIR)/%.cpp

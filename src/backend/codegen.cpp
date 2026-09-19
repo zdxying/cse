@@ -134,6 +134,13 @@ std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& s
   return _out.str();
 }
 
+std::string CodeGen::generateBody(IRModule& module, int indentLevel) {
+  _out.str("");
+  _out.clear();
+  if (module.body) emitStmt(module.body.get(), indentLevel);
+  return _out.str();
+}
+
 void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
   if (!stmt) return;
   std::string ind = makeIndent(indentLevel);

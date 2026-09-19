@@ -122,6 +122,8 @@ std::vector<Token> Lexer::tokenize() {
         if (peek() == '&') {
           _pos++;
           tokens.push_back(makeToken(TokenType::And, "&&"));
+        } else {
+          tokens.push_back(makeToken(TokenType::Amp, "&"));
         }
         break;
       case '|':

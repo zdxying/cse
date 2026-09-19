@@ -59,6 +59,7 @@ enum class TokenType {
   Semicolon,
   Dot,
   Arrow,
+  Amp,  // & (reference/address-of)
 
   // Brackets
   LParen,
@@ -178,6 +179,8 @@ inline const char* tokenTypeName(TokenType t) {
       return "Dot";
     case TokenType::Arrow:
       return "Arrow";
+    case TokenType::Amp:
+      return "Amp";
     case TokenType::LParen:
       return "LParen";
     case TokenType::RParen:

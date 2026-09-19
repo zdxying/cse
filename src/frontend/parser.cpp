@@ -57,23 +57,23 @@ std::string Parser::parseType() {
   }
 
   if (check(TokenType::Struct)) {
-    type = advance().text;
+    type += advance().text;
     type += " ";
     type += expect(TokenType::Identifier).text;
   } else if (check(TokenType::Unsigned)) {
-    type = advance().text;
+    type += advance().text;
     // Handle unsigned int, unsigned float, unsigned double, unsigned char, etc.
     if (isTypeKeyword()) {
       type += " " + advance().text;
     }
   } else if (isTypeKeyword()) {
-    type = advance().text;
+    type += advance().text;
   } else if (check(TokenType::Class)) {
-    type = advance().text;
+    type += advance().text;
     type += " ";
     type += expect(TokenType::Identifier).text;
   } else {
-    type = advance().text;  // custom type name
+    type += advance().text;  // custom type name
   }
 
   // Handle :: qualified names: std::string, LatSet::q, etc.
@@ -115,9 +115,12 @@ std::string Parser::parseType() {
     }
   }
 
-  // Handle pointer types: double*, int*, etc.
+  // Handle pointer/reference qualifiers: double*, int&, T&&, etc.
   while (match(TokenType::Star)) {
     type += "*";
+  }
+  while (match(TokenType::Amp)) {
+    type += "&";
   }
   return type;
 }

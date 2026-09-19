@@ -186,6 +186,23 @@ std::string IRBuilder::rootName(const Expr& expr) const {
   }
 }
 
+DAGNode* IRBuilder::latsetConst(const std::string& name) {
+  if (_config.latsetAlias.empty() || _config.latsetName.empty()) return nullptr;
+  const std::string prefix = _config.latsetAlias + "::";
+  if (name.compare(0, prefix.size(), prefix) != 0) return nullptr;
+  const std::string member = name.substr(prefix.size());
+
+  if (member == "q")
+    return _module->createConst(_config.latsetQ, std::to_string(_config.latsetQ));
+  if (member == "d")
+    return _module->createConst(_config.latsetDim, std::to_string(_config.latsetDim));
+  const double cs2 = _config.latsetCs2;
+  if (member == "cs2") return _module->createConst(cs2);
+  if (member == "InvCs2") return _module->createConst(1.0 / cs2);
+  if (member == "InvCs4") return _module->createConst(1.0 / (cs2 * cs2));
+  return nullptr;
+}
+
 // ===== Scope handling =====
 
 void IRBuilder::pushScope() { _scopes.emplace_back(); }
@@ -323,8 +340,10 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
     case ExprKind::Number:
       return _module->createConst(expr.numVal, expr.numText);
 
-    case ExprKind::Variable:
+    case ExprKind::Variable: {
+      if (DAGNode* c = latsetConst(expr.name)) return c;
       return varRef(expr.name);
+    }
 
     case ExprKind::BinaryOp:
       return buildBinaryOp(expr);
