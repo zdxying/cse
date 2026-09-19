@@ -61,7 +61,6 @@ struct Expr {
 
   // UnaryOp
   std::unique_ptr<Expr> operand;
-  bool prefix = true;  // prefix vs postfix
 
   // Ternary
   std::unique_ptr<Expr> cond, trueExpr, falseExpr;
@@ -158,23 +157,15 @@ struct StructDef {
 struct UsingDecl {
   std::string aliasName;
   std::string underlyingType;
-  std::vector<TemplateParam> templateParams;  // optional: template<typename T> using X = ...
   SourceLoc loc;
 };
 
 // ===== Namespace =====
 struct NamespaceDef {
   std::string name;
-  std::vector<std::unique_ptr<Stmt>> stmts;
   std::vector<std::unique_ptr<UsingDecl>> usingDecls;
   std::vector<std::unique_ptr<struct FunctionDef>> functions;
   std::vector<std::unique_ptr<StructDef>> structDefs;
-  SourceLoc loc;
-};
-
-// ===== Include =====
-struct IncludeDecl {
-  std::string path;
   SourceLoc loc;
 };
 

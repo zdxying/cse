@@ -44,49 +44,7 @@ void DAGNode::recomputeHash() {
   hash = h;
 }
 
-std::string DAGNode::toString() const {
-  std::ostringstream oss;
-  oss << "N" << id << "(";
-  switch (kind) {
-    case NodeKind::Constant:
-      oss << numText;
-      break;
-    case NodeKind::Variable:
-      oss << name;
-      break;
-    case NodeKind::BinaryOp:
-      oss << operands[0]->toString() << " " << op << " " << operands[1]->toString();
-      break;
-    case NodeKind::UnaryOp:
-      oss << op << operands[0]->toString();
-      break;
-    case NodeKind::ArrayAccess:
-      oss << operands[0]->toString() << "[" << operands[1]->toString() << "]";
-      break;
-    case NodeKind::MemberAccess:
-      oss << operands[0]->toString() << "." << name;
-      break;
-    case NodeKind::ArrowAccess:
-      oss << operands[0]->toString() << "->" << name;
-      break;
-    case NodeKind::Call:
-      oss << operands[0]->toString() << "()";
-      break;
-    case NodeKind::Ternary:
-      oss << operands[0]->toString() << "?" << operands[1]->toString() << ":"
-          << operands[2]->toString();
-      break;
-    case NodeKind::Cast:
-      oss << "(" << name << ")" << operands[0]->toString();
-      break;
-  }
-  oss << ")";
-  return oss.str();
-}
-
-// ===== NodeHash / NodeEqual =====
-
-size_t NodeHash::operator()(const DAGNode* node) const { return node->hash; }
+// ===== NodeEqual =====
 
 bool NodeEqual::operator()(const DAGNode* a, const DAGNode* b) const {
   if (a->hash != b->hash) return false;

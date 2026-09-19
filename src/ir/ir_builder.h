@@ -32,9 +32,6 @@ class IRBuilder {
   // Build an expression (returns DAG node)
   DAGNode* buildExpr(const Expr& expr);
 
-  // Build assignment
-  std::unique_ptr<StmtIR> buildAssignment(const std::string& target, DAGNode* value);
-
  private:
   // Expression builders
   DAGNode* buildBinaryOp(const Expr& expr);
@@ -67,7 +64,6 @@ class IRBuilder {
   std::unordered_set<std::string> _pointerParams;
   std::unordered_set<std::string> _written;
   std::unordered_set<std::string> _passedToCall;
-  bool _hasImpureCall = false;
 
   // Scope stack: original name → internal (unique) name
   std::vector<std::unordered_map<std::string, std::string>> _scopes;

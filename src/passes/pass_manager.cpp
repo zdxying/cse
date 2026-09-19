@@ -1,5 +1,7 @@
 #include "pass_manager.h"
 
+#include <iostream>
+
 #include "../ir/ir_module.h"
 #include "algebraic_simplify.h"
 #include "constant_fold.h"
@@ -16,8 +18,11 @@ void PassManager::addPass(std::unique_ptr<Pass> pass) {
   _passes.push_back(std::move(pass));
 }
 
-void PassManager::runAll(IRModule& module) {
+void PassManager::runAll(IRModule& module, bool verbose) {
   for (auto& pass : _passes) {
+    if (verbose) {
+      std::cerr << "[cse] pass: " << pass->name() << "\n";
+    }
     pass->run(module);
   }
 }
@@ -34,7 +39,9 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   const bool assoc = config.assumeNumericAssociative;
   pm.addPass(createConstantFoldPass());
   pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
-  if (assoc) {
+  // Additive reassociation may change floating-point results, so it additionally
+  // requires allowFpReassoc.
+  if (assoc && config.allowFpReassoc) {
     pm.addPass(createReassociatePass());
   }
   pm.addPass(createCSEPass());

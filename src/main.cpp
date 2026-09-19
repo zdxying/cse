@@ -23,6 +23,7 @@ static void printUsage(const char* prog) {
             << "  -r, --recombine    Enable expression recombination\n"
             << "  -c, --cost         Analyze and report FLOP cost comparison\n"
             << "  -s, --safe         Conservative mode (no unsafe algebraic rules)\n"
+            << "  -v, --verbose      Print each pass as it runs (to stderr)\n"
             << "  --json             Output in JSON format (use with -c)\n"
             << "  -h, --help         Show this help\n";
 }
@@ -33,11 +34,106 @@ struct OptResult {
   cse::CostResult costAfter;
 };
 
+// Optimize a set of struct definitions and functions and append the generated
+// code to `optResult`. Shared by the top level and by namespace bodies.
+static void optimizeFunctionsAndStructs(
+    const std::vector<std::unique_ptr<cse::FunctionDef>>& funcs,
+    const std::vector<std::unique_ptr<cse::StructDef>>& structs,
+    const cse::CSEConfig& config, bool enableRecombine, bool collectCost,
+    bool verbose, OptResult& optResult) {
+  // Optimize struct methods (each method gets its own IR pipeline). Pure data
+  // structs (no methods) are emitted once via `structPtrs` below.
+  std::vector<cse::OptimizedStruct> optStructs;
+  for (auto& sd : structs) {
+    if (sd->methods.empty()) continue;
+    cse::OptimizedStruct os;
+    os.def = sd.get();
+    for (auto& method : sd->methods) {
+      auto methodMod = std::make_unique<cse::IRModule>();
+      cse::IRBuilder builder(methodMod.get(), config);
+      builder.buildFunction(*method);
+      if (collectCost) {
+        auto before = cse::analyzeCost(*methodMod);
+        optResult.costBefore.flops += before.flops;
+        optResult.costBefore.totalNodes += before.totalNodes;
+        optResult.costBefore.stmts += before.stmts;
+        optResult.costBefore.vars += before.vars;
+      }
+      auto pm = cse::PassManager::createDefault(
+          config, enableRecombine, cse::freelb::createLatticeResolvePass());
+      pm.runAll(*methodMod, verbose);
+      if (collectCost) {
+        auto after = cse::analyzeCost(*methodMod);
+        optResult.costAfter.flops += after.flops;
+        optResult.costAfter.totalNodes += after.totalNodes;
+        optResult.costAfter.stmts += after.stmts;
+        optResult.costAfter.vars += after.vars;
+      }
+      os.methodModules.push_back(std::move(methodMod));
+    }
+    optStructs.push_back(std::move(os));
+  }
+
+  // Collect struct definition pointers (for pure data structs)
+  std::vector<cse::StructDef*> structPtrs;
+  for (auto& sd : structs) {
+    if (sd->methods.empty()) {
+      structPtrs.push_back(sd.get());
+    }
+  }
+
+  // Build IR for each function: AST → DAG-based IR
+  bool emitStructs = true;
+  for (auto& func : funcs) {
+    cse::IRModule module;
+    cse::IRBuilder builder(&module, config);
+    builder.buildFunction(*func);
+
+    if (collectCost) {
+      auto before = cse::analyzeCost(module);
+      optResult.costBefore.flops += before.flops;
+      optResult.costBefore.totalNodes += before.totalNodes;
+      optResult.costBefore.stmts += before.stmts;
+      optResult.costBefore.vars += before.vars;
+    }
+
+    auto pm = cse::PassManager::createDefault(
+        config, enableRecombine, cse::freelb::createLatticeResolvePass());
+    pm.runAll(module, verbose);
+
+    if (collectCost) {
+      auto after = cse::analyzeCost(module);
+      optResult.costAfter.flops += after.flops;
+      optResult.costAfter.totalNodes += after.totalNodes;
+      optResult.costAfter.stmts += after.stmts;
+      optResult.costAfter.vars += after.vars;
+    }
+
+    // Generate code (emit struct defs only before first function)
+    cse::CodeGen codegen;
+    if (emitStructs) {
+      optResult.code +=
+          codegen.generate(module, structPtrs, optStructs, func->templateParams);
+      emitStructs = false;
+    } else {
+      optResult.code += codegen.generate(module, {}, {}, func->templateParams);
+    }
+  }
+
+  // If no functions but have structs, emit structs only
+  if (funcs.empty() && !optStructs.empty()) {
+    cse::IRModule emptyModule;
+    cse::CodeGen codegen;
+    optResult.code += codegen.generate(emptyModule, structPtrs, optStructs);
+  }
+}
+
 // Pipeline: source text → Lexer → Parser → IRBuilder → PassManager → CodeGen
 // Each //@cse region is processed independently through this pipeline.
 static OptResult optimizeRegion(const std::string& code,
                                 const cse::CSEConfig& config,
-                                bool enableRecombine, bool collectCost) {
+                                bool enableRecombine, bool collectCost,
+                                bool verbose) {
   // 2. Lex: tokenize source
   cse::Lexer lexer(code, config);
   auto tokens = lexer.tokenize();
@@ -53,107 +149,28 @@ static OptResult optimizeRegion(const std::string& code,
     return r;
   }
 
-  // Emit using declarations and namespaces as raw text (not optimized)
   OptResult optResult;
+
+  // Top-level using declarations
   for (auto& ud : result.usingDecls) {
     optResult.code += "using " + ud->aliasName + " = " + ud->underlyingType + ";\n";
   }
+
+  // Namespaces: emit using declarations and optimize the contained
+  // structs/functions, wrapping the result in the namespace.
   for (auto& ns : result.namespaces) {
     optResult.code += "namespace " + ns->name + " {\n";
-    // Emit using declarations inside namespace
     for (auto& ud : ns->usingDecls) {
       optResult.code += "using " + ud->aliasName + " = " + ud->underlyingType + ";\n";
     }
+    optimizeFunctionsAndStructs(ns->functions, ns->structDefs, config,
+                                enableRecombine, collectCost, verbose, optResult);
     optResult.code += "}\n";
   }
 
-  // 3. Optimize struct methods (each method gets its own IR pipeline)
-  std::vector<cse::OptimizedStruct> optStructs;
-  for (auto& sd : result.structDefs) {
-    cse::OptimizedStruct os;
-    os.def = sd.get();
-    for (auto& method : sd->methods) {
-      auto methodMod = std::make_unique<cse::IRModule>();
-      cse::IRBuilder builder(methodMod.get(), config);
-      builder.buildFunction(*method);
-      if (collectCost) {
-        auto before = cse::analyzeCost(*methodMod);
-        optResult.costBefore.flops += before.flops;
-        optResult.costBefore.totalNodes += before.totalNodes;
-        optResult.costBefore.stmts += before.stmts;
-        optResult.costBefore.vars += before.vars;
-      }
-      auto pm = cse::PassManager::createDefault(
-          config,
-          enableRecombine, cse::freelb::createLatticeResolvePass());
-      pm.runAll(*methodMod);
-      if (collectCost) {
-        auto after = cse::analyzeCost(*methodMod);
-        optResult.costAfter.flops += after.flops;
-        optResult.costAfter.totalNodes += after.totalNodes;
-        optResult.costAfter.stmts += after.stmts;
-        optResult.costAfter.vars += after.vars;
-      }
-      os.methodModules.push_back(std::move(methodMod));
-    }
-    optStructs.push_back(std::move(os));
-  }
-
-  // Collect struct definition pointers (for pure data structs)
-  std::vector<cse::StructDef*> structPtrs;
-  for (auto& sd : result.structDefs) {
-    if (sd->methods.empty()) {
-      structPtrs.push_back(sd.get());
-    }
-  }
-
-  // 4. Build IR for each function: AST → DAG-based IR
-  bool emitStructs = true;
-  for (auto& func : result.functions) {
-    cse::IRModule module;
-    cse::IRBuilder builder(&module, config);
-    builder.buildFunction(*func);
-
-    // Collect cost before optimization
-    if (collectCost) {
-      auto before = cse::analyzeCost(module);
-      optResult.costBefore.flops += before.flops;
-      optResult.costBefore.totalNodes += before.totalNodes;
-      optResult.costBefore.stmts += before.stmts;
-      optResult.costBefore.vars += before.vars;
-    }
-
-    // Run passes
-    auto pm = cse::PassManager::createDefault(
-          config,
-        enableRecombine, cse::freelb::createLatticeResolvePass());
-    pm.runAll(module);
-
-    // Collect cost after optimization
-    if (collectCost) {
-      auto after = cse::analyzeCost(module);
-      optResult.costAfter.flops += after.flops;
-      optResult.costAfter.totalNodes += after.totalNodes;
-      optResult.costAfter.stmts += after.stmts;
-      optResult.costAfter.vars += after.vars;
-    }
-
-    // Generate code (emit struct defs only before first function)
-    cse::CodeGen codegen;
-    if (emitStructs) {
-      optResult.code += codegen.generate(module, structPtrs, optStructs, func->templateParams);
-      emitStructs = false;
-    } else {
-      optResult.code += codegen.generate(module, {}, {}, func->templateParams);
-    }
-  }
-
-  // If no functions but have structs, emit structs only
-  if (result.functions.empty() && !optStructs.empty()) {
-    cse::IRModule emptyModule;
-    cse::CodeGen codegen;
-    optResult.code += codegen.generate(emptyModule, structPtrs, optStructs);
-  }
+  // Top-level structs and functions
+  optimizeFunctionsAndStructs(result.functions, result.structDefs, config,
+                              enableRecombine, collectCost, verbose, optResult);
 
   return optResult;
 }
@@ -169,6 +186,7 @@ int main(int argc, char* argv[]) {
   bool collectCost = false;
   bool outputJson = false;
   bool safeMode = false;
+  bool verbose = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -181,6 +199,8 @@ int main(int argc, char* argv[]) {
       collectCost = true;
     } else if (arg == "-s" || arg == "--safe") {
       safeMode = true;
+    } else if (arg == "-v" || arg == "--verbose") {
+      verbose = true;
     } else if (arg == "--json") {
       outputJson = true;
     } else if (arg[0] != '-') {
@@ -254,7 +274,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Optimize and output the region
-    auto opt = optimizeRegion(region.code, config, enableRecombine, collectCost);
+    auto opt = optimizeRegion(region.code, config, enableRecombine, collectCost,
+                              verbose);
     output += opt.code;
 
     if (collectCost) {

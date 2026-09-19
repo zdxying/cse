@@ -27,14 +27,11 @@ std::string numText(double v) {
 class AlgebraicSimplifyVisitor {
  public:
   AlgebraicSimplifyVisitor(IRModule& mod, bool commutative, bool associative)
-      : module(mod),
-        commutative_(commutative),
-        associative_(associative),
-        numeric_(commutative && associative) {}
+      : module(mod), numeric_(commutative && associative) {}
   IRModule& module;
   int simplifications = 0;
-  bool commutative_;
-  bool associative_;
+  // Numeric reordering rules require both commutativity and associativity; the
+  // pass exposes the two flags separately for callers but applies them jointly.
   bool numeric_;
 
   void visitStmt(StmtIR* stmt) {

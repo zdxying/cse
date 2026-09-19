@@ -1,6 +1,5 @@
 #pragma once
 #include <cmath>
-#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -11,13 +10,6 @@
 #include "statement.h"
 
 namespace cse {
-
-// Visit every DAGNode* reachable from root (depth-first).
-inline void forEachNode(DAGNode* root, std::function<void(DAGNode*)> f) {
-  if (!root) return;
-  f(root);
-  for (auto* op : root->operands) forEachNode(op, f);
-}
 
 // Count how many times each variable name is used across a StmtIR tree.
 inline std::unordered_map<std::string, int> countUses(StmtIR* root);

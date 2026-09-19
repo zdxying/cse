@@ -25,7 +25,6 @@ class Parser {
     std::vector<std::unique_ptr<StructDef>> structDefs;
     std::vector<std::unique_ptr<UsingDecl>> usingDecls;
     std::vector<std::unique_ptr<NamespaceDef>> namespaces;
-    std::vector<std::unique_ptr<IncludeDecl>> includes;
   };
 
   // Entry point: parse all top-level constructs (functions + structs)
@@ -72,7 +71,6 @@ class Parser {
   std::unique_ptr<StructDef> parseStructDef();         // struct name { members }
   std::unique_ptr<UsingDecl> parseUsingDecl();         // using T = Type;
   std::unique_ptr<NamespaceDef> parseNamespaceDef();   // namespace X { ... }
-  std::unique_ptr<IncludeDecl> parseIncludeDecl();     // #include "..."
   std::string parseFullType();                         // supports typename and :: qualified names
 
   CSEConfig _config;

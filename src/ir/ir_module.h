@@ -34,12 +34,6 @@ class IRModule {
   // Function body (structured statements)
   std::unique_ptr<StmtIR> body;
 
-  // Raw text segments (non-CSE regions, preserved as-is)
-  struct RawSegment {
-    std::string text;
-  };
-  std::vector<RawSegment> rawSegments;
-
   // Create a new DAG node
   DAGNode* createNode(NodeKind kind);
 
@@ -64,28 +58,27 @@ class IRModule {
   // Create an array access node.
   // `shareable`: if true, structurally identical loads share a node. Only safe
   // for loads from read-only locations; otherwise each load is kept distinct.
-  DAGNode* createArrayAccess(DAGNode* base, DAGNode* index, bool shareable = true);
+  // Defaults to false so callers must opt in to deduplication explicitly.
+  DAGNode* createArrayAccess(DAGNode* base, DAGNode* index, bool shareable = false);
 
   // Create a member access node (see createArrayAccess for `shareable`).
   DAGNode* createMemberAccess(DAGNode* base, const std::string& member,
-                              bool shareable = true);
+                              bool shareable = false);
 
   // Create an arrow access node (see createArrayAccess for `shareable`).
   DAGNode* createArrowAccess(DAGNode* base, const std::string& member,
-                             bool shareable = true);
+                             bool shareable = false);
 
   // Create a call node.
   // `pure`: if true, identical calls share a node. Impure calls are never
   // deduplicated (they may have side effects / observe mutable state).
+  // Defaults to false so callers must opt in to deduplication explicitly.
   DAGNode* createCall(DAGNode* callee, const std::vector<DAGNode*>& args,
-                      bool pure = true);
+                      bool pure = false);
 
   // CSE lookup: find existing node with same structural hash.
   // If found, returns existing (dedup); otherwise registers candidate.
   DAGNode* findExistingNode(DAGNode* candidate);
-
-  // Get all nodes (for iteration)
-  const std::vector<std::unique_ptr<DAGNode>>& getNodes() const { return _node_pool; }
 
   // Get or create variable
   DAGNode* getVar(const std::string& name);

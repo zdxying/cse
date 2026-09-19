@@ -1,5 +1,7 @@
 #include "cse_pass.h"
 
+#include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>

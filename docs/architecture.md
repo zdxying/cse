@@ -361,6 +361,7 @@ bin/
 | `tests/verify_equilibrium.cpp` | 生成代码与参考实现数值一致性校验 |
 | `tests/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽 |
 | `tests/verify_safety.cpp` | 安全用例的差分执行校验 |
+| `tests/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出 |
 
 ### D3Q19 equilibrium 实测（cse -c，成本模型已计入循环次数）
 
@@ -382,4 +383,8 @@ make clean    # 清理
 ./bin/cse input.cpp -c         # 分析 FLOP 成本
 ./bin/cse input.cpp -r         # 优化文件，启用表达式重组
 ./bin/cse input.cpp -s         # 保守模式（不启用不安全的代数规则）
+./bin/cse input.cpp -v         # 打印每个 pass（stderr）
 ```
+
+`//@cse` 区域内的 `namespace` 会被完整处理：其中的 `using`、结构体与函数
+都经过同一优化管线并原样包裹在 `namespace X { ... }` 中输出。

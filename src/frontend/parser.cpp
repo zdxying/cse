@@ -324,7 +324,6 @@ std::unique_ptr<Expr> Parser::parseUnary() {
     expr->op = '+';
     expr->name = "++";  // store full operator in name field
     expr->operand = std::move(operand);
-    expr->prefix = true;
     return expr;
   }
   if (check(TokenType::Minus) && _pos + 1 < _tokens.size() &&
@@ -335,7 +334,6 @@ std::unique_ptr<Expr> Parser::parseUnary() {
     expr->op = '-';
     expr->name = "--";  // store full operator in name field
     expr->operand = std::move(operand);
-    expr->prefix = true;
     return expr;
   }
   if (check(TokenType::Minus) || check(TokenType::Not)) {
@@ -344,7 +342,6 @@ std::unique_ptr<Expr> Parser::parseUnary() {
     auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
     expr->op = op.text[0];
     expr->operand = std::move(operand);
-    expr->prefix = true;
     return expr;
   }
   // Cast: (type)expr
@@ -781,17 +778,6 @@ std::unique_ptr<NamespaceDef> Parser::parseNamespaceDef() {
   expect(TokenType::RBrace);
   match(TokenType::Semicolon);
   return def;
-}
-
-std::unique_ptr<IncludeDecl> Parser::parseIncludeDecl() {
-  auto loc = currentLoc();
-  // Skip #include
-  while (!check(TokenType::Eof) && !check(TokenType::Semicolon) && !check(TokenType::Newline)) {
-    advance();
-  }
-  match(TokenType::Semicolon);
-  // We don't actually need include declarations for CSE analysis
-  return nullptr;
 }
 
 // ===== Full parse =====

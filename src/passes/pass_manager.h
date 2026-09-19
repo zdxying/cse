@@ -14,8 +14,8 @@ class PassManager {
   // Add a pass (takes ownership)
   void addPass(std::unique_ptr<Pass> pass);
 
-  // Run all passes in order
-  void runAll(IRModule& module);
+  // Run all passes in order. If `verbose`, print each pass name to stderr.
+  void runAll(IRModule& module, bool verbose = false);
 
   // Create a default pass pipeline.
   // config: semantic/safety settings (algebraic assumptions, purity, aliasing).
@@ -26,8 +26,6 @@ class PassManager {
   static PassManager createDefault(const CSEConfig& config,
                                    bool enableRecombine = false,
                                    std::unique_ptr<Pass> resolvePass = nullptr);
-
-  size_t passCount() const { return _passes.size(); }
 
  private:
   std::vector<std::unique_ptr<Pass>> _passes;

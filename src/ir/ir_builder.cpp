@@ -16,7 +16,6 @@ void IRBuilder::prescanFunction(const FunctionDef& func) {
   _pointerParams.clear();
   _written.clear();
   _passedToCall.clear();
-  _hasImpureCall = false;
 
   for (const auto& p : func.params) {
     _declared.insert(p.name);
@@ -122,14 +121,6 @@ void IRBuilder::prescanExpr(const Expr& expr) {
       if (expr.base) prescanExpr(*expr.base);
       break;
     case ExprKind::Call: {
-      std::string callee;
-      if (expr.base) {
-        if (expr.base->kind == ExprKind::Variable) callee = expr.base->name;
-        else if (expr.base->kind == ExprKind::MemberAccess ||
-                 expr.base->kind == ExprKind::ArrowAccess)
-          callee = expr.base->memberName;
-      }
-      if (!isPureCallee(callee)) _hasImpureCall = true;
       if (expr.base) prescanExpr(*expr.base);
       for (const auto& a : expr.callArgs) {
         if (!a) continue;

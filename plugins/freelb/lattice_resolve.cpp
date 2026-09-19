@@ -219,7 +219,8 @@ class LatticeResolveVisitor {
       if (coeff == 0) continue;
       if (negate) coeff = -coeff;
 
-      DAGNode* term = module.createArrayAccess(vec, module.createConst(d, std::to_string(d)));
+      DAGNode* term = module.createArrayAccess(
+          vec, module.createConst(d, std::to_string(d)), /*shareable=*/true);
       if (coeff == -1) term = module.createUnaryOp('-', term);
 
       sum = sum ? module.createBinaryOp('+', sum, term) : term;

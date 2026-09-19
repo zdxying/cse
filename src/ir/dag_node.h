@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -25,11 +24,6 @@ enum class NodeKind {
 
 // Forward declaration
 class DAGNode;
-
-// Hash computation for DAG nodes
-struct NodeHash {
-  size_t operator()(const DAGNode* node) const;
-};
 
 struct NodeEqual {
   bool operator()(const DAGNode* a, const DAGNode* b) const;
@@ -64,14 +58,8 @@ struct DAGNode {
   // deduplicated and must not be reordered across effects.
   bool pure = true;
 
-  // Source location for debugging
-  size_t srcLine = 0;
-
   // Compute hash from children
   void recomputeHash();
-
-  // For debugging
-  std::string toString() const;
 };
 
 }  // namespace cse
