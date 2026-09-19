@@ -66,7 +66,8 @@ def parse_engine(path):
 
 
 def main():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # tests/verify/check_lattice.py -> tests/verify -> tests -> engine root
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default=root)
     ap.add_argument("--freelb", required=True)

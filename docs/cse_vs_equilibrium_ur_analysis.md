@@ -423,10 +423,13 @@ InvCs2 * u2 * T{0.5}
 | 版本 | FLOPs |
 |------|:-----:|
 | 原始循环版（Before） | 228 |
-| 手写展开版 `tests/equilibrium_ref.cpp` | 89 |
-| **CSE 工具输出（After）** | **93** |
+| 手写展开版参考（基线） | 89 |
+| **CSE 工具输出（After，本节为当时实测）** | **93** |
 
 相对原始循环版节省 135 flops（59.2%），与手写版相差仅 4.5%。
+
+> 注：上表是当时的实测值；后续 `CSEPass` 确定性修复等改进后工具输出为
+> **84 flops**，见 `architecture.md` 的「D3Q19 equilibrium 实测」。
 
 > 注：原始循环版的 `Before` 计数中，点积 `u * latset::c(k)` 作为一次乘法
 > 计入（未展开），因此 228 低于完全展开文本计法的 309。成本模型现按字面
@@ -444,8 +447,8 @@ feq[2] = _cse_1 * (_cse_3 - 3 * u0);
 // ... 其余方向同理
 ```
 
-数值校验（`tests/verify_equilibrium.cpp`）最大误差 ~7e-18。工具输出在
-行为等价的前提下与手写版 FLOP 相当（93 vs 89）。
+数值校验（`tests/verify/verify_equilibrium.cpp`）最大误差 ~7e-18。工具输出在
+行为等价的前提下与手写版 FLOP 相当。
 
 **通用性修复（顺带）：**
 - `IRModule::createConst` 现在按值去重，使常量参与的表达式能跨语句共享

@@ -357,21 +357,25 @@ bin/
 
 | 测试 | 覆盖功能 |
 |------|----------|
-| `tests/test1.cpp` | 基本 CSE（11→10 flops, 9.1%） |
-| `tests/test_all.cpp` | 多函数综合测试（51→50 flops, 2%） |
-| `tests/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合 |
-| `tests/equilibrium_ref.cpp` | 手写展开版基线（89 flops） |
-| `tests/verify_equilibrium.cpp` | 生成代码与参考实现数值一致性校验 |
-| `tests/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽 |
-| `tests/verify_safety.cpp` | 安全用例的差分执行校验 |
-| `tests/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出 |
+| `tests/fixtures/basic_cse.cpp` | 基本 CSE / 乘积链因式分解（11→10 flops） |
+| `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（51→50 flops） |
+| `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出 |
+| `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合 |
+| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽 |
+| `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
+| `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
+| `tests/verify/check_lattice.py` | 引擎 latset 表 vs FreeLB `lattice_set.h` 防漂移 |
+| `tests/csegen/{equilibrium,force,moment}.h` | `csegen` `.ur.h` 生成冒烟（Cell/TLatSet/TLatSetD/CellType 各形态） |
+
+> 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
+> 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety），而非 golden-diff。
 
 ### D3Q19 equilibrium 实测（cse -c，成本模型已计入循环次数）
 
 | 版本 | FLOPs |
 |------|:-----:|
 | 原始循环版（Before） | 228 |
-| 手写展开版 `equilibrium_ref.cpp` | 89 |
+| 手写展开版参考（历史基线） | 89 |
 | **CSE 工具输出（After）** | **84** |
 
 工具输出相对原始循环版节省 144 flops（63.2%）。结构：`var0 = 1 - 1.5*u²`

@@ -115,7 +115,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    用一条命令改 URL 即可（`git config -f .gitmodules submodule.third_party/cse.url <url>`）。
 2. ~~统一测试入口~~ **已完成**：`make test`（`tests/run_tests.sh`）执行
    FLOP 代价回归 + `verify_equilibrium`/`verify_safety` 数值校验 +
-   `csegen tests/ur/*.h` 冒烟；若存在 FreeLB checkout（`FREELB=` 或
+   `csegen tests/csegen/*.h` 冒烟；若存在 FreeLB checkout（`FREELB=` 或
    `~/FreeLB`）再跑 `tools/cse/verify_{moment,equilibrium,force}.py`。
    CI 接入仍可后续补。
    - 顺带修复了 `cse_pass` 的**候选选择不确定性**（仅按语句数排序，平局时保留
@@ -127,7 +127,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    pkg-config/SONAME。
 
 ### 中优先级
-4. ~~latset 表同步~~ **已完成（防漂移）**：`tests/check_lattice.py` 解析
+4. ~~latset 表同步~~ **已完成（防漂移）**：`tests/verify/check_lattice.py` 解析
    FreeLB `latsetdata::c<D,Q>`/`w<D,Q>` 与引擎 `kDxQy{c,w}` 并逐一比对，
    夹具与权重不一致即失败；`make test` 在存在 FreeLB checkout 时自动运行。
    仍仅覆盖 6 个 latset（无 D1Q3/D2Q4，两者未被 `.ur.h` 使用）。
@@ -158,7 +158,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 ```bash
 cd /home/ym/code/cse
 make                       # 生成 bin/cse, bin/csegen, libcse.a/.so
-./bin/csegen tests/ur/moment.h /tmp/moment.ur.h
+./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
 FreeLB（`dev-cse2`）：
@@ -180,7 +180,7 @@ cd ~/FreeLB/examples/cavity3d && make
 - `src/passes/{loop_unroll.cpp,counter_prop.h,counter_prop.cpp,pass_manager.cpp,value_prop.cpp,dce.cpp,algebraic_simplify.cpp}`
 - `plugins/freelb/{config.h,lattice_resolve.{h,cpp}}`（配置钩子 + latset 解析）
 - `plugins/freelb/{cse_main.cpp,ur_emit.{h,cpp},ur_emit_main.cpp}`（`bin/cse` 与 `bin/csegen` 驱动）
-- `tests/ur/{moment.h,force.h,equilibrium.h}`
+- `tests/csegen/{moment.h,force.h,equilibrium.h}`
 
 FreeLB（`dev-cse2`）：
 - `third_party/cse`（submodule）、`.gitmodules`
@@ -211,4 +211,4 @@ FreeLB（`dev-cse2`）：
   `config.h`（`LatticeConfig`、`resolveLatsetConst`、`createFreeLBConfig`）、
   `ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`cse_main.cpp`、
   `lattice_resolve.{h,cpp}`、`cuda_skip.{h,cpp}`；
-  以及 `tests/ur/*.h`、`tests/check_lattice.py`、`Makefile` 的 `csegen` 目标。
+  以及 `tests/csegen/*.h`、`tests/verify/check_lattice.py`、`Makefile` 的 `csegen` 目标。
