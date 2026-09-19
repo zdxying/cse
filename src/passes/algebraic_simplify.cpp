@@ -84,15 +84,19 @@ class AlgebraicSimplifyVisitor {
   DAGNode* simplify(DAGNode* node) {
     if (!node) return nullptr;
 
-    // Recursively simplify children first
+    // Recursively simplify children first. When a child changes, rebuild this
+    // node through the factory so it stays registered under a consistent hash;
+    // mutating operands in place would leave a stale hash-map entry and defeat
+    // later deduplication.
     if (node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
-      node->operands[0] = simplify(node->operands[0]);
-      node->recomputeHash();
-    }
-    if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
-      node->operands[0] = simplify(node->operands[0]);
-      node->operands[1] = simplify(node->operands[1]);
-      node->recomputeHash();
+      DAGNode* child = simplify(node->operands[0]);
+      if (child != node->operands[0]) node = module.createUnaryOp(node->op, child);
+    } else if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
+      DAGNode* lhs = simplify(node->operands[0]);
+      DAGNode* rhs = simplify(node->operands[1]);
+      if (lhs != node->operands[0] || rhs != node->operands[1]) {
+        node = module.createBinaryOp(node->op, lhs, rhs);
+      }
     }
 
     // Apply algebraic simplifications. All of these assume numeric semantics
@@ -129,6 +133,14 @@ class AlgebraicSimplifyVisitor {
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = normalizeProduct(node);
+      if (result != node) { simplifications++; return result; }
+    }
+
+    // Sign canonicalization: factor negations out of products so that
+    // eg. `3 * (-uc)` and `3 * uc` share the same `3 * uc` subexpression.
+    if (numeric_ && node->kind == NodeKind::BinaryOp &&
+        node->operands.size() == 2) {
+      DAGNode* result = normalizeSign(node);
       if (result != node) { simplifications++; return result; }
     }
 
@@ -219,6 +231,28 @@ class AlgebraicSimplifyVisitor {
       acc = acc ? module.createBinaryOp('*', acc, f) : f;
     }
     return acc ? acc : node;
+  }
+
+  // Factor negations out of a multiplication so opposite signs collapse onto a
+  // shared positive subexpression:
+  //   a * (-b) → -(a * b),  (-a) * b → -(a * b),  (-a) * (-b) → a * b
+  // Sign moves are exact for IEEE floating point, and this lets e.g. the two
+  // opposite lattice directions share `3 * uc`.
+  DAGNode* normalizeSign(DAGNode* node) {
+    if (node->kind != NodeKind::BinaryOp || node->op != '*') return node;
+    if (node->operands.size() != 2) return node;
+    DAGNode* lhs = node->operands[0];
+    DAGNode* rhs = node->operands[1];
+
+    DAGNode* lhsInner = negInner(lhs);
+    DAGNode* rhsInner = negInner(rhs);
+    if (!lhsInner && !rhsInner) return node;
+
+    DAGNode* l = lhsInner ? lhsInner : lhs;
+    DAGNode* r = rhsInner ? rhsInner : rhs;
+    DAGNode* product = module.createBinaryOp('*', l, r);
+    bool oneNegated = (lhsInner != nullptr) != (rhsInner != nullptr);
+    return oneNegated ? module.createUnaryOp('-', product) : product;
   }
 
   DAGNode* applyIdentities(DAGNode* node) {

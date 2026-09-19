@@ -26,20 +26,26 @@ std::string formatConst(double val) {
 DAGNode::DAGNode(NodeKind k, uint32_t id) : kind(k), id(id), hash(0) {}
 
 void DAGNode::recomputeHash() {
-  std::hash<uint64_t> hasher;
-  uint64_t h = hasher(static_cast<uint64_t>(kind));
-  h = hasher(h + static_cast<uint64_t>(op));
-  h = hasher(h + static_cast<uint64_t>(operands.size()));
-  for (auto* op : operands) {
-    h = hasher(h + op->hash);
-  }
-  if (!name.empty()) {
-    for (char c : name) h = hasher(h + c);
-  }
+  // FNV-1a over an order-sensitive byte stream. std::hash<uint64_t> is the
+  // identity on libstdc++, so folding child hashes with it would make the hash
+  // order-insensitive and collision-prone (`a*b` and `b*a`, or unrelated
+  // structures, would collide).
+  uint64_t h = 0xcbf29ce484222325ULL;
+  auto mix = [&h](uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+      h ^= (v >> (i * 8)) & 0xffULL;
+      h *= 0x100000001b3ULL;
+    }
+  };
+  mix(static_cast<uint64_t>(kind));
+  mix(static_cast<uint64_t>(static_cast<unsigned char>(op)));
+  mix(static_cast<uint64_t>(operands.size()));
+  for (auto* opNode : operands) mix(opNode->hash);
+  for (char c : name) mix(static_cast<unsigned char>(c));
   if (kind == NodeKind::Constant) {
     uint64_t valBits;
     std::memcpy(&valBits, &constVal, sizeof(valBits));
-    h = hasher(h + valBits);
+    mix(valBits);
   }
   hash = h;
 }
@@ -169,20 +175,15 @@ DAGNode* IRModule::createCall(DAGNode* callee, const std::vector<DAGNode*>& args
 }
 
 DAGNode* IRModule::findExistingNode(DAGNode* candidate) {
-  auto it = _hash_map.find(candidate->hash);
-  if (it != _hash_map.end()) {
-    DAGNode* existing = it->second;
-    // Verify structural equality (hash collision check)
-    NodeEqual eq;
-    if (eq(existing, candidate)) {
-      // Remove the candidate from pool (it's a duplicate)
-      // Actually, we can't easily remove from vector. Just leave it.
-      // The hashMap points to the first node, which is what we want.
-      return existing;
-    }
+  // Bucket by hash and confirm structural equality. A bucket (rather than a
+  // single pointer) keeps distinct nodes that happen to share a hash from
+  // evicting each other, which would otherwise silently disable sharing.
+  std::vector<DAGNode*>& bucket = _hash_map[candidate->hash];
+  NodeEqual eq;
+  for (DAGNode* existing : bucket) {
+    if (eq(existing, candidate)) return existing;
   }
-  // New unique node, add to hash map
-  _hash_map[candidate->hash] = candidate;
+  bucket.push_back(candidate);
   return candidate;
 }
 

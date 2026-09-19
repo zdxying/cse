@@ -87,8 +87,9 @@ class IRModule {
   // Node pool - owns all DAG nodes
   std::vector<std::unique_ptr<DAGNode>> _node_pool;
 
-  // Hash map for CSE: hash → node (first node with that hash)
-  std::unordered_map<uint64_t, DAGNode*> _hash_map;
+  // Hash map for CSE: hash → nodes with that hash (bucket, so hash collisions
+  // never evict each other).
+  std::unordered_map<uint64_t, std::vector<DAGNode*>> _hash_map;
 
   // Variable cache: name → node
   std::unordered_map<std::string, DAGNode*> _var_cache;

@@ -114,17 +114,21 @@ inline DAGNode* substitute(IRModule& mod, DAGNode* root,
 inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
   if (!node) return nullptr;
   if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
-    node->operands[0] = foldConst(mod, node->operands[0]);
-    node->operands[1] = foldConst(mod, node->operands[1]);
-    auto* l = node->operands[0];
-    auto* r = node->operands[1];
-    if (l->kind == NodeKind::Constant && r->kind == NodeKind::Constant) {
+    DAGNode* lhs = foldConst(mod, node->operands[0]);
+    DAGNode* rhs = foldConst(mod, node->operands[1]);
+    if (lhs != node->operands[0] || rhs != node->operands[1]) {
+      // Rebuild through the factory to keep the hash map consistent.
+      node = mod.createBinaryOp(node->op, lhs, rhs);
+    }
+    lhs = node->operands[0];
+    rhs = node->operands[1];
+    if (lhs->kind == NodeKind::Constant && rhs->kind == NodeKind::Constant) {
       double result = 0;
       switch (node->op) {
-        case '+': result = l->constVal + r->constVal; break;
-        case '-': result = l->constVal - r->constVal; break;
-        case '*': result = l->constVal * r->constVal; break;
-        case '/': result = (r->constVal != 0) ? l->constVal / r->constVal : 0; break;
+        case '+': result = lhs->constVal + rhs->constVal; break;
+        case '-': result = lhs->constVal - rhs->constVal; break;
+        case '*': result = lhs->constVal * rhs->constVal; break;
+        case '/': result = (rhs->constVal != 0) ? lhs->constVal / rhs->constVal : 0; break;
         default: return node;
       }
       std::string text;
@@ -137,7 +141,6 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
       }
       return mod.createConst(result, text);
     }
-    node->recomputeHash();
   }
   return node;
 }

@@ -65,11 +65,14 @@ class ExprRecombineVisitor {
   DAGNode* rewrite(DAGNode* node) {
     if (!node) return nullptr;
 
-    // First, recursively rewrite children
+    // First, recursively rewrite children. Rebuild through the factory when a
+    // child changes so the node stays registered under a consistent hash.
     if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
-      node->operands[0] = rewrite(node->operands[0]);
-      node->operands[1] = rewrite(node->operands[1]);
-      node->recomputeHash();
+      DAGNode* lhs = rewrite(node->operands[0]);
+      DAGNode* rhs = rewrite(node->operands[1]);
+      if (lhs != node->operands[0] || rhs != node->operands[1]) {
+        node = module.createBinaryOp(node->op, lhs, rhs);
+      }
     }
 
     // Try to apply recombination patterns
