@@ -419,9 +419,13 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
           if (check(TokenType::Greater)) depth--;
           if (depth > 0) {
             memberName += advance().text;
+            memberName += " ";  // keep `typename CELL` etc. separated
           } else {
             advance();  // >
           }
+        }
+        while (!memberName.empty() && memberName.back() == ' ') {
+          memberName.pop_back();
         }
         memberName += ">";
       }
