@@ -1,7 +1,12 @@
-# FreeLB 移植状态（分支 `freelb-port`）
+# FreeLB 移植状态
 
-本文档汇总 `cse` 仓库 `freelb-port` 分支相对 `main` 已完成的工作与待办事项，
-以及配套的 FreeLB 侧集成（`~/FreeLB` 分支 `dev-cse2`）。
+本文档汇总 `cse` 引擎为 FreeLB 所做的移植工作与待办事项，以及配套的 FreeLB 侧
+集成（`~/FreeLB` 分支 `dev-cse2`）。
+
+> **分支状态**：原 `freelb-port` 工作已 fast-forward 合入 `main`
+> （`5296c74..3ef4147`），`main` 现在即"通用引擎 + FreeLB 插件 + `.ur.h` 生成器"。
+> 后续 FreeLB 集成提交直接走短生命周期分支合入 `main`。本文档中出现的
+> `freelb-port` 为历史提交所在分支，提交号在 `main` 上同样可达。
 
 ## 1. 目标与架构
 
@@ -21,7 +26,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 
 | 仓库 | 分支 | 关键提交 |
 |------|------|----------|
-| `cse` | `freelb-port` | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) |
+| `cse` | `main`（原 `freelb-port`） | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) |
 | `FreeLB` | `dev-cse2` | `f1683fe`(P0) → `2b1fa8d`(P1) → `28a0023`+`a2b7501`(P2) |
 | FreeLB submodule | `third_party/cse` | 指向 `9dece9a` |
 
@@ -96,9 +101,10 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 ## 4. 未完成 / TODO
 
 ### 高优先级（发布前）
-1. ~~推送与依赖 URL~~ **已完成**：`freelb-port` 已推到
+1. ~~推送与依赖 URL~~ **已完成**：`main`（含原 `freelb-port`）已推到
    `/mnt/d/gitservice/cse.git`；FreeLB `.gitmodules` 使用
-   `/mnt/d/gitservice/cse.git`。注意该远端是本地 bare 仓库，克隆
+   `/mnt/d/gitservice/cse.git` 并跟踪 `branch = main`。注意该远端是本地
+   bare 仓库，克隆
    FreeLB 时需允许 file 协议：
    `git -c protocol.file.allow=always submodule update --init`
    （或 `git config protocol.file.allow always`）。若后续发布到 GitHub，
@@ -125,9 +131,9 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    `tools/cse/reference/{moment,equilibrium,force}.ur.h`，`verify` 改为与
    reference 比较，`install` 覆盖 `src/lbm/*.ur.h` 后再次 verify 仍有意义
    （reference 变化时用 `make gen-refs` 重新快照）。
-6. **文档**：`tools/cse/DESIGN.md` 的“架构总览”等章节仍是旧解释器描述，
-   应整体重写为“引擎 + 驱动”的新结构。
+6. ~~文档~~ **已完成**：`tools/cse/DESIGN.md` 已重写为“引擎 + 驱动”结构。
 7. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例；引擎侧跑回归。
+   （用户侧 CI 未接，`make test` 已可手动/脚本调用。）
 
 ### 低优先级 / 已知限制
 8. **前端子集限制**：
@@ -163,7 +169,7 @@ cd ~/FreeLB/examples/cavity3d && make
 
 ## 6. 相关文件
 
-引擎（`freelb-port`）：
+引擎（`main`）：
 - `plugins/freelb/ur_emit.{h,cpp}`、`plugins/freelb/ur_emit_main.cpp`
 - `plugins/freelb/lattice_resolve.{h,cpp}`、`plugins/freelb/config.h`
 - `src/frontend/{cse_config.h,lexer.cpp,parser.cpp,parser.h,ast.h,token.h}`
@@ -174,5 +180,29 @@ cd ~/FreeLB/examples/cavity3d && make
 
 FreeLB（`dev-cse2`）：
 - `third_party/cse`（submodule）、`.gitmodules`
-- `tools/cse/{Makefile,DESIGN.md,verify_*.py}`
+- `tools/cse/{Makefile,DESIGN.md,PORT_STATUS.md,reference/,verify_*.py}`
 - `make.mk`、根 `Makefile`
+
+## 7. 通用 / FreeLB 边界（供未来剥离）
+
+`main` 现为“通用引擎 + FreeLB 插件”，`src/` 中仍带有若干为 FreeLB 服务的
+钩子。若将来出现第二个消费者（如 xcore）需要 FreeLB-free 的核心，可按此边界
+把 B 类抽成插件接口。
+
+- **A. 通用引擎能力**（与 FreeLB 无关）：
+  `src/frontend/{lexer,token,parser,ast}`（引用限定符、`if constexpr`、`T{}`、
+  `T x{...}`、限定/模板类型声明前瞻、`.template f<...>()`）；
+  `src/ir/{statement,ir_utils}`（`AssignIR::targetExpr`、`IfElseIR::isConstexpr`、
+  `substitute` 重建 `Cast/Ternary` 与保留 `++/--`、比较折叠与符号常量保护）；
+  `src/backend/codegen`（`generateBody`、`if constexpr` 发射、`targetExpr` 赋值）；
+  `src/passes/{loop_unroll,dce,value_prop,algebraic_simplify,cse_pass}`；
+  `Makefile` 的 `OPT/release/install/test` 与 `tests/run_tests.sh`。
+- **B. 通用机制中的 FreeLB 钩子**（剥离时需要抽接口）：
+  `src/frontend/cse_config.h` 的 `latsetAlias/Name/Dim/Q/Cs2`（`lowerVectors`、
+  `constBindings` 较通用）；`src/ir/ir_builder` 的 `latsetConst`；
+  `src/passes/pass_manager` 仅在 `lowerVectors` 时挂载 `CounterPropPass`；
+  `src/passes/counter_prop` 的 `x[i]→x_i` 向量局部命名约定。
+- **C. FreeLB 专属**（本应留在插件/集成侧）：
+  `plugins/freelb/ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`plugins/freelb/config.h`、
+  `plugins/freelb/lattice_resolve.{h,cpp}` 的实例化扩展、
+  `tests/ur/*.h`、`tests/check_lattice.py`、`Makefile` 的 `csegen` 目标。
