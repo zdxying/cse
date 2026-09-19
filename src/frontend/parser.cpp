@@ -41,6 +41,32 @@ bool Parser::isTypeKeyword() const {
          check(TokenType::Void) || check(TokenType::Unsigned);
 }
 
+bool Parser::looksLikeVarDecl() const {
+  if (!check(TokenType::Identifier)) return false;
+  size_t p = _pos + 1;
+  // Qualified name: Identifier (:: Identifier)*
+  while (p + 1 < _tokens.size() && _tokens[p].type == TokenType::DoubleColon &&
+         _tokens[p + 1].type == TokenType::Identifier) {
+    p += 2;
+  }
+  // Optional template arguments: < ... >
+  if (p < _tokens.size() && _tokens[p].type == TokenType::Less) {
+    int depth = 0;
+    do {
+      if (_tokens[p].type == TokenType::Less) depth++;
+      else if (_tokens[p].type == TokenType::Greater) depth--;
+      p++;
+    } while (p < _tokens.size() && depth > 0 &&
+             _tokens[p].type != TokenType::Eof);
+  }
+  // Optional pointer/reference qualifiers.
+  while (p < _tokens.size() &&
+         (_tokens[p].type == TokenType::Star || _tokens[p].type == TokenType::Amp)) {
+    p++;
+  }
+  return p < _tokens.size() && _tokens[p].type == TokenType::Identifier;
+}
+
 std::string Parser::parseType() {
   std::string type;
 
@@ -377,10 +403,31 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
       arr->indices.push_back(std::move(idx));
       expr = std::move(arr);
     } else if (match(TokenType::Dot)) {
+      // `x.template f<...>()`: consume the `template` disambiguator and keep
+      // the template arguments as part of the member name so the call can be
+      // emitted verbatim.
+      bool viaTemplate = false;
+      if (match(TokenType::Template)) viaTemplate = true;
       auto member = expect(TokenType::Identifier);
+      std::string memberName = viaTemplate ? ("template " + member.text) : member.text;
+      if (viaTemplate && check(TokenType::Less)) {
+        advance();  // <
+        memberName += "<";
+        int depth = 1;
+        while (!check(TokenType::Eof) && depth > 0) {
+          if (check(TokenType::Less)) depth++;
+          if (check(TokenType::Greater)) depth--;
+          if (depth > 0) {
+            memberName += advance().text;
+          } else {
+            advance();  // >
+          }
+        }
+        memberName += ">";
+      }
       auto acc = std::make_unique<Expr>(ExprKind::MemberAccess, expr->loc);
       acc->base = std::move(expr);
-      acc->memberName = member.text;
+      acc->memberName = memberName;
       expr = std::move(acc);
     } else if (match(TokenType::Arrow)) {
       auto member = expect(TokenType::Identifier);
@@ -415,9 +462,17 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
   }
   if (check(TokenType::Identifier)) {
     auto tok = advance();
-    // Handle brace initialization: T{1} -> optionally simplify for CSE
+    // Handle brace initialization: T{1} -> optionally simplify for CSE.
+    // `T{}` is value-initialization (zero); represent it as the constant 0.
     if (check(TokenType::LBrace) && _config.simplifyBraceInit) {
       advance();  // consume {
+      if (check(TokenType::RBrace)) {
+        advance();
+        auto zero = std::make_unique<Expr>(ExprKind::Number, currentLoc());
+        zero->numVal = 0;
+        zero->numText = "0";
+        return zero;
+      }
       auto inner = parseExpr();
       expect(TokenType::RBrace);
       return inner;
@@ -484,10 +539,8 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
       check(TokenType::Inline) || check(TokenType::Void) || check(TokenType::Unsigned)) {
     return parseVarDecl();
   }
-  // Handle identifier as type: T x, MyStruct s, etc.
-  // Heuristic: if we see Identifier followed by Identifier, treat as var decl
-  if (check(TokenType::Identifier) && _pos + 1 < _tokens.size() &&
-      _tokens[_pos + 1].type == TokenType::Identifier) {
+  // Handle identifier as type: T x, MyStruct s, Vector<T,d> v, etc.
+  if (looksLikeVarDecl()) {
     return parseVarDecl();
   }
   return parseExprStmt();
@@ -539,9 +592,16 @@ std::unique_ptr<Stmt> Parser::parseFor() {
 std::unique_ptr<Stmt> Parser::parseIf() {
   auto loc = currentLoc();
   expect(TokenType::If);
-  expect(TokenType::LParen);
 
   auto ifStmt = std::make_unique<Stmt>(StmtKind::IfElse, loc);
+  // `if constexpr (cond)` — a compile-time branch; preserved verbatim.
+  if (check(TokenType::Identifier) && peek().text == "constexpr") {
+    advance();
+    ifStmt->isConstexpr = true;
+  } else if (check(TokenType::Const)) {
+    advance();
+  }
+  expect(TokenType::LParen);
   ifStmt->ifCond = parseExpr();
   expect(TokenType::RParen);
   ifStmt->ifThen = parseStmt();
@@ -561,6 +621,18 @@ std::unique_ptr<Stmt> Parser::parseVarDecl() {
 
   if (match(TokenType::Assign)) {
     decl->init = parseExpr();
+  } else if (check(TokenType::LBrace) && _config.simplifyBraceInit) {
+    // `T x{...}` value-initialization.
+    advance();  // {
+    if (!check(TokenType::RBrace)) {
+      decl->init = parseExpr();
+    } else {
+      auto zero = std::make_unique<Expr>(ExprKind::Number, currentLoc());
+      zero->numVal = 0;
+      zero->numText = "0";
+      decl->init = std::move(zero);
+    }
+    expect(TokenType::RBrace);
   }
   expect(TokenType::Semicolon);
   return decl;

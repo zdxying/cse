@@ -39,6 +39,7 @@ class IRBuilder {
     bool vec = false;
     DAGNode* scalar = nullptr;
     std::vector<DAGNode*> comps;
+    DAGNode* base = nullptr;  // underlying indexable node (var / c(k) call)
   };
   VecValue buildValue(const Expr& expr);
   VecValue valueBinary(const Expr& expr);
@@ -92,6 +93,7 @@ class IRBuilder {
   // Vector lowering state (only used when config.lowerVectors is set).
   int _vecDim = 0;
   std::unordered_set<std::string> _vectorVars;
+  std::unordered_map<std::string, std::vector<DAGNode*>> _vecLocalComps;
 };
 
 }  // namespace cse

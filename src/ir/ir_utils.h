@@ -93,8 +93,11 @@ inline DAGNode* substitute(IRModule& mod, DAGNode* root,
   switch (root->kind) {
     case NodeKind::BinaryOp:
       return mod.createBinaryOp(root->op, newOps[0], newOps[1]);
-    case NodeKind::UnaryOp:
-      return mod.createUnaryOp(root->op, newOps[0]);
+    case NodeKind::UnaryOp: {
+      DAGNode* u = mod.createUnaryOp(root->op, newOps[0]);
+      if (!root->name.empty()) u->name = root->name;  // preserve ++ / --
+      return u;
+    }
     case NodeKind::ArrayAccess:
       return mod.createArrayAccess(newOps[0], newOps[1], root->pure);
     case NodeKind::MemberAccess:
@@ -104,6 +107,18 @@ inline DAGNode* substitute(IRModule& mod, DAGNode* root,
     case NodeKind::Call: {
       std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
       return mod.createCall(newOps[0], args, root->pure);
+    }
+    case NodeKind::Cast: {
+      DAGNode* node = mod.createNode(NodeKind::Cast);
+      node->name = root->name;
+      node->operands = newOps;
+      return mod.findExistingNode(node);
+    }
+    case NodeKind::Ternary: {
+      DAGNode* node = mod.createNode(NodeKind::Ternary);
+      node->op = root->op;
+      node->operands = newOps;
+      return mod.findExistingNode(node);
     }
     default:
       return root;
@@ -132,6 +147,12 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
         case '-': result = lhs->constVal - rhs->constVal; break;
         case '*': result = lhs->constVal * rhs->constVal; break;
         case '/': result = (rhs->constVal != 0) ? lhs->constVal / rhs->constVal : 0; break;
+        case 'e': result = (lhs->constVal == rhs->constVal) ? 1 : 0; break;
+        case 'n': result = (lhs->constVal != rhs->constVal) ? 1 : 0; break;
+        case '<': result = (lhs->constVal < rhs->constVal) ? 1 : 0; break;
+        case '>': result = (lhs->constVal > rhs->constVal) ? 1 : 0; break;
+        case 'l': result = (lhs->constVal <= rhs->constVal) ? 1 : 0; break;
+        case 'g': result = (lhs->constVal >= rhs->constVal) ? 1 : 0; break;
         default: return node;
       }
       std::string text;

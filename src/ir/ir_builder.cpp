@@ -256,6 +256,7 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
   _scopes.clear();
   _shadowCounters.clear();
   _vectorVars.clear();
+  _vecLocalComps.clear();
   _vecDim = _config.lowerVectors ? _config.latsetDim : 0;
   pushScope();  // parameter/base scope
   for (const auto& p : func.params) {
@@ -307,12 +308,34 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
     }
     case StmtKind::IfElse: {
       auto ifIR = std::make_unique<IfElseIR>();
+      ifIR->isConstexpr = stmt.isConstexpr;
       ifIR->cond = buildExpr(*stmt.ifCond);
       ifIR->thenBranch = buildStmt(*stmt.ifThen);
       if (stmt.ifElse) ifIR->elseBranch = buildStmt(*stmt.ifElse);
       return ifIR;
     }
     case StmtKind::VarDecl: {
+      // Vector-typed local: lower to per-component scalar declarations.
+      if (_config.lowerVectors && stmt.init) {
+        VecValue v = buildValue(*stmt.init);
+        if (v.vec) {
+          auto block = std::make_unique<BlockIR>();
+          std::vector<DAGNode*> compVars;
+          for (size_t i = 0; i < v.comps.size(); ++i) {
+            std::string internal =
+                declare(stmt.varName + "_" + std::to_string(i));
+            DAGNode* var = _module->getVar(internal);
+            auto d = std::make_unique<VarDeclIR>();
+            d->type = "T";
+            d->name = internal;
+            d->init = v.comps[i];
+            block->stmts.push_back(std::move(d));
+            compVars.push_back(var);
+          }
+          _vecLocalComps[stmt.varName] = std::move(compVars);
+          return block;
+        }
+      }
       auto decl = std::make_unique<VarDeclIR>();
       decl->type = stmt.varType;
       if (stmt.init) decl->init = buildExpr(*stmt.init);
@@ -326,12 +349,51 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       return ret;
     }
     case StmtKind::Assignment: {
+      // Vector assignment: lower to per-component assignments.
+      if (_config.lowerVectors && stmt.rhs &&
+          (_vectorVars.count(stmt.varName) ||
+           _vecLocalComps.count(stmt.varName))) {
+        VecValue v = buildValue(*stmt.rhs);
+        if (v.vec) {
+          auto block = std::make_unique<BlockIR>();
+          auto lt = _vecLocalComps.find(stmt.varName);
+          for (size_t i = 0; i < v.comps.size(); ++i) {
+            if (lt != _vecLocalComps.end()) {
+              auto assign = std::make_unique<AssignIR>();
+              assign->target = lt->second[i]->name;
+              assign->value = v.comps[i];
+              block->stmts.push_back(std::move(assign));
+            } else {
+              DAGNode* base = varRef(stmt.varName);
+              DAGNode* acc = _module->createArrayAccess(
+                  base, _module->createConst(i, std::to_string(i)), false);
+              auto assign = std::make_unique<AssignIR>();
+              assign->targetExpr = acc;
+              assign->value = v.comps[i];
+              block->stmts.push_back(std::move(assign));
+            }
+          }
+          return block;
+        }
+      }
       auto assign = std::make_unique<AssignIR>();
       assign->target = resolve(stmt.varName);
       if (stmt.rhs) assign->value = buildExpr(*stmt.rhs);
       return assign;
     }
     case StmtKind::ExprStmt: {
+      // Array/member element assignment: keep it as a statement so that the
+      // CSE/value-prop passes never treat the '=' (or its lvalue loads) as a
+      // hoistable expression.
+      if (_config.lowerVectors && stmt.expr &&
+          stmt.expr->kind == ExprKind::BinaryOp && stmt.expr->isAssignment &&
+          stmt.expr->op == '=' && stmt.expr->lhs &&
+          stmt.expr->lhs->kind != ExprKind::Variable) {
+        auto assign = std::make_unique<AssignIR>();
+        assign->targetExpr = buildExpr(*stmt.expr->lhs);
+        assign->value = buildExpr(*stmt.expr->rhs);
+        return assign;
+      }
       auto exprStmt = std::make_unique<ExprStmtIR>();
       if (stmt.expr) exprStmt->expr = buildExpr(*stmt.expr);
       return exprStmt;
@@ -342,7 +404,13 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
 
 DAGNode* IRBuilder::buildExpr(const Expr& expr) {
   if (_config.lowerVectors) {
-    return buildValue(expr).scalar;
+    VecValue v = buildValue(expr);
+    if (!v.vec) return v.scalar;
+    // Whole-vector context (e.g. `field = u_value`): fall back to the named
+    // vector variable rather than a single component.
+    std::string root = rootName(expr);
+    if (!root.empty()) return varRef(root);
+    return v.comps.empty() ? nullptr : v.comps[0];
   }
   switch (expr.kind) {
     case ExprKind::Number:
@@ -437,6 +505,11 @@ IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
       auto cb = _config.constBindings.find(expr.name);
       if (cb != _config.constBindings.end())
         return makeScalar(_module->createConst(cb->second));
+      auto lt = _vecLocalComps.find(expr.name);
+      if (lt != _vecLocalComps.end()) {
+        VecValue v = makeVector(lt->second);
+        return v;
+      }
       if (_vectorVars.count(expr.name)) {
         DAGNode* base = varRef(expr.name);
         bool share = isReadOnlyRoot(expr.name);
@@ -445,7 +518,9 @@ IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
           comps.push_back(_module->createArrayAccess(
               base, _module->createConst(i, std::to_string(i)), share));
         }
-        return makeVector(std::move(comps));
+        VecValue v = makeVector(std::move(comps));
+        v.base = base;
+        return v;
       }
       return makeScalar(varRef(expr.name));
     }
@@ -548,15 +623,24 @@ IRBuilder::VecValue IRBuilder::valueUnary(const Expr& expr) {
 
 IRBuilder::VecValue IRBuilder::valueArray(const Expr& expr) {
   VecValue base = buildValue(*expr.base);
-  if (base.vec && expr.indices.size() == 1) {
-    VecValue idx = buildValue(*expr.indices[0]);
-    if (idx.scalar && idx.scalar->kind == NodeKind::Constant) {
-      int i = static_cast<int>(idx.scalar->constVal);
-      if (i >= 0 && i < static_cast<int>(base.comps.size()))
-        return makeScalar(base.comps[i]);
+  DAGNode* result = nullptr;
+  if (base.vec) {
+    if (expr.indices.size() == 1) {
+      VecValue idx = buildValue(*expr.indices[0]);
+      if (idx.scalar && idx.scalar->kind == NodeKind::Constant) {
+        int i = static_cast<int>(idx.scalar->constVal);
+        if (i >= 0 && i < static_cast<int>(base.comps.size()))
+          return makeScalar(base.comps[i]);
+      }
     }
+    // Non-constant index into a vector expression: keep `base[idx]` verbatim
+    // (e.g. `latset::c<LatSet>(k)[alpha]`, later folded by LatticeResolve; or
+    // a lowered vector local `unew[beta]`, resolved once beta is a constant).
+    result = base.base;
+    if (!result) result = varRef(rootName(*expr.base));
+  } else {
+    result = base.scalar;
   }
-  DAGNode* result = base.scalar;
   if (!result) return makeScalar(nullptr);
   bool share = isReadOnlyRoot(rootName(expr));
   for (const auto& idx : expr.indices) {
@@ -583,7 +667,9 @@ IRBuilder::VecValue IRBuilder::valueCall(const Expr& expr) {
       comps.push_back(_module->createArrayAccess(
           call, _module->createConst(i, std::to_string(i)), /*shareable=*/true));
     }
-    return makeVector(std::move(comps));
+    VecValue v = makeVector(std::move(comps));
+    v.base = call;
+    return v;
   }
   return makeScalar(call);
 }
@@ -612,10 +698,12 @@ DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
 
 DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
   DAGNode* operand = buildExpr(*expr.operand);
+  // ++ / -- have side effects: keep them distinct and never hoist/dedupe them.
+  bool isIncDec = (expr.name == "++" || expr.name == "--");
   auto node = _module->createUnaryOp(expr.op, operand);
-  // For ++ and -- operators, store the full operator in name field
-  if (expr.name == "++" || expr.name == "--") {
+  if (isIncDec) {
     node->name = expr.name;
+    node->pure = false;
   }
   return node;
 }

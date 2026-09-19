@@ -50,6 +50,15 @@ void findReassigned(StmtIR* stmt, std::unordered_set<std::string>& reassigned) {
     case StmtIRKind::Assign:
       reassigned.insert(static_cast<AssignIR*>(stmt)->target);
       break;
+    case StmtIRKind::ExprStmt: {
+      auto* e = static_cast<ExprStmtIR*>(stmt)->expr;
+      if (e && e->kind == NodeKind::UnaryOp &&
+          (e->name == "++" || e->name == "--") && !e->operands.empty() &&
+          e->operands[0]->kind == NodeKind::Variable) {
+        reassigned.insert(e->operands[0]->name);
+      }
+      break;
+    }
     default:
       break;
   }

@@ -30,6 +30,7 @@ struct LatSetDef {
   int q;
 };
 
+
 const LatSetDef kLatsets[] = {
     {"D2Q5", 2, 5},   {"D2Q9", 2, 9},   {"D3Q7", 3, 7},
     {"D3Q15", 3, 15}, {"D3Q19", 3, 19}, {"D3Q27", 3, 27},
@@ -97,20 +98,23 @@ std::string replaceAll(std::string s, const std::string& from,
   return s;
 }
 
-enum class StructKind { Cell, TLatSet, TLatSetD, Unsupported };
+enum class StructKind { Cell, CellType, TLatSet, TLatSetD, Unsupported };
 
 // Classify a marked struct by its template parameter list:
-//   <typename CELL>                         -> Cell
-//   <typename T, typename LatSet>           -> TLatSet
-//   <typename T, typename LatSet, <nontype>>-> TLatSetD (nonType = its name)
+//   <typename CELL>                              -> Cell
+//   <typename CELLTYPE, <extra>...>              -> CellType
+//   <typename T, typename LatSet>                -> TLatSet
+//   <typename T, typename LatSet, <nontype>>     -> TLatSetD
 StructKind classifyStruct(const StructDef& sd, std::string& nonTypeName) {
   const auto& tp = sd.templateParams;
-  if (tp.size() == 1 && tp[0].paramName == "CELL") return StructKind::Cell;
-  if (tp.size() == 2 && tp[0].isType && tp[1].isType) return StructKind::TLatSet;
-  if (tp.size() == 3 && tp[0].isType && tp[1].isType && !tp[2].isType) {
+  if (tp.empty() || !tp[0].isType) return StructKind::Unsupported;
+  if (tp[0].paramName == "CELL") return StructKind::Cell;
+  if (tp[0].paramName == "CELLTYPE") return StructKind::CellType;
+  if (tp.size() == 3 && tp[1].isType && !tp[2].isType) {
     nonTypeName = tp[2].paramName;
     return StructKind::TLatSetD;
   }
+  if (tp.size() == 2 && tp[1].isType) return StructKind::TLatSet;
   return StructKind::Unsupported;
 }
 
@@ -219,12 +223,12 @@ bool generateUrHeader(const std::string& inputPath,
         // equilibrium (CELL) path on the existing lattice-resolve route.
         base.lowerVectors = (kind != StructKind::Cell);
 
-        auto emitOne = [&](const std::string& header, double dVal, bool bindD) {
+        auto emitOne = [&](const std::string& header, const std::string& aliases,
+                           double dVal, bool bindD) {
           CSEConfig cfg2 = base;
           if (bindD) cfg2.constBindings[nonType] = dVal;
 
-          std::string spec = header;
-          spec += "using LatSet = " + std::string(lat.name) + "<T>;\n";
+          std::string methods;
           for (const auto& method : sd.methods) {
             IRModule module;
             IRBuilder builder(&module, cfg2);
@@ -235,26 +239,50 @@ bool generateUrHeader(const std::string& inputPath,
             CodeGen codegen;
             std::string body = codegen.generateBody(module, 2);
             body = replaceAll(body, "auto ", "const T ");
-            spec += emitMethod(*method, body);
+            methods += emitMethod(*method, body);
           }
+
+          std::string spec = header;
+          spec += aliases;
+          if (kind == StructKind::CellType &&
+              methods.find("GenericRho") != std::string::npos) {
+            spec += "using GenericRho = typename CELLTYPE::GenericRho;\n";
+          }
+          spec += methods;
           spec += "};\n\n";
           out += spec;
         };
 
+        const std::string latT = std::string(lat.name) + "<T>";
         if (kind == StructKind::Cell) {
           std::string header = "template <typename T, typename TypePack>\n";
-          header += "struct " + sd.name + "<CELL<T, " + lat.name + "<T>, TypePack>>{\n";
-          emitOne(header, 0, false);
+          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>>{\n";
+          emitOne(header, "using LatSet = " + latT + ";\n", 0, false);
+        } else if (kind == StructKind::CellType) {
+          std::string extraDecl, extraArg;
+          for (size_t i = 1; i < sd.templateParams.size(); ++i) {
+            const auto& tp = sd.templateParams[i];
+            extraDecl += ", " + tp.paramType + " " + tp.paramName;
+            extraArg += ", " + tp.paramName;
+          }
+          std::string header = "template <typename T, typename TypePack" +
+                               extraDecl + ">\n";
+          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>" +
+                    extraArg + ">{\n";
+          std::string aliases = "using CELLTYPE = CELL<T, " + latT + ", TypePack>;\n";
+          aliases += "using CELL = CELLTYPE;\n";
+          aliases += "using LatSet = " + latT + ";\n";
+          emitOne(header, aliases, 0, false);
         } else if (kind == StructKind::TLatSet) {
           std::string header = "template <typename T>\n";
-          header += "struct " + sd.name + "<T, " + lat.name + "<T>>{\n";
-          emitOne(header, 0, false);
+          header += "struct " + sd.name + "<T, " + latT + ">{\n";
+          emitOne(header, "using LatSet = " + latT + ";\n", 0, false);
         } else {  // TLatSetD: one specialization per component index
           for (int dv = 0; dv < lat.d; ++dv) {
             std::string header = "template <typename T>\n";
-            header += "struct " + sd.name + "<T, " + lat.name + "<T>, " +
+            header += "struct " + sd.name + "<T, " + latT + ", " +
                       std::to_string(dv) + ">{\n";
-            emitOne(header, dv, true);
+            emitOne(header, "using LatSet = " + latT + ";\n", dv, true);
           }
         }
       }

@@ -84,9 +84,10 @@ bool pruneBlock(BlockIR* block, const std::unordered_map<std::string, int>& uses
       }
     } else if ((*it)->kind == StmtIRKind::Assign) {
       auto* assign = static_cast<AssignIR*>(it->get());
+      // Complex lvalues (array/member stores) are effects: never drop them.
       auto uit = uses.find(assign->target);
-      // Only drop the assignment if the RHS has no side effects.
-      if ((uit == uses.end() || uit->second == 0) && !hasImpureCall(assign->value))
+      if (!assign->targetExpr && (uit == uses.end() || uit->second == 0) &&
+          !hasImpureCall(assign->value))
         remove = true;
     }
     if (remove) {

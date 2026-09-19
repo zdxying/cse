@@ -5,6 +5,7 @@
 #include "../ir/ir_module.h"
 #include "algebraic_simplify.h"
 #include "constant_fold.h"
+#include "counter_prop.h"
 #include "cse_pass.h"
 #include "dce.h"
 #include "expr_recomb.h"
@@ -39,6 +40,11 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   const bool assoc = config.assumeNumericAssociative;
   pm.addPass(createConstantFoldPass());
   pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
+  // FreeLB tensor kernels index outputs with a straight-line counter; resolve
+  // it and fold constant `if`s after unrolling.
+  if (config.lowerVectors) {
+    pm.addPass(createCounterPropPass());
+  }
   // Additive reassociation may change floating-point results, so it additionally
   // requires allowFpReassoc.
   if (assoc && config.allowFpReassoc) {

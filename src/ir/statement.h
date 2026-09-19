@@ -35,7 +35,8 @@ struct ExprStmtIR : StmtIR {
 
 struct AssignIR : StmtIR {
   AssignIR() : StmtIR(StmtIRKind::Assign) {}
-  std::string target;
+  std::string target;          // simple variable target (if targetExpr is null)
+  DAGNode* targetExpr = nullptr;  // complex lvalue (array/member element)
   DAGNode* value = nullptr;
 };
 
@@ -62,6 +63,7 @@ struct IfElseIR : StmtIR {
   DAGNode* cond = nullptr;
   std::unique_ptr<StmtIR> thenBranch;
   std::unique_ptr<StmtIR> elseBranch;
+  bool isConstexpr = false;
 };
 
 struct BlockIR : StmtIR {

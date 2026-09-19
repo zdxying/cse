@@ -40,6 +40,10 @@ class Parser {
 
   SourceLoc currentLoc() const;
   bool isTypeKeyword() const;
+  // Lookahead: does the upcoming token sequence look like `<Type> <name>`?
+  // Handles qualified/template types (std::array<T,...>, Vector<T,d>) and
+  // pointer/reference qualifiers.
+  bool looksLikeVarDecl() const;
   // Parse type: handles "double", "int*", "struct Foo", custom names
   std::string parseType();
 

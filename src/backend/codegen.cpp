@@ -191,7 +191,26 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
     }
     case StmtIRKind::IfElse: {
       auto* ifElse = static_cast<IfElseIR*>(stmt);
-      _out << ind << "if (" << emitExpr(ifElse->cond) << ") {\n";
+      // Preserve `if constexpr (...) stmt;` without braces so the FreeLB
+      // verifier (which treats `if` lines as opaque) can see the else branch.
+      if (ifElse->isConstexpr && ifElse->thenBranch &&
+          ifElse->thenBranch->kind != StmtIRKind::Block) {
+        _out << ind << "if constexpr (" << emitExpr(ifElse->cond) << ") ";
+        emitStmt(ifElse->thenBranch.get(), 0);
+        if (ifElse->elseBranch) {
+          if (ifElse->elseBranch->kind == StmtIRKind::Block) {
+            _out << ind << "else {\n";
+            emitStmt(ifElse->elseBranch.get(), indentLevel + 1);
+            _out << ind << "}\n";
+          } else {
+            _out << ind << "else ";
+            emitStmt(ifElse->elseBranch.get(), 0);
+          }
+        }
+        break;
+      }
+      _out << ind << (ifElse->isConstexpr ? "if constexpr (" : "if (")
+           << emitExpr(ifElse->cond) << ") {\n";
       emitStmt(ifElse->thenBranch.get(), indentLevel + 1);
       if (ifElse->elseBranch) {
         _out << ind << "} else {\n";
@@ -211,7 +230,13 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
     }
     case StmtIRKind::Assign: {
       auto* assign = static_cast<AssignIR*>(stmt);
-      _out << ind << assign->target << " = " << emitExpr(assign->value) << ";\n";
+      _out << ind;
+      if (assign->targetExpr) {
+        _out << emitExpr(assign->targetExpr);
+      } else {
+        _out << assign->target;
+      }
+      _out << " = " << emitExpr(assign->value) << ";\n";
       break;
     }
     case StmtIRKind::ExprStmt: {

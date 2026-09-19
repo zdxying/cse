@@ -107,6 +107,7 @@ struct Stmt {
   std::unique_ptr<Expr> ifCond;
   std::unique_ptr<Stmt> ifThen;
   std::unique_ptr<Stmt> ifElse;
+  bool isConstexpr = false;  // `if constexpr` — compile-time branch
 
   // Block
   std::vector<std::unique_ptr<Stmt>> stmts;
