@@ -3,6 +3,9 @@
 本文档汇总 `cse` 引擎为 FreeLB 所做的移植工作与待办事项，以及配套的 FreeLB 侧
 集成（`~/FreeLB` 分支 `dev-cse2`）。
 
+> **唯一权威副本**：本文档是移植状态的单一来源。FreeLB 侧的
+> `tools/cse/PORT_STATUS.md` 只是指回本文件的占位指针，不要在那边编辑。
+
 > **分支状态**：原 `freelb-port` 工作已 fast-forward 合入 `main`
 > （`5296c74..3ef4147`），`main` 现在即"通用引擎 + FreeLB 插件 + `.ur.h` 生成器"。
 > 后续 FreeLB 集成提交直接走短生命周期分支合入 `main`。本文档中出现的
@@ -22,13 +25,13 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 - **驱动（FreeLB 仓库）**：`third_party/cse` submodule + `tools/cse/` 薄接线，
   `make.mk` 在 `-D_UNROLLFOR` 时调用 `csegen` 到 `generated/` 影子包含目录。
 
-当前分支/提交：
+当前分支/提交（HEAD 列为本文档更新时 2026-09-25 的快照）：
 
-| 仓库 | 分支 | 关键提交 |
-|------|------|----------|
-| `cse` | `main`（原 `freelb-port`） | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) |
-| `FreeLB` | `dev-cse2` | `f1683fe`(P0) → `2b1fa8d`(P1) → `28a0023`+`a2b7501`(P2) |
-| FreeLB submodule | `third_party/cse` | 指向 `9dece9a` |
+| 仓库 | 分支 | 关键提交 | 快照 HEAD |
+|------|------|----------|-----------|
+| `cse` | `main`（原 `freelb-port`） | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) | `8b8c47b` |
+| `FreeLB` | `dev-cse2` | `f1683fe`(P0) → `2b1fa8d`(P1) → `28a0023`+`a2b7501`(P2) | `782e3df` |
+| FreeLB submodule | `third_party/cse` | 跟踪 `branch = main` | 指针随每次引擎提交同步 bump |
 
 ## 2. 已完成
 
@@ -68,7 +71,8 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 - 新增 `CounterPropPass`：直线计数器解析（`tensor[i]→tensor[0],…`）、
   降级向量局部索引（`unew[1]→unew_1`）、常量条件折叠（`if (alpha==beta)`）。
 - `if constexpr` 单语句无花括号发射（贴合 FreeLB 风格/验证脚本）。
-- 验证：`verify_moment.py` **60/60**（11 结构体 × 6 latset）。
+- 验证：`verify_moment.py` **60/60**（`reference` 共 11 结构体 × 6 latset = 66 个
+  特化，脚本解析正则当前覆盖其中 60 个，逐项数值比对全通过）。
 
 ### FreeLB 侧（`dev-cse2`）
 - `third_party/cse` submodule；`tools/cse/` 旧解释器（约 2886 行）删除，
@@ -81,10 +85,15 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 | 项 | 结果 |
 |----|------|
 | `verify_moment.py` | 60/60 |
-| `verify_force.py` | ALL PASSED |
+| `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
 | `verify_equilibrium.py` | PASS |
-| 引擎回归 `tests/{test1,test_all,equilibrium_d3q19,safety_cases}` | 10 / 50 / 84 flops / PASS |
+| 引擎 FLOP 回归 `tests/fixtures/*` | `basic_cse` 10 / `features` 50 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 20 flops |
+| 引擎数值校验 `tests/verify/{verify_equilibrium,verify_safety}.cpp` | 误差阈值内 / ALL SAFETY CHECKS PASSED |
+| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化 |
 | `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
+
+以上由引擎 `make test`（`tests/run_tests.sh`）一次执行；FreeLB 段仅在存在
+FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 
 ## 3. 已实现的接口/配置（供扩展参考）
 
@@ -105,14 +114,13 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 ## 4. 未完成 / TODO
 
 ### 高优先级（发布前）
-1. ~~推送与依赖 URL~~ **已完成**：`main`（含原 `freelb-port`）已推到
-   `/mnt/d/gitservice/cse.git`；FreeLB `.gitmodules` 使用
-   `/mnt/d/gitservice/cse.git` 并跟踪 `branch = main`。注意该远端是本地
-   bare 仓库，克隆
-   FreeLB 时需允许 file 协议：
-   `git -c protocol.file.allow=always submodule update --init`
-   （或 `git config protocol.file.allow always`）。若后续发布到 GitHub，
-   用一条命令改 URL 即可（`git config -f .gitmodules submodule.third_party/cse.url <url>`）。
+1. ~~推送与依赖 URL~~ **已完成**：`main` 已推到两个远端——`origin`
+   （`git@github.com:zdxying/cse.git`）与 `local`（`/mnt/d/gitservice/cse.git`，
+   本地 bare）；FreeLB `.gitmodules` 使用 GitHub URL 并跟踪 `branch = main`。
+   后续再换 URL 用一条命令即可
+   （`git config -f .gitmodules submodule.third_party/cse.url <url>`）。
+   注：早期"克隆 FreeLB 需 `protocol.file.allow=always`"的说明针对旧的本地
+   file 远端，现用 SSH URL 已不再需要。
 2. ~~统一测试入口~~ **已完成**：`make test`（`tests/run_tests.sh`）执行
    FLOP 代价回归 + `verify_equilibrium`/`verify_safety` 数值校验 +
    `csegen tests/csegen/*.h` 冒烟；若存在 FreeLB checkout（`FREELB=` 或
@@ -135,6 +143,8 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
    `tools/cse/reference/{moment,equilibrium,force}.ur.h`，`verify` 改为与
    reference 比较，`install` 覆盖 `src/lbm/*.ur.h` 后再次 verify 仍有意义
    （reference 变化时用 `make gen-refs` 重新快照）。
+   注：`verify_moment.py`/`verify_equilibrium.py` 真的对比 reference 与生成文件；
+   `verify_force.py` 只读入生成文件、按内置解析公式校验（传入的 reference 参数被忽略）。
 6. ~~文档~~ **已完成**：`tools/cse/DESIGN.md` 已重写为“引擎 + 驱动”结构。
 7. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例；引擎侧跑回归。
    （用户侧 CI 未接，`make test` 已可手动/脚本调用。）
@@ -158,6 +168,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 ```bash
 cd /home/ym/code/cse
 make                       # 生成 bin/cse, bin/csegen, libcse.a/.so
+make test                  # FLOP 回归 + 数值校验 + csegen 冒烟（含 FreeLB 段）
 ./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
@@ -185,6 +196,7 @@ cd ~/FreeLB/examples/cavity3d && make
 FreeLB（`dev-cse2`）：
 - `third_party/cse`（submodule）、`.gitmodules`
 - `tools/cse/{Makefile,DESIGN.md,PORT_STATUS.md,reference/,verify_*.py}`
+  （`PORT_STATUS.md` 为指向 `third_party/cse/docs/freelb_port_status.md` 的占位指针）
 - `make.mk`、根 `Makefile`
 
 ## 7. 通用 / FreeLB 边界（已完成剥离）
@@ -211,4 +223,5 @@ FreeLB（`dev-cse2`）：
   `config.h`（`LatticeConfig`、`resolveLatsetConst`、`createFreeLBConfig`）、
   `ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`cse_main.cpp`、
   `lattice_resolve.{h,cpp}`、`cuda_skip.{h,cpp}`；
-  以及 `tests/csegen/*.h`、`tests/verify/check_lattice.py`、`Makefile` 的 `csegen` 目标。
+  以及 `tests/csegen/*.h`、`tests/verify/check_lattice.py`、`Makefile` 的
+  `bin/csegen` 文件目标。
