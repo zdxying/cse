@@ -16,7 +16,7 @@ CSE（Common Subexpression Elimination）优化工具是一个基于 LLVM 风格
 
 - **Frontend**：词法分析 → 语法分析 → AST
 - **IR**：AST → DAG 节点图（自然去重）→ 结构化语句树
-- **Passes**：常量折叠 → 代数简化 → CSEPass → 表达式重组 → 值传播 → 死代码消除
+- **Passes**：循环展开 → 常量折叠 → 代数简化 → 计数器传播 → 重结合 → CSEPass → 表达式重组 → 值传播 → 死代码消除
 - **Backend**：优化后的 IR → 生成 C++ 代码
 
 ### 目录结构
@@ -40,6 +40,7 @@ src/
 │   ├── pass.h            # Pass 基类
 │   ├── pass_manager.h/cpp # Pass 管理器
 │   ├── loop_unroll.h/cpp # 计数循环展开
+│   ├── counter_prop.h/cpp # 计数器传播（插件注入的 post-algebra pass）
 │   ├── constant_fold.h/cpp    # 常量折叠
 │   ├── algebraic_simplify.h/cpp # 代数简化 + 强度削减 + 常量乘法合并
 │   ├── reassociate.h/cpp # 加法重结合（按全局频率排序，形成共享前缀）
@@ -55,7 +56,10 @@ plugins/
 └── freelb/
     ├── cuda_skip.h/cpp   # __xx__ token 过滤器
     ├── config.h          # FreeLB 配置工厂函数
-    └── lattice_resolve.h/cpp  # latset::c/w 常量解析（硬编码查找表）
+    ├── lattice_resolve.h/cpp  # latset::c/w 常量解析（硬编码查找表）
+    ├── cse_main.cpp      # bin/cse 入口
+    ├── ur_emit.h/cpp     # .ur.h 生成器核心（generateUrHeader）
+    └── ur_emit_main.cpp  # bin/csegen 入口
 ```
 
 ## 配置系统
@@ -74,6 +78,15 @@ struct CSEConfig {
   bool allowFpReassoc = false;                    // 允许浮点重结合
   bool noAlias = false;                           // 假设不同指针参数不别名
   std::function<bool(const std::string&)> isPureFunction;  // 纯函数判定
+
+  // 项目钩子（通用扩展点，`src/` 内无 FreeLB 语义）
+  std::function<DAGNode*(IRModule&, const std::string&)> resolveName;  // 名字→常量
+  bool lowerVectors;                              // 把向量类型降级为分量标量
+  int vectorDim;                                  // 向量维度（降级用）
+  std::function<bool(const std::string&)> isVectorType;           // 类型判定
+  std::function<bool(const std::string&)> isVectorProducingCall;  // 产生向量的调用
+  std::function<std::string(const std::string&, long long)> vectorLocalName; // 向量局部命名
+  std::unordered_map<std::string, double> constBindings;         // 非类型模板实参
 };
 ```
 
@@ -83,8 +96,11 @@ struct CSEConfig {
 // 通用 C++ 模式（保守）：不假设交换/结合，未知调用视为有副作用
 cse::CSEConfig config;
 
-// FreeLB/CUDA 模式（激进）：开启数值代数规则，注册 lattice 访问器为纯函数
+// FreeLB/CUDA 模式（激进）：开启数值代数规则，注册 lattice 访问器为纯函数，
+// 并注入 resolveName / 向量降级等钩子
 cse::CSEConfig config = cse::freelb::createFreeLBConfig();
+
+// `.ur.h` 生成器另按 latset 上下文补 lowerVectors / constBindings
 ```
 
 CLI：默认使用 FreeLB 配置；`-s/--safe` 切换到保守语义（保留 token 过滤）。
@@ -93,10 +109,12 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 - `cuda_skip.h/cpp` — 过滤 `__any__`、`__host__`、`__device__` 等 CUDA 注解
 - `config.h` — FreeLB 默认配置工厂函数 + 纯函数注册
 - `lattice_resolve.h/cpp` — lattice 常量/点积解析
+- `ur_emit.h/cpp` + `ur_emit_main.cpp` — `.ur.h` 生成（`bin/csegen`）
+- `cse_main.cpp` — 通用 CLI 驱动（`bin/cse`）
 
 ## 正确性与安全模型
 
-通用模式下优化保持行为等价，四条机制：
+通用模式下优化保持行为等价，五条机制：
 
 1. **效果/纯度**：调用默认视为有副作用，`createCall` 仅对纯调用去重；不纯调用不被合并、
    不跨语句提取。内置数学函数 + `isPureFunction` 白名单视为纯。
@@ -115,20 +133,21 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 
 ## 优化管线
 
-默认管线按以下顺序执行：
+默认管线按以下顺序执行（方括号为可选/受配置门控的环节）：
 
 ```
-LoopUnroll → [LatticeResolve] → ConstantFold → AlgebraicSimplify → Reassociate
-  → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE
+LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra]
+  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE
 ```
 
 | Pass | 功能 |
 |------|------|
 | **LoopUnroll** | `for (i=0; i<N; ++i)` 展开为 N 条语句，并内联循环体局部变量 |
-| **LatticeResolve** | 插件 Pass：解析 `latset::c/w` 为常量/点积（FreeLB） |
+| **Resolve** | 插件 Pass（`resolvePass`）：解析 `latset::c/w` 为常量/点积（FreeLB） |
 | **ConstantFold** | 编译期计算常量表达式 |
 | **AlgebraicSimplify** | 恒等消除 + 强度削减 + 交换律排序 + 常量乘法合并 + `(-a)*(-a)→a*a` |
-| **Reassociate** | 加法项按全局出现频率重排，使对称语句共享不变前缀 |
+| **PostAlgebra** | 插件 Pass 槽位（`postAlgebraPass`），FreeLB 注入 **CounterProp**：直线计数器解析（`tensor[i]→tensor[0]`）、降级向量局部索引（`unew[1]→unew_1`）、常量条件折叠 |
+| **Reassociate** | 加法项按全局出现频率重排，使对称语句共享不变前缀（需 `assumeNumericAssociative` **且** `allowFpReassoc`） |
 | **CSEPass** | 跨语句公共子表达式提取 |
 | **ExprRecombine** | 分配律提取公因子（-r 启用） |
 | **ValueProp** | 内联简单赋值到使用处 |
@@ -136,9 +155,17 @@ LoopUnroll → [LatticeResolve] → ConstantFold → AlgebraicSimplify → Reass
 
 ### 插件注入
 
-`PassManager::createDefault(enableRecombine, resolvePass)` 接受一个可选的
-项目专用 Pass，在循环展开之后、通用代数/CSE 之前运行。FreeLB 通过
-`plugins/freelb/lattice_resolve` 提供该 Pass，核心 `src/` 不依赖任何项目。
+```cpp
+static PassManager createDefault(const CSEConfig& config,
+                                 bool enableRecombine = false,
+                                 std::unique_ptr<Pass> resolvePass = nullptr,
+                                 std::unique_ptr<Pass> postAlgebraPass = nullptr);
+```
+
+两个可选的项目专用 Pass 槽位：`resolvePass` 在循环展开之后、通用代数/CSE 之前
+运行；`postAlgebraPass` 在 `AlgebraicSimplify` 之后、`Reassociate`/`CSEPass` 之前
+运行。FreeLB 分别通过 `plugins/freelb/lattice_resolve` 与 `counter_prop` 提供，
+核心 `src/` 不依赖任何项目。
 
 ## 核心特性
 
@@ -274,7 +301,6 @@ return t;
 
 提供 pass 通用的工具函数，不侵入 IRModule：
 
-- `forEachNode(root, f)` — 遍历 DAG 子树中的每个节点
 - `countUses(root)` — 统计 StmtIR 树中每个变量名的使用次数
 - `substitute(mod, root, name, replacement)` — 在 DAG 子树中替换变量
 - `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数）
@@ -287,8 +313,15 @@ return t;
 bin/
 ├── libcse.a      # 静态库
 ├── libcse.so     # 动态库
-└── cse           # 可执行文件（静态链接 libcse.a）
+├── cse           # 通用 CSE CLI（静态链接 libcse.a）
+└── csegen        # FreeLB .ur.h 生成器（静态链接 libcse.a）
 ```
+
+两个入口分别在 `plugins/freelb/cse_main.cpp` 与 `plugins/freelb/ur_emit_main.cpp`；
+库目标由 `src/` 与 `plugins/freelb/` 下除这两个入口外的全部 `.cpp` 组成。
+
+`csegen` 用法：`csegen <input.h> <output.h>`，`input` 的 basename 决定 include 与
+namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h` 生成）。
 
 ### 12. 循环展开 (LoopUnrollPass)
 
@@ -306,7 +339,8 @@ bin/
 
 ### 14. FreeLB 常量解析 (plugins/freelb/lattice_resolve)
 
-- 硬编码 D3Q19 / D2Q9 方向向量与权重查找表（与 `lattice_set.h` 一致）
+- 硬编码 D2Q5/D2Q9/D3Q7/D3Q15/D3Q19/D3Q27 方向向量与权重查找表
+  （与 FreeLB `lattice_set.h` 一致，`tests/verify/check_lattice.py` 防漂移）
 - `latset::w<LatSet>(k)` → 数值用于权重分组，**代码输出保留声明的访问器形式**
   （如 `latset::w<D3Q19<double>>(1)`），避免烘焙十进制字面量带来的精度/类型转换
   问题；同值权重收敛到代表索引，权重分组不受影响
@@ -359,9 +393,9 @@ bin/
 |------|----------|
 | `tests/fixtures/basic_cse.cpp` | 基本 CSE / 乘积链因式分解（11→10 flops） |
 | `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（51→50 flops） |
-| `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出 |
-| `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合 |
-| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽 |
+| `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（6→4 flops） |
+| `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（228→84 flops） |
+| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（20→20，验证不劣化） |
 | `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
 | `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
 | `tests/verify/check_lattice.py` | 引擎 latset 表 vs FreeLB `lattice_set.h` 防漂移 |
@@ -369,6 +403,9 @@ bin/
 
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety），而非 golden-diff。
+> 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归 → 数值校验 → `csegen`
+> 冒烟；`check_lattice.py` 与 FreeLB 侧 `verify_*.py` 仅在存在 FreeLB checkout
+> （`FREELB=` 或 `~/FreeLB`）时运行，否则跳过。
 
 ### D3Q19 equilibrium 实测（cse -c，成本模型已计入循环次数）
 
@@ -388,12 +425,18 @@ bin/
 ## 构建
 
 ```bash
-make          # 构建静态库、动态库和可执行文件
+make          # 构建静态库、动态库与 bin/cse、bin/csegen
+make test     # 自动构建后运行回归（tests/run_tests.sh）
+make release  # OPT=-O2 重新构建
+make install PREFIX=/usr/local DESTDIR=  # 安装 cse/csegen 与 libcse.a/.so
 make clean    # 清理
-./bin/cse input.cpp -c         # 分析 FLOP 成本
+
+./bin/cse input.cpp -c         # 分析 FLOP 成本（--json 输出 JSON）
 ./bin/cse input.cpp -r         # 优化文件，启用表达式重组
 ./bin/cse input.cpp -s         # 保守模式（不启用不安全的代数规则）
 ./bin/cse input.cpp -v         # 打印每个 pass（stderr）
+./bin/cse -h                   # 全部选项
+./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h   # 生成 .ur.h
 ```
 
 `//@cse` 区域内的 `namespace` 会被完整处理：其中的 `using`、结构体与函数
