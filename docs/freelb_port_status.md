@@ -1,7 +1,7 @@
 # FreeLB 移植状态
 
 本文档汇总 `cse` 引擎为 FreeLB 所做的移植工作与待办事项，以及配套的 FreeLB 侧
-集成（`~/FreeLB` 分支 `dev-cse2`）。
+集成（`~/FreeLB` 分支 `main`）。
 
 > **唯一权威副本**：本文档是移植状态的单一来源。FreeLB 侧的
 > `tools/cse/PORT_STATUS.md` 只是指回本文件的占位指针，不要在那边编辑。
@@ -30,7 +30,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 | 仓库 | 分支 | 关键提交 | 快照 HEAD |
 |------|------|----------|-----------|
 | `cse` | `main`（原 `freelb-port`） | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) | `8b8c47b` |
-| `FreeLB` | `dev-cse2` | `f1683fe`(P0) → `2b1fa8d`(P1) → `28a0023`+`a2b7501`(P2) | `782e3df` |
+| `FreeLB` | `main` | `f1683fe`(P0) → `2b1fa8d`(P1) → `28a0023`+`a2b7501`(P2) | `782e3df` |
 | FreeLB submodule | `third_party/cse` | 跟踪 `branch = main` | 指针随每次引擎提交同步 bump |
 
 ## 2. 已完成
@@ -74,7 +74,7 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 - 验证：`verify_moment.py` **60/60**（`reference` 共 11 结构体 × 6 latset = 66 个
   特化，脚本解析正则当前覆盖其中 60 个，逐项数值比对全通过）。
 
-### FreeLB 侧（`dev-cse2`）
+### FreeLB 侧（`main`）
 - `third_party/cse` submodule；`tools/cse/` 旧解释器（约 2886 行）删除，
   `Makefile` 改为“构建引擎 → 复制 `csegen` → `gen/verify/install`”。
 - `make.mk`：`-D_UNROLLFOR` 时 `UR_CSE_BASES ?= lbm/moment lbm/equilibrium lbm/force`
@@ -166,13 +166,13 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 
 引擎：
 ```bash
-cd /home/ym/code/cse
+cd third_party/cse
 make                       # 生成 bin/cse, bin/csegen, libcse.a/.so
 make test                  # FLOP 回归 + 数值校验 + csegen 冒烟（含 FreeLB 段）
 ./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
-FreeLB（`dev-cse2`）：
+FreeLB（`main`）：
 ```bash
 cd ~/FreeLB/tools/cse
 make                       # 构建引擎并复制 csegen
@@ -193,7 +193,7 @@ cd ~/FreeLB/examples/cavity3d && make
 - `plugins/freelb/{cse_main.cpp,ur_emit.{h,cpp},ur_emit_main.cpp}`（`bin/cse` 与 `bin/csegen` 驱动）
 - `tests/csegen/{moment.h,force.h,equilibrium.h}`
 
-FreeLB（`dev-cse2`）：
+FreeLB（`main`）：
 - `third_party/cse`（submodule）、`.gitmodules`
 - `tools/cse/{Makefile,DESIGN.md,PORT_STATUS.md,reference/,verify_*.py}`
   （`PORT_STATUS.md` 为指向 `third_party/cse/docs/freelb_port_status.md` 的占位指针）
