@@ -14,7 +14,7 @@ namespace cse {
 //
 // An optional `vectorLocalName` hook maps a lowered vector local and a now
 // constant component index back to the scalar variable that holds it (e.g.
-// `("unew", 1) -> "unew_1"`); it is only applied when that variable exists.
+// `("v", 1) -> "v_1"`); it is only applied when that variable exists.
 class CounterPropPass : public Pass {
  public:
   using VectorLocalName =

@@ -154,7 +154,14 @@ UrConfig detectUrConfig(const std::string& inputPath) {
 }
 
 bool generateUrHeader(const std::string& inputPath,
-                      const std::string& outputPath) {
+                      const std::string& outputPath,
+                      const UrGenerateOptions& opts) {
+  auto wantLattice = [&opts](const char* name) {
+    if (opts.lattices.empty()) return true;
+    for (const auto& l : opts.lattices)
+      if (l == name) return true;
+    return false;
+  };
   std::ifstream ifs(inputPath);
   if (!ifs.is_open()) {
     std::cerr << "csegen: cannot open " << inputPath << "\n";
@@ -189,7 +196,9 @@ bool generateUrHeader(const std::string& inputPath,
   out += "#endif\n\n";
 
   int structCount = 0;
-  const int latCount = static_cast<int>(sizeof(kLatsets) / sizeof(kLatsets[0]));
+  int latCount = 0;
+  for (const auto& l : kLatsets)
+    if (wantLattice(l.name)) ++latCount;
 
   for (const auto& region : regions) {
     CSEConfig parseCfg = createFreeLBConfig();
@@ -214,6 +223,7 @@ bool generateUrHeader(const std::string& inputPath,
       }
 
       for (const auto& lat : kLatsets) {
+        if (!wantLattice(lat.name)) continue;
         LatticeConfig latCfg{"LatSet", lat.name, lat.d, lat.q, 1.0 / 3.0};
         CSEConfig base = createFreeLBConfig(latCfg);
         // Only the force/moment shapes need Vector lowering; keep the
@@ -230,6 +240,8 @@ bool generateUrHeader(const std::string& inputPath,
             IRModule module;
             IRBuilder builder(&module, cfg2);
             builder.buildFunction(*method);
+            CostResult before;
+            if (opts.report) before = analyzeCost(module, &cfg2);
             std::unique_ptr<Pass> counterProp;
             if (cfg2.lowerVectors) {
               counterProp = createCounterPropPass(cfg2.vectorLocalName);
@@ -238,6 +250,15 @@ bool generateUrHeader(const std::string& inputPath,
                 cfg2, false, createLatticeResolvePass("LatSet", lat.name),
                 std::move(counterProp));
             pm.runAll(module);
+            if (opts.report) {
+              UrCostEntry e;
+              e.lattice = lat.name;
+              e.function = sd.name + "::" + method->name;
+              e.component = bindD ? static_cast<int>(dVal) : -1;
+              e.before = before;
+              e.after = analyzeCost(module, &cfg2);
+              opts.report->entries.push_back(std::move(e));
+            }
             CodeGen codegen;
             std::string body = codegen.generateBody(module, 2);
             body = replaceAll(body, "auto ", "const T ");

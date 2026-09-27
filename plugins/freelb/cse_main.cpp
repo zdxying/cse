@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -25,13 +26,21 @@ static void printUsage(const char* prog) {
             << "  -s, --safe         Conservative mode (no unsafe algebraic rules)\n"
             << "  -v, --verbose      Print each pass as it runs (to stderr)\n"
             << "  --json             Output in JSON format (use with -c)\n"
+            << "  --lattice NAME     Lattice set for cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27)\n"
             << "  -h, --help         Show this help\n";
 }
+
+struct FunctionCost {
+  std::string name;
+  cse::CostResult before;
+  cse::CostResult after;
+};
 
 struct OptResult {
   std::string code;
   cse::CostResult costBefore;
   cse::CostResult costAfter;
+  std::vector<FunctionCost> functionCosts;
 };
 
 // Optimize a set of struct definitions and functions and append the generated
@@ -39,7 +48,8 @@ struct OptResult {
 static void optimizeFunctionsAndStructs(
     const std::vector<std::unique_ptr<cse::FunctionDef>>& funcs,
     const std::vector<std::unique_ptr<cse::StructDef>>& structs,
-    const cse::CSEConfig& config, bool enableRecombine, bool collectCost,
+    const cse::CSEConfig& config, const std::string& latAlias,
+    const std::string& latName, bool enableRecombine, bool collectCost,
     bool verbose, OptResult& optResult) {
   // Optimize struct methods (each method gets its own IR pipeline). Pure data
   // structs (no methods) are emitted once via `structPtrs` below.
@@ -52,22 +62,24 @@ static void optimizeFunctionsAndStructs(
       auto methodMod = std::make_unique<cse::IRModule>();
       cse::IRBuilder builder(methodMod.get(), config);
       builder.buildFunction(*method);
+
       if (collectCost) {
-        auto before = cse::analyzeCost(*methodMod);
-        optResult.costBefore.flops += before.flops;
-        optResult.costBefore.totalNodes += before.totalNodes;
-        optResult.costBefore.stmts += before.stmts;
-        optResult.costBefore.vars += before.vars;
+        // Measure "before" cost IMMEDIATELY after IR build, before ANY passes
+        auto before = cse::analyzeCost(*methodMod, &config);
+        optResult.costBefore += before;
+        optResult.functionCosts.push_back({sd->name + "::" + method->name, before, {}});
       }
+
       auto pm = cse::PassManager::createDefault(
-          config, enableRecombine, cse::freelb::createLatticeResolvePass());
+          config, enableRecombine, cse::freelb::createLatticeResolvePass(latAlias, latName));
       pm.runAll(*methodMod, verbose);
+
       if (collectCost) {
-        auto after = cse::analyzeCost(*methodMod);
-        optResult.costAfter.flops += after.flops;
-        optResult.costAfter.totalNodes += after.totalNodes;
-        optResult.costAfter.stmts += after.stmts;
-        optResult.costAfter.vars += after.vars;
+        auto after = cse::analyzeCost(*methodMod, &config);
+        optResult.costAfter += after;
+        if (!optResult.functionCosts.empty()) {
+          optResult.functionCosts.back().after = after;
+        }
       }
       os.methodModules.push_back(std::move(methodMod));
     }
@@ -90,23 +102,22 @@ static void optimizeFunctionsAndStructs(
     builder.buildFunction(*func);
 
     if (collectCost) {
-      auto before = cse::analyzeCost(module);
-      optResult.costBefore.flops += before.flops;
-      optResult.costBefore.totalNodes += before.totalNodes;
-      optResult.costBefore.stmts += before.stmts;
-      optResult.costBefore.vars += before.vars;
+      // Measure "before" cost IMMEDIATELY after IR build, before ANY passes
+      auto before = cse::analyzeCost(module, &config);
+      optResult.costBefore += before;
+      optResult.functionCosts.push_back({func->name, before, {}});
     }
 
     auto pm = cse::PassManager::createDefault(
-        config, enableRecombine, cse::freelb::createLatticeResolvePass());
+        config, enableRecombine, cse::freelb::createLatticeResolvePass(latAlias, latName));
     pm.runAll(module, verbose);
 
     if (collectCost) {
-      auto after = cse::analyzeCost(module);
-      optResult.costAfter.flops += after.flops;
-      optResult.costAfter.totalNodes += after.totalNodes;
-      optResult.costAfter.stmts += after.stmts;
-      optResult.costAfter.vars += after.vars;
+      auto after = cse::analyzeCost(module, &config);
+      optResult.costAfter += after;
+      if (!optResult.functionCosts.empty()) {
+        optResult.functionCosts.back().after = after;
+      }
     }
 
     // Generate code (emit struct defs only before first function)
@@ -132,6 +143,8 @@ static void optimizeFunctionsAndStructs(
 // Each //@cse region is processed independently through this pipeline.
 static OptResult optimizeRegion(const std::string& code,
                                 const cse::CSEConfig& config,
+                                const std::string& latAlias,
+                                const std::string& latName,
                                 bool enableRecombine, bool collectCost,
                                 bool verbose) {
   // 2. Lex: tokenize source
@@ -164,13 +177,15 @@ static OptResult optimizeRegion(const std::string& code,
       optResult.code += "using " + ud->aliasName + " = " + ud->underlyingType + ";\n";
     }
     optimizeFunctionsAndStructs(ns->functions, ns->structDefs, config,
-                                enableRecombine, collectCost, verbose, optResult);
+                                latAlias, latName, enableRecombine, collectCost,
+                                verbose, optResult);
     optResult.code += "}\n";
   }
 
   // Top-level structs and functions
   optimizeFunctionsAndStructs(result.functions, result.structDefs, config,
-                              enableRecombine, collectCost, verbose, optResult);
+                              latAlias, latName, enableRecombine, collectCost,
+                              verbose, optResult);
 
   return optResult;
 }
@@ -182,6 +197,7 @@ int main(int argc, char* argv[]) {
   }
 
   std::string inputFile;
+  std::string latticeName;
   bool enableRecombine = false;
   bool collectCost = false;
   bool outputJson = false;
@@ -203,6 +219,13 @@ int main(int argc, char* argv[]) {
       verbose = true;
     } else if (arg == "--json") {
       outputJson = true;
+    } else if (arg == "--lattice") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --lattice requires a name\n";
+        printUsage(argv[0]);
+        return 1;
+      }
+      latticeName = argv[++i];
     } else if (arg[0] != '-') {
       inputFile = arg;
     } else {
@@ -214,9 +237,11 @@ int main(int argc, char* argv[]) {
 
   // Default configuration is FreeLB-flavored (aggressive algebraic rules). The
   // generic/safe mode disables assumptions that are unsafe for arbitrary C++.
-  cse::CSEConfig config = cse::freelb::createFreeLBConfig();
+  cse::freelb::LatticeConfig latCfg = cse::freelb::createLatticeConfig(latticeName);
+  cse::CSEConfig config = cse::freelb::createFreeLBConfig(latCfg);
   if (safeMode) {
-    cse::CSEConfig safe;
+    cse::freelb::LatticeConfig safeLat = latCfg;
+    cse::CSEConfig safe = cse::freelb::createFreeLBConfig(safeLat);
     safe.tokenFilter = config.tokenFilter;  // keep parsing behavior
     safe.simplifyBraceInit = false;
     safe.assumeNumericCommutative = false;
@@ -243,6 +268,30 @@ int main(int argc, char* argv[]) {
     (std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
   ifs.close();
 
+  // Normalize // @cse markers to //@cse (accepts `// @cse`, `//  @cse`, `//@cse`)
+  auto normalizeMarkers = [](std::string& src) {
+    std::string out;
+    out.reserve(src.size());
+    std::istringstream iss(src);
+    std::string line;
+    bool first = true;
+    while (std::getline(iss, line)) {
+      size_t p = line.find("//");
+      if (p != std::string::npos) {
+        size_t q = p + 2;
+        while (q < line.size() && (line[q] == ' ' || line[q] == '\t')) ++q;
+        if (line.compare(q, 4, "@cse") == 0) {
+          line = line.substr(0, p) + "//@cse";
+        }
+      }
+      if (!first) out += "\n";
+      first = false;
+      out += line;
+    }
+    src.swap(out);
+  };
+  normalizeMarkers(source);
+
   // Find CSE regions
   auto regions = cse::RegionExtractor().extract(source);
   if (regions.empty()) {
@@ -261,6 +310,7 @@ int main(int argc, char* argv[]) {
   }
 
   cse::CostResult totalBefore, totalAfter;
+  std::vector<FunctionCost> allFunctionCosts;
 
   for (const auto& region : regions) {
     // Copy lines before this region
@@ -274,19 +324,16 @@ int main(int argc, char* argv[]) {
     }
 
     // Optimize and output the region
-    auto opt = optimizeRegion(region.code, config, enableRecombine, collectCost,
-                              verbose);
+    auto opt = optimizeRegion(region.code, config, latCfg.alias, latCfg.name,
+                              enableRecombine, collectCost, verbose);
     output += opt.code;
 
     if (collectCost) {
-      totalBefore.flops += opt.costBefore.flops;
-      totalBefore.totalNodes += opt.costBefore.totalNodes;
-      totalBefore.stmts += opt.costBefore.stmts;
-      totalBefore.vars += opt.costBefore.vars;
-      totalAfter.flops += opt.costAfter.flops;
-      totalAfter.totalNodes += opt.costAfter.totalNodes;
-      totalAfter.stmts += opt.costAfter.stmts;
-      totalAfter.vars += opt.costAfter.vars;
+      totalBefore += opt.costBefore;
+      totalAfter += opt.costAfter;
+      allFunctionCosts.insert(allFunctionCosts.end(),
+                              opt.functionCosts.begin(),
+                              opt.functionCosts.end());
     }
 
     lastEnd = region.endLine;
@@ -311,40 +358,76 @@ int main(int argc, char* argv[]) {
 
   // Cost analysis output
   if (collectCost) {
+    long long saved = totalBefore.savedFlops(totalAfter);
+    double pct = totalBefore.savedPercent(totalAfter);
+
+    auto jsonSide = [](const char* tag, const cse::CostResult& r) {
+      std::cout << "  \"" << tag << "\": {\"flops\":" << r.flops
+                << ",\"vectorOps\":" << r.vectorOps
+                << ",\"memOps\":" << r.memOps
+                << ",\"nodes\":" << r.totalNodes
+                << ",\"stmts\":" << r.stmts << ",\"vars\":" << r.vars
+                << ",\"unknownLoops\":" << r.unknownLoops
+                << ",\"unmodeledCalls\":" << r.unmodeledCalls << "},\n";
+    };
+
     if (outputJson) {
       std::cout << "{\n";
-      std::cout << "  \"before\": {\"flops\":" << totalBefore.flops
-                << ",\"nodes\":" << totalBefore.totalNodes
-                << ",\"stmts\":" << totalBefore.stmts
-                << ",\"vars\":" << totalBefore.vars << "},\n";
-      std::cout << "  \"after\": {\"flops\":" << totalAfter.flops
-                << ",\"nodes\":" << totalAfter.totalNodes
-                << ",\"stmts\":" << totalAfter.stmts
-                << ",\"vars\":" << totalAfter.vars << "},\n";
-      int saved = totalBefore.savedFlops(totalAfter);
-      double pct = totalBefore.savedPercent(totalAfter);
+      jsonSide("before", totalBefore);
+      jsonSide("after", totalAfter);
       std::cout << "  \"saved\": {\"flops\":" << saved
                 << ",\"percent\":" << std::round(pct * 10.0) / 10.0 << "}\n";
       std::cout << "}\n";
     } else {
       std::cout << "\n=== FLOP Cost Analysis ===\n";
+
+      if (!allFunctionCosts.empty()) {
+        std::cout << "\nPer-function breakdown:\n";
+        std::cout << "  " << std::left << std::setw(35) << "Function"
+                  << std::right << std::setw(10) << "Before"
+                  << std::setw(10) << "After"
+                  << std::setw(10) << "Saved"
+                  << std::setw(8) << "%" << "\n";
+        std::cout << "  " << std::string(73, '-') << "\n";
+
+        for (const auto& fc : allFunctionCosts) {
+          long long fsaved = fc.before.savedFlops(fc.after);
+          double fpct = fc.before.savedPercent(fc.after);
+          std::cout << "  " << std::left << std::setw(35) << fc.name
+                    << std::right << std::setw(10) << fc.before.flops
+                    << std::setw(10) << fc.after.flops
+                    << std::setw(10) << fsaved
+                    << std::setw(7) << std::fixed << std::setprecision(1)
+                    << fpct << "%\n";
+        }
+        std::cout << "  " << std::string(73, '-') << "\n";
+      }
+
       auto printCost = [](const char* label, const cse::CostResult& b,
                           const cse::CostResult& a) {
         std::cout << label << ":\n"
                   << "  Before:  " << b.flops << " flops, "
-                  << b.totalNodes << " nodes, "
-                  << b.stmts << " stmts, "
+                  << b.vectorOps << " vector-ops, " << b.memOps << " mem-ops, "
+                  << b.totalNodes << " nodes, " << b.stmts << " stmts, "
                   << b.vars << " vars\n"
                   << "  After:   " << a.flops << " flops, "
-                  << a.totalNodes << " nodes, "
-                  << a.stmts << " stmts, "
+                  << a.vectorOps << " vector-ops, " << a.memOps << " mem-ops, "
+                  << a.totalNodes << " nodes, " << a.stmts << " stmts, "
                   << a.vars << " vars\n";
-        int saved = b.savedFlops(a);
-        double pct = b.savedPercent(a);
-        std::cout << "  Saved:   " << saved << " flops ("
-                  << std::round(pct * 10.0) / 10.0 << "%)\n";
+        long long s = b.savedFlops(a);
+        double p = b.savedPercent(a);
+        std::cout << "  Saved:   " << s << " flops ("
+                  << std::round(p * 10.0) / 10.0 << "%)\n";
       };
       printCost("Total", totalBefore, totalAfter);
+
+      long long covLoops = totalBefore.unknownLoops + totalAfter.unknownLoops;
+      long long covCalls =
+          totalBefore.unmodeledCalls + totalAfter.unmodeledCalls;
+      if (covLoops || covCalls) {
+        std::cout << "  Coverage: " << covLoops << " unresolved loops, "
+                  << covCalls << " unmodeled calls (flops is a lower bound)\n";
+      }
     }
   }
 

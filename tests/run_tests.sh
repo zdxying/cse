@@ -33,16 +33,24 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # fixture (in tests/fixtures) -> expected post-pass FLOP count
+# Values reflect the vector-weighted, unique-node cost model:
+#   - vector ops cost their lane count; `getnorm2` is charged 2d-1
+#   - shared DAG nodes count once (CSE temporaries)
+#   - `features` has a runtime-bounded loop (reported as a lower bound)
+#   - `cost_descending` covers descending counted loops (negative step)
 declare -A EXPECTED=(
   [basic_cse]=10
-  [features]=50
+  [features]=49
   [namespace_case]=4
   [equilibrium_d3q19]=84
-  [safety_cases]=20
+  [safety_cases]=19
+  [cost_nested]=247
+  [cost_descending]=35
 )
 # Keep a deterministic order (associative array iteration is unspecified).
 FIXTURE_ORDER=(
-  basic_cse features namespace_case equilibrium_d3q19 safety_cases
+  basic_cse features namespace_case equilibrium_d3q19 safety_cases cost_nested
+  cost_descending
 )
 
 echo "=== cost regression ==="
@@ -90,6 +98,16 @@ for base in equilibrium force moment; do
     exit 1
   fi
 done
+
+# --cost measures the emitted pipeline and must report a total.
+"$CSEGEN" --cost --lattice D3Q19 "$CSEGEN_DIR/moment.h" "$WORK/moment_cost.ur.h" \
+  >"$WORK/moment_cost.txt"
+if grep -q "Total: Before" "$WORK/moment_cost.txt"; then
+  echo "ok    csegen --cost"
+else
+  echo "FAIL  csegen --cost produced no report" >&2
+  exit 1
+fi
 
 if [[ -d "$FREELB/src/lbm" && -f "$FREELB/tools/cse/verify_moment.py" ]]; then
   echo "=== lattice table drift guard ($FREELB) ==="

@@ -23,15 +23,40 @@ bool isUselessExprStmt(ExprStmtIR* stmt) {
   return isTrivialVarRef(stmt->expr);
 }
 
-// Check if an assignment is a self-assignment (target == value variable)
+// Check whether a node is a side-effect-free memory access: a variable or
+// constant, or an array/member/arrow access whose operands are themselves
+// pure. Used to guard the removal of complex-lvalue self-assignments.
+bool isPureAccess(DAGNode* node) {
+  if (!node) return false;
+  switch (node->kind) {
+    case NodeKind::Variable:
+    case NodeKind::Constant:
+      return true;
+    case NodeKind::ArrayAccess:
+    case NodeKind::MemberAccess:
+    case NodeKind::ArrowAccess:
+      for (auto* op : node->operands)
+        if (!isPureAccess(op)) return false;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Check if an assignment is a self-assignment.
+//   - simple target: `x = x`
+//   - complex lvalue: `a[i] = a[i]` / `p->x = p->x` (structurally identical,
+//     side-effect-free). Non-shareable memory loads are distinct DAGNode*
+//     even when structurally equal, so compare with NodeEqual, not pointers.
 bool isSelfAssign(AssignIR* assign) {
   if (!assign || !assign->value) return false;
-  if (assign->targetExpr) return false;  // Complex lvalue
-  
-  if (assign->value->kind == NodeKind::Variable) {
-    return assign->value->name == assign->target;
+
+  if (!assign->targetExpr) {
+    return assign->value->kind == NodeKind::Variable &&
+           assign->value->name == assign->target;
   }
-  return false;
+  return isPureAccess(assign->targetExpr) &&
+         NodeEqual{}(assign->targetExpr, assign->value);
 }
 
 // Check if a DAG node is a binary '+' operation

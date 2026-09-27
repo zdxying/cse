@@ -83,7 +83,7 @@ outside the region is copied through unchanged, and the output file is always
 
 | Option | Effect |
 |--------|--------|
-| `-c`, `--cost` | print FLOP / node / statement counts before and after |
+| `-c`, `--cost` | print FLOP / vector-op / mem-op / node / statement counts (plus coverage) before and after |
 | `--json` | emit that cost report as JSON (use with `-c`) |
 | `-r`, `--recombine` | enable factor extraction (`a*x + a*y → a*(x+y)`) |
 | `-s`, `--safe` | conservative semantics for arbitrary C++ |
@@ -94,12 +94,19 @@ outside the region is copied through unchanged, and the output file is always
 
 ```bash
 ./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
+./bin/csegen --cost --lattice D3Q19 tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
 `csegen <input.h> <output.h>` reads a `// @cse`-marked production header and
 emits fully unrolled specializations for every supported lattice set
 (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27). The input basename must be one of
 `moment`, `equilibrium` or `force`.
+
+`--cost` reports before/after FLOP cost measured on the same per-struct
+pipeline that emits the file (`--json` for machine output, `--lattice NAME`
+repeatable to restrict sets). This is what FreeLB's `make cost` uses, so the
+reported cost always matches the generated `.ur.h` — unlike running the generic
+`cse -c`, which does not apply the generator's per-shape vector lowering.
 
 FreeLB consumes this through its `third_party/cse` submodule: see
 [docs/freelb_port_status.md](docs/freelb_port_status.md) for the integration,
@@ -131,15 +138,21 @@ reassociation additionally requires `allowFpReassoc`.
 
 | Stage | What it checks |
 |-------|----------------|
-| Cost regression | FLOP counts for the five fixtures in `tests/fixtures/` |
+| Cost regression | FLOP counts for the seven fixtures in `tests/fixtures/` |
 | Numerical | `verify_equilibrium` and `verify_safety` compile and run generated output |
 | `csegen` smoke | representative specializations appear in generated headers |
 | Lattice drift guard | engine tables vs FreeLB `lattice_set.h` (skipped without a FreeLB checkout) |
 | FreeLB verifiers | `verify_{moment,equilibrium,force}.py` (skipped without a FreeLB checkout) |
 
-Sample results: `basic_cse` 11 → 10, `features` 51 → 50,
-`equilibrium_d3q19` 228 → 84 FLOPs (−63.2%), `safety_cases` 20 → 20
-(equivalence, not reduction).
+The cost model counts **scalar FLOPs with vector ops weighted by lane count**
+(a vector-vector product is a dot: `2d-1`), charges known pure helpers via a
+FreeLB hook (`getnorm2` → `2d-1`, …), counts each shared DAG node once, and
+reports `unknownLoops` / `unmodeledCalls` so unresolved constructs are visible
+as a lower bound. See `docs/cost_model_redesign.md`.
+
+Sample results (before → after): `basic_cse` 10 → 10, `features` 49 → 49,
+`equilibrium_d3q19` 323 → 84 FLOPs (−74.0%), `safety_cases` 22 → 19,
+`cost_nested` 478 → 247, `cost_descending` 35 → 35.
 
 ## Repository layout
 

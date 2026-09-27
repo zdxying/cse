@@ -88,10 +88,13 @@ FreeLB `tools/cse` 中原有的旧解释器/优化器。
 | `verify_moment.py` | 60/60 |
 | `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
 | `verify_equilibrium.py` | PASS |
-| 引擎 FLOP 回归 `tests/fixtures/*` | `basic_cse` 10 / `features` 50 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 20 flops |
+| 引擎 FLOP 回归 `tests/fixtures/*` | `basic_cse` 10 / `features` 49 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 19 / `cost_nested` 247 / `cost_descending` 35 flops（向量加权成本模型） |
 | 引擎数值校验 `tests/verify/{verify_equilibrium,verify_safety}.cpp` | 误差阈值内 / ALL SAFETY CHECKS PASSED |
-| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化 |
+| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化；`csegen --cost` 输出 Total |
 | `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
+
+> FreeLB 头文件成本由 `csegen --cost`（`make cost`）测量，与生成 `.ur.h` 走同一
+> 管线；`cse -c` 仅供通用引擎夹具使用。
 
 以上由引擎 `make test`（`tests/run_tests.sh`）一次执行；FreeLB 段仅在存在
 FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
