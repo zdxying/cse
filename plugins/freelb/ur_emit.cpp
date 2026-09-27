@@ -250,6 +250,15 @@ bool generateUrHeader(const std::string& inputPath,
               methods.find("GenericRho") != std::string::npos) {
             spec += "using GenericRho = typename CELLTYPE::GenericRho;\n";
           }
+          // For CellType structs, rewrite method signatures to use CELLTYPE
+          // instead of CELL (the source uses `using CELL = CELLTYPE;` internally)
+          if (kind == StructKind::CellType) {
+            methods = replaceAll(methods, " CELL&", " CELLTYPE&");
+            methods = replaceAll(methods, "CELL&", "CELLTYPE&");
+            methods = replaceAll(methods, " CELL ", " CELLTYPE ");
+            methods = replaceAll(methods, "CELL,", "CELLTYPE,");
+            methods = replaceAll(methods, "CELL)", "CELLTYPE)");
+          }
           spec += methods;
           spec += "};\n\n";
           out += spec;
@@ -272,7 +281,6 @@ bool generateUrHeader(const std::string& inputPath,
           header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>" +
                     extraArg + ">{\n";
           std::string aliases = "using CELLTYPE = CELL<T, " + latT + ", TypePack>;\n";
-          aliases += "using CELL = CELLTYPE;\n";
           aliases += "using LatSet = " + latT + ";\n";
           emitOne(header, aliases, 0, false);
         } else if (kind == StructKind::TLatSet) {
