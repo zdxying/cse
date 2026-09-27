@@ -187,13 +187,29 @@ bool generateUrHeader(const std::string& inputPath,
   out += "#include \"" + cfg.include + "\"\n";
   out += "#ifdef _UNROLLFOR\n";
   out += "namespace " + cfg.ns + " {\n\n";
+  // The POP storage strategy (cudev::DirectPop / cudev::RegPop) is a trailing
+  // template parameter of the cell, and the specialisations below are emitted
+  // generic over it.  Both branches therefore take the same four parameters so
+  // that one piece of emitted text parses in the host pass and in the device
+  // pass alike; the host alias accepts POPPOLICY and ignores it, which leaves it
+  // a free (unused) template parameter of the specialisation there.
   out += "#ifdef __CUDA_ARCH__\n";
-  out += "template <typename T, typename LatSet, typename TypePack>\n";
-  out += "using CELL = cudev::Cell<T, LatSet, TypePack>;\n";
+  out += "template <typename T, typename LatSet, typename TypePack, typename POPPOLICY>\n";
+  out += "using CELL = cudev::Cell<T, LatSet, TypePack, POPPOLICY>;\n";
   out += "#else\n";
-  out += "template <typename T, typename LatSet, typename TypePack>\n";
+  out += "template <typename T, typename LatSet, typename TypePack, typename POPPOLICY>\n";
   out += "using CELL = Cell<T, LatSet, TypePack>;\n";
   out += "#endif\n\n";
+  // In the host pass the alias above drops POPPOLICY, so nvcc emits one
+  // "template parameter POPPOLICY is not used in or cannot be deduced" (#842-D)
+  // per specialisation below -- 72 of them for the three bases, drowning any
+  // real diagnostic.  It is inherent to sharing one piece of emitted text
+  // between the two passes, so the warning is suppressed for exactly this file
+  // and re-enabled at the end of it.  g++ has no equivalent diagnostic, hence
+  // the __NVCC__ guard.
+  out += "#ifdef __NVCC__\n";
+  out += "#pragma nv_diag_suppress 842\n";
+  out += "#endif\n";
 
   int structCount = 0;
   int latCount = 0;
@@ -286,9 +302,16 @@ bool generateUrHeader(const std::string& inputPath,
         };
 
         const std::string latT = std::string(lat.name) + "<T>";
+        // POPPOLICY is forwarded into the specialisation so that one emitted
+        // specialisation covers every cell storage strategy (cudev::DirectPop,
+        // cudev::RegPop, ...).  It MUST stay last in the pattern: the CELL alias
+        // takes <T, LatSet, TypePack, POPPOLICY>, so anything else silently
+        // fails to match and falls back to the loop-based primary template.
         if (kind == StructKind::Cell) {
-          std::string header = "template <typename T, typename TypePack>\n";
-          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>>{\n";
+          std::string header =
+              "template <typename T, typename TypePack, typename POPPOLICY>\n";
+          header += "struct " + sd.name + "<CELL<T, " + latT +
+                    ", TypePack, POPPOLICY>>{\n";
           emitOne(header, "using LatSet = " + latT + ";\n", 0, false);
         } else if (kind == StructKind::CellType) {
           std::string extraDecl, extraArg;
@@ -297,11 +320,12 @@ bool generateUrHeader(const std::string& inputPath,
             extraDecl += ", " + tp.paramType + " " + tp.paramName;
             extraArg += ", " + tp.paramName;
           }
-          std::string header = "template <typename T, typename TypePack" +
+          std::string header = "template <typename T, typename TypePack, typename POPPOLICY" +
                                extraDecl + ">\n";
-          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>" +
-                    extraArg + ">{\n";
-          std::string aliases = "using CELLTYPE = CELL<T, " + latT + ", TypePack>;\n";
+          header += "struct " + sd.name + "<CELL<T, " + latT +
+                    ", TypePack, POPPOLICY>" + extraArg + ">{\n";
+          std::string aliases =
+              "using CELLTYPE = CELL<T, " + latT + ", TypePack, POPPOLICY>;\n";
           aliases += "using LatSet = " + latT + ";\n";
           emitOne(header, aliases, 0, false);
         } else if (kind == StructKind::TLatSet) {
@@ -322,6 +346,9 @@ bool generateUrHeader(const std::string& inputPath,
   }
 
   out += "}  // namespace " + cfg.ns + "\n";
+  out += "#ifdef __NVCC__\n";
+  out += "#pragma nv_diag_default 842\n";
+  out += "#endif\n";
   out += "#endif  // _UNROLLFOR\n";
 
   std::ofstream ofs(outputPath);
