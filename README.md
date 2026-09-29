@@ -124,7 +124,9 @@ preserves behavior through six mechanisms:
    Cross-statement rewrites therefore check for intervening writes: CSE only
    hoists a subexpression when none of its operands is written between the
    definition point and every later use, and value propagation only inlines an
-   initializer whose variables are never written anywhere in the function.
+   initializer whose variables are never written anywhere in the function. An
+   element or member store counts as a write to the root of its lvalue, which is
+   the conservative answer when another pointer may refer to the same object.
 4. **Dominance** — expressions computed inside `if`/`else`/loops are marked
    nested and never lifted out.
 5. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
