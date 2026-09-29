@@ -77,7 +77,6 @@ class IRBuilder {
 
   // Pre-scan results
   std::unordered_set<std::string> _declared;
-  std::unordered_set<std::string> _constParams;
   std::unordered_set<std::string> _pointerParams;
   std::unordered_set<std::string> _written;
   std::unordered_set<std::string> _passedToCall;

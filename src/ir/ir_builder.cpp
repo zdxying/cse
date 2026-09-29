@@ -12,14 +12,12 @@ IRBuilder::IRBuilder(IRModule* module, const CSEConfig& config)
 
 void IRBuilder::prescanFunction(const FunctionDef& func) {
   _declared.clear();
-  _constParams.clear();
   _pointerParams.clear();
   _written.clear();
   _passedToCall.clear();
 
   for (const auto& p : func.params) {
     _declared.insert(p.name);
-    if (p.type.find("const") != std::string::npos) _constParams.insert(p.name);
     if (p.type.find('*') != std::string::npos ||
         p.type.find('[') != std::string::npos)
       _pointerParams.insert(p.name);
@@ -162,12 +160,17 @@ bool IRBuilder::isPureCallee(const std::string& callee) const {
 
 bool IRBuilder::isReadOnlyRoot(const std::string& name) const {
   if (name.empty()) return false;
-  if (_constParams.count(name)) return true;
   if (!_declared.count(name)) return false;  // unknown/global: be conservative
   if (_written.count(name)) return false;
   if (_passedToCall.count(name)) return false;
   // Pointer/array-like roots may be aliased by writes to other roots unless the
   // caller guarantees no aliasing.
+  //
+  // This deliberately includes `const T*` parameters. `const` only promises that
+  // the pointee is not written *through this pointer*; it says nothing about
+  // another pointer referring to the same object. `f(const double* p, double* q)`
+  // called as `f(buf, buf)` would otherwise share `p[0]` across a store to
+  // `q[0]`. `noAlias` is the opt-in that re-enables sharing here.
   if (_pointerParams.count(name) && !_config.noAlias) return false;
   return true;
 }
