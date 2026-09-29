@@ -13,16 +13,22 @@
 
 namespace cse {
 
-namespace detail {
-
-inline void countUsesExpr(DAGNode* e,
-                          std::unordered_map<std::string, int>& counts) {
-  if (!e) return;
-  if (e->kind == NodeKind::Variable) counts[e->name]++;
-  for (auto* op : e->operands) countUsesExpr(op, counts);
+// Does the expression contain an impure (side-effecting) call?
+inline bool hasImpureCall(DAGNode* e) {
+  if (!e) return false;
+  if (e->kind == NodeKind::Call && !e->pure) return true;
+  for (auto* op : e->operands)
+    if (hasImpureCall(op)) return true;
+  return false;
 }
 
-}  // namespace detail
+// Add every variable occurrence in an expression to `counts`.
+inline void countVarUses(DAGNode* e,
+                         std::unordered_map<std::string, int>& counts) {
+  if (!e) return;
+  if (e->kind == NodeKind::Variable) counts[e->name]++;
+  for (auto* op : e->operands) countVarUses(op, counts);
+}
 
 // Count how many times each variable name is used across a StmtIR tree.
 //
@@ -31,7 +37,7 @@ inline void countUsesExpr(DAGNode* e,
 // from looking unused.
 inline std::unordered_map<std::string, int> countUses(StmtIR* root) {
   std::unordered_map<std::string, int> counts;
-  forEachExprDeep(root, [&](DAGNode*& e) { detail::countUsesExpr(e, counts); });
+  forEachExprDeep(root, [&](DAGNode*& e) { countVarUses(e, counts); });
   return counts;
 }
 

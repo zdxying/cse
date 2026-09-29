@@ -7,20 +7,12 @@
 
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
+#include "../ir/stmt_walk.h"
 #include "../ir/statement.h"
 
 namespace cse {
 
 namespace {
-
-// Does the expression contain an impure (side-effecting) call?
-bool hasImpure(DAGNode* e) {
-  if (!e) return false;
-  if (e->kind == NodeKind::Call && !e->pure) return true;
-  for (auto* op : e->operands)
-    if (hasImpure(op)) return true;
-  return false;
-}
 
 // Deep-copy a statement tree. DAGNode* pointers are shared (the module owns
 // them), so cloning only duplicates the statement structure, not the DAG.
@@ -86,54 +78,13 @@ std::unique_ptr<StmtIR> cloneStmt(const StmtIR* stmt) {
 }
 
 // Replace every Variable node named `name` inside a statement tree.
+//
+// The expression slots -- an element store contributes its lvalue as well as its
+// value -- come from stmt_walk.h, so a new slot cannot be missed here.
 void substituteStmt(IRModule& mod, StmtIR* stmt, const std::string& name,
                     DAGNode* replacement) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) substituteStmt(mod, s.get(), name, replacement);
-      break;
-    }
-    case StmtIRKind::Assign: {
-      auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) a->targetExpr = substitute(mod, a->targetExpr, name, replacement);
-      if (a->value) a->value = substitute(mod, a->value, name, replacement);
-      break;
-    }
-    case StmtIRKind::VarDecl: {
-      auto* d = static_cast<VarDeclIR*>(stmt);
-      if (d->init) d->init = substitute(mod, d->init, name, replacement);
-      break;
-    }
-    case StmtIRKind::ExprStmt: {
-      auto* e = static_cast<ExprStmtIR*>(stmt);
-      if (e->expr) e->expr = substitute(mod, e->expr, name, replacement);
-      break;
-    }
-    case StmtIRKind::Return: {
-      auto* r = static_cast<ReturnIR*>(stmt);
-      if (r->value) r->value = substitute(mod, r->value, name, replacement);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      if (ie->cond) ie->cond = substitute(mod, ie->cond, name, replacement);
-      substituteStmt(mod, ie->thenBranch.get(), name, replacement);
-      substituteStmt(mod, ie->elseBranch.get(), name, replacement);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      substituteStmt(mod, f->init.get(), name, replacement);
-      if (f->cond) f->cond = substitute(mod, f->cond, name, replacement);
-      if (f->update) f->update = substitute(mod, f->update, name, replacement);
-      if (f->updateRhs)
-        f->updateRhs = substitute(mod, f->updateRhs, name, replacement);
-      substituteStmt(mod, f->body.get(), name, replacement);
-      break;
-    }
-  }
+  forEachExprDeep(
+      stmt, [&](DAGNode*& e) { e = substitute(mod, e, name, replacement); });
 }
 
 // Clone-with-freshening: rebuilt non-pure nodes (memory loads, impure calls)
@@ -195,49 +146,9 @@ DAGNode* freshen(IRModule& mod, DAGNode* n) {
   return n;
 }
 
+// Give every expression in the statement tree its own impure loads / calls.
 void freshenStmt(IRModule& mod, StmtIR* stmt) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) freshenStmt(mod, s.get());
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      freshenStmt(mod, f->init.get());
-      if (f->cond) f->cond = freshen(mod, f->cond);
-      if (f->update) f->update = freshen(mod, f->update);
-      if (f->updateRhs) f->updateRhs = freshen(mod, f->updateRhs);
-      freshenStmt(mod, f->body.get());
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      if (ie->cond) ie->cond = freshen(mod, ie->cond);
-      freshenStmt(mod, ie->thenBranch.get());
-      freshenStmt(mod, ie->elseBranch.get());
-      break;
-    }
-    case StmtIRKind::ExprStmt:
-      if (auto* e = static_cast<ExprStmtIR*>(stmt)->expr)
-        static_cast<ExprStmtIR*>(stmt)->expr = freshen(mod, e);
-      break;
-    case StmtIRKind::Assign: {
-      auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) a->targetExpr = freshen(mod, a->targetExpr);
-      if (a->value) a->value = freshen(mod, a->value);
-      break;
-    }
-    case StmtIRKind::VarDecl:
-      if (auto* i = static_cast<VarDeclIR*>(stmt)->init)
-        static_cast<VarDeclIR*>(stmt)->init = freshen(mod, i);
-      break;
-    case StmtIRKind::Return:
-      if (auto* r = static_cast<ReturnIR*>(stmt)->value)
-        static_cast<ReturnIR*>(stmt)->value = freshen(mod, r);
-      break;
-  }
+  forEachExprDeep(stmt, [&](DAGNode*& e) { e = freshen(mod, e); });
 }
 
 // Rename a local variable's declaration and assignment targets in a statement
@@ -367,7 +278,7 @@ void collectDeclInits(StmtIR* stmt,
 // A body-local declaration can be unrolled only if its initializer can be
 // inlined at every use and the variable is never reassigned.
 bool declInlinable(DAGNode* init) {
-  return init && init->kind != NodeKind::Variable && !hasImpure(init);
+  return init && init->kind != NodeKind::Variable && !hasImpureCall(init);
 }
 
 // Inline confined local declarations (name -> init) and drop the declarations.

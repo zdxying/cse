@@ -4,6 +4,7 @@
 #include <unordered_set>
 
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/statement.h"
 #include "../ir/stmt_walk.h"
 
@@ -11,21 +12,8 @@ namespace cse {
 
 namespace {
 
-// Does the expression contain any impure (side-effecting) call?
-bool hasImpureCall(DAGNode* e) {
-  if (!e) return false;
-  if (e->kind == NodeKind::Call && !e->pure) return true;
-  for (auto* op : e->operands)
-    if (hasImpureCall(op)) return true;
-  return false;
-}
-
-// Count variable uses in a DAG subtree (excludes the VarDecl name itself).
-void countExprUses(DAGNode* e, std::unordered_map<std::string, int>& counts) {
-  if (!e) return;
-  if (e->kind == NodeKind::Variable) counts[e->name]++;
-  for (auto* op : e->operands) countExprUses(op, counts);
-}
+// (The impure-call test and the use count both come from ir_utils.h; they used
+// to be private copies here and in loop_unroll, which is how they drifted.)
 
 // Remove dead statements from a block. Returns true if any were removed.
 bool pruneBlock(BlockIR* block, const std::unordered_map<std::string, int>& uses) {
@@ -71,7 +59,7 @@ void DCEPass::run(IRModule& module) {
   for (int iter = 0; iter < 10; ++iter) {
     std::unordered_map<std::string, int> uses;
     forEachExprDeep(module.body.get(),
-                    [&](DAGNode*& e) { countExprUses(e, uses); });
+                    [&](DAGNode*& e) { countVarUses(e, uses); });
     if (pruneBlock(static_cast<BlockIR*>(module.body.get()), uses)) {
       continue;
     }
