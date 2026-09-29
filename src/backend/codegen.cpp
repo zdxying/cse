@@ -36,10 +36,6 @@ static int getPrecedence(char op) {
   }
 }
 
-static bool isLeftAssoc(char op) {
-  return op == '+' || op == '-' || op == '*' || op == '/' || op == '%';
-}
-
 // Map the internal operator encoding back to C++ spelling.
 static std::string opText(char op) {
   switch (op) {
@@ -51,13 +47,33 @@ static std::string opText(char op) {
   }
 }
 
+// Whether a child of `parentOp` must be wrapped in parentheses.
+//
+// Precedence settles the different-precedence cases. At equal precedence the
+// left child never needs them -- the emitted text is parsed left-associatively,
+// so `(a + b) + c` and `a + b + c` are the same tree. The right child always
+// does, because dropping them changes the meaning:
+//
+//   a - (b - c) -> a - b - c        a / (b * c) -> a / b * c
+//   a - (b + c) -> a - b + c        a / (b / c) -> a / b / c
+//   a * (b / c) -> a * b / c        a % (b % c) -> a % b % c
+//
+// (`a * (b / c)` also loses exactness for integers: 2 * (3 / 2) is 2, while
+// 2 * 3 / 2 is 3.)
+//
+// Even `a * (b * c)` is not interchangeable with `(a * b) * c`: under IEEE-754
+// the regrouping changes the rounding. A code generator has to print the tree
+// it was given, so the right child keeps its parentheses unconditionally.
+//
+// (This used to test the parent's *left*-associativity, which holds for every
+// binary operator in this IR -- so the condition never fired and a right child
+// silently lost its parentheses.)
 static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
   int pp = getPrecedence(parentOp);
   int cp = getPrecedence(childOp);
   if (cp < pp) return true;
   if (cp > pp) return false;
-  if (isRightChild && !isLeftAssoc(parentOp)) return true;
-  return false;
+  return isRightChild;
 }
 
 std::string CodeGen::generate(IRModule& module, const std::vector<StructDef*>& structDefs,
