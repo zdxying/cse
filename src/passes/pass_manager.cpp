@@ -52,7 +52,7 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   }
   pm.addPass(createCSEPass());
   if (enableRecombine) {
-    pm.addPass(createExprRecombinePass());
+    pm.addPass(createExprRecombinePass(comm));
     pm.addPass(createAlgebraicSimplifyPass(comm, assoc, unsafeIdent,
                                            config.allowFpReassoc));
   }
