@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "dag_node.h"
 #include "ir_module.h"
@@ -69,6 +70,87 @@ inline std::unordered_map<std::string, int> countUses(StmtIR* root) {
   std::unordered_map<std::string, int> counts;
   detail::countUsesStmt(root, counts);
   return counts;
+}
+
+// Root variable of an lvalue expression: `a[i].m` -> "a"; no variable at all
+// (e.g. a call result) -> "". Used to reason about stores through a computed
+// lvalue.
+inline std::string lvalueRoot(DAGNode* n) {
+  while (n) {
+    if (n->kind == NodeKind::Variable) return n->name;
+    if (n->operands.empty()) return "";
+    n = n->operands[0];
+  }
+  return "";
+}
+
+// Collect every variable name a statement writes, nested statements included.
+// Conditional writes count: callers use this to answer "may this have been
+// written between A and B", and the conservative answer needs no dominator
+// analysis.
+//
+// Three spellings of a write occur in this IR:
+//   * `x = v;`                 -> AssignIR, plain `target`
+//   * `a[i] = v;` / `p->f = v;`-> AssignIR, `targetExpr` (only the *root* is
+//     recorded: some other pointer may alias the same object, so naming the
+//     root is the conservative choice)
+//   * `++x;` / `--x;`          -> a UnaryOp statement
+// The second form also arrives as an ExprStmt wrapping an opaque
+// `BinaryOp(=)` whenever the builder kept it unlowered, so both spellings are
+// handled -- missing one of them is exactly how a store becomes invisible to
+// the passes that ask this question.
+//
+// A `VarDecl` is deliberately *not* recorded: it introduces a fresh
+// (alpha-renamed) name rather than overwriting an existing value, and no
+// consumer of this set wants declarations in it.
+inline void collectWrittenNames(StmtIR* stmt,
+                               std::unordered_set<std::string>& out) {
+  if (!stmt) return;
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      auto* b = static_cast<BlockIR*>(stmt);
+      for (auto& s : b->stmts) collectWrittenNames(s.get(), out);
+      break;
+    }
+    case StmtIRKind::ForLoop: {
+      auto* f = static_cast<ForLoopIR*>(stmt);
+      collectWrittenNames(f->init.get(), out);
+      collectWrittenNames(f->body.get(), out);
+      break;
+    }
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(stmt);
+      collectWrittenNames(ie->thenBranch.get(), out);
+      collectWrittenNames(ie->elseBranch.get(), out);
+      break;
+    }
+    case StmtIRKind::Assign: {
+      auto* a = static_cast<AssignIR*>(stmt);
+      if (a->targetExpr) {
+        std::string root = lvalueRoot(a->targetExpr);
+        if (!root.empty()) out.insert(root);
+      } else if (!a->target.empty()) {
+        out.insert(a->target);
+      }
+      break;
+    }
+    case StmtIRKind::ExprStmt: {
+      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
+      if (!e) break;
+      if (e->kind == NodeKind::UnaryOp &&
+          (e->name == "++" || e->name == "--") && !e->operands.empty()) {
+        std::string root = lvalueRoot(e->operands[0]);
+        if (!root.empty()) out.insert(root);
+      } else if (e->kind == NodeKind::BinaryOp && e->op == '=' &&
+                 e->operands.size() == 2) {
+        std::string root = lvalueRoot(e->operands[0]);
+        if (!root.empty()) out.insert(root);
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 // Replace all Variable nodes with the given name in a DAG subtree.

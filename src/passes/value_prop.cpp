@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/statement.h"
 
 namespace cse {
@@ -44,44 +45,6 @@ bool initDepsStable(DAGNode* init,
     if (!initDepsStable(op, reassigned)) return false;
   }
   return true;
-}
-
-// Collect all variables that are targets of Assign statements (reassigned).
-void findReassigned(StmtIR* stmt, std::unordered_set<std::string>& reassigned) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) findReassigned(s.get(), reassigned);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      findReassigned(f->init.get(), reassigned);
-      findReassigned(f->body.get(), reassigned);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      findReassigned(ie->thenBranch.get(), reassigned);
-      findReassigned(ie->elseBranch.get(), reassigned);
-      break;
-    }
-    case StmtIRKind::Assign:
-      reassigned.insert(static_cast<AssignIR*>(stmt)->target);
-      break;
-    case StmtIRKind::ExprStmt: {
-      auto* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      if (e && e->kind == NodeKind::UnaryOp &&
-          (e->name == "++" || e->name == "--") && !e->operands.empty() &&
-          e->operands[0]->kind == NodeKind::Variable) {
-        reassigned.insert(e->operands[0]->name);
-      }
-      break;
-    }
-    default:
-      break;
-  }
 }
 
 // Substitute variables in a DAG subtree, rebuilding parent nodes as needed.
@@ -134,13 +97,6 @@ DAGNode* propExpr(DAGNode* e, IRModule& mod,
 // leave the assignment behind while its uses were rewritten anyway -- and the
 // assignment target is by definition a written name, so it can never satisfy
 // `initDepsStable` either.
-//
-// Known boundary: `written` comes from `findReassigned`, which only sees
-// `AssignIR` targets and `++`/`--` operands. An element/member store such as
-// `s.f = x;` stays an opaque `BinaryOp(=)` inside an ExprStmt unless
-// `CSEConfig::lowerVectors` is set, so it is invisible here and a member read
-// can still be inlined across it. `CSEPass` has the same blind spot in its
-// `collectWritten`.
 void walkStmt(StmtIR* stmt,
               const std::unordered_set<std::string>& blocked,
               const std::unordered_set<std::string>& written,
@@ -252,11 +208,12 @@ void ValuePropPass::run(IRModule& module) {
   std::unordered_set<std::string> params;
   for (auto& p : module.funcSig.params) params.insert(p.name);
 
-  // Pre-compute: every variable written anywhere in the function. Used both to
-  // protect a variable from being inlined itself and, via initDepsStable, to
-  // reject initializers that read a variable which is written somewhere.
+  // Pre-compute: every variable written anywhere in the function (see
+  // ir_utils.h:collectWrittenNames). Used both to protect a variable from being
+  // inlined itself and, via initDepsStable, to reject initializers that read a
+  // variable which is written somewhere.
   std::unordered_set<std::string> reassigned;
-  findReassigned(module.body.get(), reassigned);
+  collectWrittenNames(module.body.get(), reassigned);
 
   for (int iter = 0; iter < 5; ++iter) {
     // Don't inline params or reassigned vars

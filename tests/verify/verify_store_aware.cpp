@@ -15,6 +15,11 @@
 
 int g_calls = 0;
 
+// Helpers the fixture declares; the fixture source is passed through verbatim,
+// so only the definitions are missing here.
+double getnorm_pair(Pair p) { return p.a + p.b; }
+double getsum_array(double* a) { return a[0] + a[1]; }
+
 static int failures = 0;
 
 static void check(const char* name, double got, double want) {
@@ -59,6 +64,31 @@ int main() {
   int calls = g_calls;
   check("call_between", cb, 12.0);
   checkInt("call_between calls", calls, 1);
+
+  // ---- Element / member stores ------------------------------------------
+  // A store through `p.a` / `a[0]` writes the whole root, so a read taken
+  // before it must not be moved or shared past it. `Pair` is passed by value,
+  // so the store itself is unobservable from here; the returned value is what
+  // separates the two behaviours (3.0 is the value before the store, 9.0 the
+  // one after).
+  Pair pr{3.0, 4.0};
+  check("vp_member", vp_member(pr, 9.0), 3.0);
+  check("vp_arrow", vp_arrow(&pr, 9.0), 3.0);
+
+  // Same hazard through a call that reads the whole object: sharing the call
+  // node folds two reads into one, taken before the store.
+  Pair pr2{3.0, 4.0};
+  check("cse_member_call", cse_member_call(pr2), (3.0 + 4.0) + (5.0 + 4.0));
+
+  double arr[2] = {1.0, 2.0};
+  check("cse_element_call", cse_element_call(arr), (1.0 + 2.0) + (5.0 + 2.0));
+  checkInt("cse_element_call store", arr[0] == 5.0 ? 1 : 0, 1);
+
+  // A store to a different object must still leave a shared read of an
+  // untouched object alone: the check has to be precise, not blanket.
+  Pair pr3{3.0, 4.0};
+  double dst[1] = {0.0};
+  check("cse_other_object", cse_other_object(pr3, 2.0, dst), 6.0 + 6.0);
 
   std::printf(failures == 0 ? "\nALL STORE-AWARE CHECKS PASSED\n"
                             : "\n%d STORE-AWARE CHECK(S) FAILED\n",

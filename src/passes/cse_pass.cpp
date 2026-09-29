@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/statement.h"
 
 namespace cse {
@@ -202,74 +203,8 @@ static void collectNestedNodes(StmtIR* stmt, bool nested,
 // stay the same DAG node even though they denote different values. Extracting
 // such a node to a single definition point would therefore bind every later use
 // to the value computed at that point, which is wrong whenever one of the
-// variables it reads has been written in between. These two helpers give the
-// extraction the information it needs to check that.
-
-// Root variable of an lvalue expression: `a[i].m` -> "a".
-static std::string lvalueRoot(DAGNode* n) {
-  while (n) {
-    if (n->kind == NodeKind::Variable) return n->name;
-    if (n->operands.empty()) return "";
-    n = n->operands[0];
-  }
-  return "";
-}
-
-// Collect every variable name a statement writes, including nested statements.
-// Conditional writes count: the check must stay sound without running a real
-// dominator analysis.
-static void collectWritten(StmtIR* stmt, std::unordered_set<std::string>& out) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      for (auto& s : static_cast<BlockIR*>(stmt)->stmts)
-        collectWritten(s.get(), out);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      collectWritten(f->init.get(), out);
-      collectWritten(f->body.get(), out);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      collectWritten(ie->thenBranch.get(), out);
-      collectWritten(ie->elseBranch.get(), out);
-      break;
-    }
-    case StmtIRKind::Assign: {
-      auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) {
-        // Element/member store: only the root may alias the subexpression.
-        std::string root = lvalueRoot(a->targetExpr);
-        if (!root.empty()) out.insert(root);
-      } else if (!a->target.empty()) {
-        out.insert(a->target);
-      }
-      break;
-    }
-    case StmtIRKind::ExprStmt: {
-      // A bare `++x;` / `--x;` statement.
-      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      if (e && e->kind == NodeKind::UnaryOp &&
-          (e->name == "++" || e->name == "--") && !e->operands.empty() &&
-          e->operands[0]->kind == NodeKind::Variable) {
-        out.insert(e->operands[0]->name);
-      }
-      break;
-    }
-    case StmtIRKind::VarDecl: {
-      // Shadowing is alpha-renamed, so a nested declaration cannot collide with
-      // a name the subexpression reads; recording it is harmless.
-      const std::string& n = static_cast<VarDeclIR*>(stmt)->name;
-      if (!n.empty()) out.insert(n);
-      break;
-    }
-    default:
-      break;
-  }
-}
+// variables it reads has been written in between. `collectWrittenNames` (in
+// ir_utils.h, shared with ValueProp) supplies the first half of that check.
 
 // Every variable name read by a subexpression.
 static void collectVarNames(DAGNode* n, std::unordered_set<std::string>& out) {
@@ -404,7 +339,7 @@ void CSEPass::run(IRModule& module) {
     // would be reused across a write to one of its operands.
     std::vector<std::unordered_set<std::string>> writesPerStmt(block->stmts.size());
     for (size_t i = 0; i < block->stmts.size(); i++)
-      collectWritten(block->stmts[i].get(), writesPerStmt[i]);
+      collectWrittenNames(block->stmts[i].get(), writesPerStmt[i]);
 
     // Phase 2: Find nodes used in >= 2 different statements
     struct CSECandidate {

@@ -77,3 +77,65 @@ double call_between(double a, double x) {
   double q = a * x;
   return p + q;
 }
+
+// ---- Element / member stores -------------------------------------------
+//
+// An element or member store writes through the *root* of its lvalue, so it has
+// to count as a write to that whole variable. Both scans used to miss it: the
+// store is not a plain `x = v;` assignment, and in the default configuration it
+// is not structural in the IR either (see IRBuilder), so it arrives as an
+// ExprStmt wrapping an opaque `BinaryOp(=)`.
+
+struct Pair {
+  double a;
+  double b;
+};
+
+// Supplied by the verifier. The names carry prefixes that the FreeLB profile
+// purity hook accepts, which is what makes the call node interned -- and
+// therefore a CSE candidate.
+double getnorm_pair(Pair p);
+double getsum_array(double* a);
+
+// Copying `p.a` to the use site would read the value stored afterwards.
+//@cse
+double vp_member(Pair p, double v) {
+  double t = p.a;
+  p.a = v;
+  return t;
+}
+
+//@cse
+double vp_arrow(Pair* p, double v) {
+  double t = p->a;
+  p->a = v;
+  return t;
+}
+
+// Sharing the call across the store would fold two reads of the object into
+// one, taken before the store.
+//@cse
+double cse_member_call(Pair p) {
+  double u = getnorm_pair(p);
+  p.a = 5.0;
+  double w = getnorm_pair(p);
+  return u + w;
+}
+
+//@cse
+double cse_element_call(double* a) {
+  double u = getsum_array(a);
+  a[0] = 5.0;
+  double w = getsum_array(a);
+  return u + w;
+}
+
+// A store to one object must not block sharing that concerns another, untouched
+// one -- the check has to stay precise, not just conservative.
+//@cse
+double cse_other_object(Pair p, double x, double* q) {
+  double u = p.a * x;
+  q[0] = 5.0;
+  double w = p.a * x;
+  return u + w;
+}

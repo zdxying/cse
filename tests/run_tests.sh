@@ -69,13 +69,13 @@ cost_stage() {
 
 cost_stage "default" "" default \
   basic_cse=10 features=50 namespace_case=4 equilibrium_d3q19=84 \
-  safety_cases=20 parens=19 store_aware=14
+  safety_cases=20 parens=19 store_aware=18
 cost_stage "-r" "-r" r \
   recombine=21
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
-  parens=19 store_aware=14 float_identities=4
+  parens=19 store_aware=18 float_identities=4
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
