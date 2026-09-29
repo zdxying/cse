@@ -26,6 +26,26 @@ bool isTrivial(DAGNode* e) {
   }
 }
 
+// Does `init` read only variables that are never reassigned in this function?
+//
+// The rewrite copies the initializer to the use site, so it stays valid only if
+// every value it depends on is the same there as at the definition. Checking
+// that the inlined name itself is never reassigned (done by the caller) is not
+// enough: `double t = a; a = b; return t;` would otherwise become
+// `a = b; return a;`. Requires that no variable read by `init` is written
+// anywhere in the function.
+bool initDepsStable(DAGNode* init,
+                    const std::unordered_set<std::string>& reassigned) {
+  if (!init) return true;
+  if (init->kind == NodeKind::Variable &&
+      reassigned.find(init->name) != reassigned.end())
+    return false;
+  for (auto* op : init->operands) {
+    if (!initDepsStable(op, reassigned)) return false;
+  }
+  return true;
+}
+
 // Collect all variables that are targets of Assign statements (reassigned).
 void findReassigned(StmtIR* stmt, std::unordered_set<std::string>& reassigned) {
   if (!stmt) return;
@@ -102,14 +122,31 @@ DAGNode* propExpr(DAGNode* e, IRModule& mod,
   }
 }
 
-// Walk statements, collect trivial definitions, and inline them.
-// Only inlines variables that are never reassigned.
-bool walkStmt(StmtIR* stmt,
-              const std::unordered_set<std::string>& reassigned,
+// Walk statements and collect the definitions that may be inlined.
+//
+// `blocked` = names that must not be inlined (parameters, plus anything
+// written); `written` = names written anywhere, which an initializer may not
+// read. A parameter that is never written is a perfectly stable source of
+// values, so the two sets cannot be conflated.
+//
+// Only `VarDecl` initializers qualify. Plain assignments are deliberately left
+// out: `toRemove` can only drop declarations, so inlining an assignment would
+// leave the assignment behind while its uses were rewritten anyway -- and the
+// assignment target is by definition a written name, so it can never satisfy
+// `initDepsStable` either.
+//
+// Known boundary: `written` comes from `findReassigned`, which only sees
+// `AssignIR` targets and `++`/`--` operands. An element/member store such as
+// `s.f = x;` stays an opaque `BinaryOp(=)` inside an ExprStmt unless
+// `CSEConfig::lowerVectors` is set, so it is invisible here and a member read
+// can still be inlined across it. `CSEPass` has the same blind spot in its
+// `collectWritten`.
+void walkStmt(StmtIR* stmt,
+              const std::unordered_set<std::string>& blocked,
+              const std::unordered_set<std::string>& written,
               std::unordered_map<std::string, DAGNode*>& defs,
               std::vector<std::string>& toRemove) {
-  if (!stmt) return false;
-  bool changed = false;
+  if (!stmt) return;
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
@@ -117,37 +154,31 @@ bool walkStmt(StmtIR* stmt,
         if (s->kind == StmtIRKind::VarDecl) {
           auto* decl = static_cast<VarDeclIR*>(s.get());
           if (decl->init && isTrivial(decl->init) &&
-              reassigned.find(decl->name) == reassigned.end()) {
+              blocked.find(decl->name) == blocked.end() &&
+              initDepsStable(decl->init, written)) {
             defs[decl->name] = decl->init;
             toRemove.push_back(decl->name);
           }
-        } else if (s->kind == StmtIRKind::Assign) {
-          auto* assign = static_cast<AssignIR*>(s.get());
-          if (assign->value && isTrivial(assign->value) &&
-              reassigned.find(assign->target) == reassigned.end()) {
-            defs[assign->target] = assign->value;
-          }
         }
-        changed |= walkStmt(s.get(), reassigned, defs, toRemove);
+        walkStmt(s.get(), blocked, written, defs, toRemove);
       }
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      walkStmt(f->init.get(), reassigned, defs, toRemove);
-      walkStmt(f->body.get(), reassigned, defs, toRemove);
+      walkStmt(f->init.get(), blocked, written, defs, toRemove);
+      walkStmt(f->body.get(), blocked, written, defs, toRemove);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      walkStmt(ie->thenBranch.get(), reassigned, defs, toRemove);
-      walkStmt(ie->elseBranch.get(), reassigned, defs, toRemove);
+      walkStmt(ie->thenBranch.get(), blocked, written, defs, toRemove);
+      walkStmt(ie->elseBranch.get(), blocked, written, defs, toRemove);
       break;
     }
     default:
       break;
   }
-  return changed;
 }
 
 // Apply substitutions to all expressions in a statement tree.
@@ -221,7 +252,9 @@ void ValuePropPass::run(IRModule& module) {
   std::unordered_set<std::string> params;
   for (auto& p : module.funcSig.params) params.insert(p.name);
 
-  // Pre-compute: all variables that are reassigned anywhere in the function
+  // Pre-compute: every variable written anywhere in the function. Used both to
+  // protect a variable from being inlined itself and, via initDepsStable, to
+  // reject initializers that read a variable which is written somewhere.
   std::unordered_set<std::string> reassigned;
   findReassigned(module.body.get(), reassigned);
 
@@ -233,7 +266,7 @@ void ValuePropPass::run(IRModule& module) {
     // Collect trivial definitions
     std::unordered_map<std::string, DAGNode*> defs;
     std::vector<std::string> toRemove;
-    walkStmt(module.body.get(), skip, defs, toRemove);
+    walkStmt(module.body.get(), skip, reassigned, defs, toRemove);
     if (defs.empty()) break;
 
     applyProp(module.body.get(), module, defs);

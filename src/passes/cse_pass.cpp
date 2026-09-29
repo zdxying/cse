@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -195,6 +196,108 @@ static void collectNestedNodes(StmtIR* stmt, bool nested,
   }
 }
 
+// ===== Write / dependency analysis =====
+// The IR interns variables by name (IRModule::getVar), so reassigning a
+// variable does NOT create a new node: two textually identical subexpressions
+// stay the same DAG node even though they denote different values. Extracting
+// such a node to a single definition point would therefore bind every later use
+// to the value computed at that point, which is wrong whenever one of the
+// variables it reads has been written in between. These two helpers give the
+// extraction the information it needs to check that.
+
+// Root variable of an lvalue expression: `a[i].m` -> "a".
+static std::string lvalueRoot(DAGNode* n) {
+  while (n) {
+    if (n->kind == NodeKind::Variable) return n->name;
+    if (n->operands.empty()) return "";
+    n = n->operands[0];
+  }
+  return "";
+}
+
+// Collect every variable name a statement writes, including nested statements.
+// Conditional writes count: the check must stay sound without running a real
+// dominator analysis.
+static void collectWritten(StmtIR* stmt, std::unordered_set<std::string>& out) {
+  if (!stmt) return;
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      for (auto& s : static_cast<BlockIR*>(stmt)->stmts)
+        collectWritten(s.get(), out);
+      break;
+    }
+    case StmtIRKind::ForLoop: {
+      auto* f = static_cast<ForLoopIR*>(stmt);
+      collectWritten(f->init.get(), out);
+      collectWritten(f->body.get(), out);
+      break;
+    }
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(stmt);
+      collectWritten(ie->thenBranch.get(), out);
+      collectWritten(ie->elseBranch.get(), out);
+      break;
+    }
+    case StmtIRKind::Assign: {
+      auto* a = static_cast<AssignIR*>(stmt);
+      if (a->targetExpr) {
+        // Element/member store: only the root may alias the subexpression.
+        std::string root = lvalueRoot(a->targetExpr);
+        if (!root.empty()) out.insert(root);
+      } else if (!a->target.empty()) {
+        out.insert(a->target);
+      }
+      break;
+    }
+    case StmtIRKind::ExprStmt: {
+      // A bare `++x;` / `--x;` statement.
+      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
+      if (e && e->kind == NodeKind::UnaryOp &&
+          (e->name == "++" || e->name == "--") && !e->operands.empty() &&
+          e->operands[0]->kind == NodeKind::Variable) {
+        out.insert(e->operands[0]->name);
+      }
+      break;
+    }
+    case StmtIRKind::VarDecl: {
+      // Shadowing is alpha-renamed, so a nested declaration cannot collide with
+      // a name the subexpression reads; recording it is harmless.
+      const std::string& n = static_cast<VarDeclIR*>(stmt)->name;
+      if (!n.empty()) out.insert(n);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// Every variable name read by a subexpression.
+static void collectVarNames(DAGNode* n, std::unordered_set<std::string>& out) {
+  if (!n) return;
+  if (n->kind == NodeKind::Variable && !n->name.empty()) out.insert(n->name);
+  for (auto* op : n->operands) collectVarNames(op, out);
+}
+
+// Is it safe to hoist `node` to just before statement `insertPos`, given that it
+// is used by the statements in `uses`? Only if no statement strictly between the
+// definition point and a later use writes a variable the node reads.
+static bool usesAreStable(DAGNode* node, const std::vector<size_t>& uses,
+                          size_t insertPos,
+                          const std::vector<std::unordered_set<std::string>>& writes) {
+  std::unordered_set<std::string> deps;
+  collectVarNames(node, deps);
+  if (deps.empty()) return true;
+  for (size_t u : uses) {
+    if (u <= insertPos) continue;
+    for (size_t k = insertPos; k < u && k < writes.size(); ++k) {
+      for (const std::string& d : deps) {
+        if (writes[k].count(d)) return false;
+      }
+    }
+  }
+  return true;
+}
+
 // ===== Phase 2: Replace all references to a target node with a variable =====
 
 // Recursively walk a statement tree and replace all DAGNode* that match
@@ -297,10 +400,16 @@ void CSEPass::run(IRModule& module) {
     std::unordered_set<DAGNode*> nestedNodes;
     for (auto& s : block->stmts) collectNestedNodes(s.get(), false, nestedNodes);
 
+    // Per-statement written variables, needed to reject extractions whose value
+    // would be reused across a write to one of its operands.
+    std::vector<std::unordered_set<std::string>> writesPerStmt(block->stmts.size());
+    for (size_t i = 0; i < block->stmts.size(); i++)
+      collectWritten(block->stmts[i].get(), writesPerStmt[i]);
+
     // Phase 2: Find nodes used in >= 2 different statements
     struct CSECandidate {
       DAGNode* node;
-      size_t stmtCount;
+      std::vector<size_t> stmts;
     };
     std::vector<CSECandidate> candidates;
     for (auto& [node, stmtIndices] : nodeToStmts) {
@@ -310,7 +419,7 @@ void CSEPass::run(IRModule& module) {
       stmtIndices.erase(std::unique(stmtIndices.begin(), stmtIndices.end()),
                         stmtIndices.end());
       if (stmtIndices.size() >= 2 && !nestedNodes.count(node)) {
-        candidates.push_back({node, stmtIndices.size()});
+        candidates.push_back({node, stmtIndices});
       }
     }
 
@@ -322,7 +431,8 @@ void CSEPass::run(IRModule& module) {
     // chosen extraction (and thus the emitted code) would depend on heap layout.
     std::sort(candidates.begin(), candidates.end(),
               [](const CSECandidate& a, const CSECandidate& b) {
-                if (a.stmtCount != b.stmtCount) return a.stmtCount > b.stmtCount;
+                if (a.stmts.size() != b.stmts.size())
+                  return a.stmts.size() > b.stmts.size();
                 return a.node->id < b.node->id;
               });
 
@@ -342,6 +452,12 @@ void CSEPass::run(IRModule& module) {
         }
       }
       if (!stillPresent) continue;
+
+      // Reject the candidate if any of the variables it reads is written
+      // between the definition point and a later use. `stmts` is sorted and
+      // deduplicated, so front() is where the definition would be inserted.
+      if (!usesAreStable(target, cand.stmts, cand.stmts.front(), writesPerStmt))
+        continue;
 
       // Create variable name
       std::string varName = "_cse_" + std::to_string(iteration) + "_" +
