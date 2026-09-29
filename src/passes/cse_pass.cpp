@@ -10,140 +10,13 @@
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
 #include "../ir/statement.h"
+#include "../ir/stmt_walk.h"
 
 namespace cse {
 
 // ===== Phase 1: Collect DAG nodes per statement =====
 
-// Walk a statement tree and collect all DAGNode* pointers that appear in
-// expression positions. Each node is recorded with the "root statement index"
-// (the index of the top-level statement in the block that contains it).
-static void collectNodesFromStmt(StmtIR* stmt,
-                                 std::unordered_set<DAGNode*>& out) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* block = static_cast<BlockIR*>(stmt);
-      for (auto& s : block->stmts) collectNodesFromStmt(s.get(), out);
-      break;
-    }
-    case StmtIRKind::VarDecl: {
-      auto* decl = static_cast<VarDeclIR*>(stmt);
-      if (decl->init) {
-        // Collect all nodes in the init expression
-        std::vector<DAGNode*> stack = {decl->init};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      break;
-    }
-    case StmtIRKind::Assign: {
-      auto* assign = static_cast<AssignIR*>(stmt);
-      if (assign->value) {
-        std::vector<DAGNode*> stack = {assign->value};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      break;
-    }
-    case StmtIRKind::ExprStmt: {
-      auto* exprStmt = static_cast<ExprStmtIR*>(stmt);
-      if (exprStmt->expr) {
-        std::vector<DAGNode*> stack = {exprStmt->expr};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      collectNodesFromStmt(f->init.get(), out);
-      if (f->cond) {
-        std::vector<DAGNode*> stack = {f->cond};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      if (f->update) {
-        std::vector<DAGNode*> stack = {f->update};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      if (f->updateRhs) {
-        std::vector<DAGNode*> stack = {f->updateRhs};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      collectNodesFromStmt(f->body.get(), out);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      if (ie->cond) {
-        std::vector<DAGNode*> stack = {ie->cond};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      collectNodesFromStmt(ie->thenBranch.get(), out);
-      collectNodesFromStmt(ie->elseBranch.get(), out);
-      break;
-    }
-    case StmtIRKind::Return: {
-      auto* ret = static_cast<ReturnIR*>(stmt);
-      if (ret->value) {
-        std::vector<DAGNode*> stack = {ret->value};
-        while (!stack.empty()) {
-          DAGNode* n = stack.back();
-          stack.pop_back();
-          if (out.insert(n).second) {
-            for (auto* op : n->operands) stack.push_back(op);
-          }
-        }
-      }
-      break;
-    }
-  }
-}
-
-// ===== Nested (conditionally executed) node collection =====
-// A subexpression that appears in a nested statement (inside an if/else/loop)
-// must not be hoisted to the top level by CSE: that would speculate the
-// computation. Such nodes are excluded from extraction.
-
+// Every node reachable from an expression root.
 static void collectExprNodes(DAGNode* root, std::unordered_set<DAGNode*>& out) {
   if (!root) return;
   std::vector<DAGNode*> stack = {root};
@@ -156,9 +29,50 @@ static void collectExprNodes(DAGNode* root, std::unordered_set<DAGNode*>& out) {
   }
 }
 
+// Walk a statement tree and collect every DAGNode* that appears in an
+// expression position, nested statements included. Each node is then recorded
+// with the index of the top-level statement that contains it.
+static void collectNodesFromStmt(StmtIR* stmt,
+                                 std::unordered_set<DAGNode*>& out) {
+  if (!stmt) return;
+  forEachExpr(stmt, [&](DAGNode*& e) { collectExprNodes(e, out); });
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      auto* block = static_cast<BlockIR*>(stmt);
+      for (auto& s : block->stmts) collectNodesFromStmt(s.get(), out);
+      break;
+    }
+    case StmtIRKind::ForLoop: {
+      auto* f = static_cast<ForLoopIR*>(stmt);
+      collectNodesFromStmt(f->init.get(), out);
+      collectNodesFromStmt(f->body.get(), out);
+      break;
+    }
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(stmt);
+      collectNodesFromStmt(ie->thenBranch.get(), out);
+      collectNodesFromStmt(ie->elseBranch.get(), out);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// ===== Nested (conditionally executed) node collection =====
+// A subexpression that appears in a nested statement (inside an if/else/loop)
+// must not be hoisted to the top level by CSE: that would speculate the
+// computation. Such nodes are excluded from extraction.
+
 static void collectNestedNodes(StmtIR* stmt, bool nested,
                                std::unordered_set<DAGNode*>& out) {
   if (!stmt) return;
+  // A loop owns its condition and update whatever the enclosing context is --
+  // they do not run once at the top level -- so those always count as nested.
+  // Everything else is nested only when the caller says so.
+  if (nested || stmt->kind == StmtIRKind::ForLoop) {
+    forEachExpr(stmt, [&](DAGNode*& e) { collectExprNodes(e, out); });
+  }
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
@@ -167,32 +81,17 @@ static void collectNestedNodes(StmtIR* stmt, bool nested,
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      if (nested) collectExprNodes(ie->cond, out);
       collectNestedNodes(ie->thenBranch.get(), true, out);
       collectNestedNodes(ie->elseBranch.get(), true, out);
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      // Loop internals are conservatively treated as nested.
-      collectExprNodes(f->cond, out);
-      collectExprNodes(f->update, out);
-      collectExprNodes(f->updateRhs, out);
       collectNestedNodes(f->init.get(), true, out);
       collectNestedNodes(f->body.get(), true, out);
       break;
     }
-    case StmtIRKind::ExprStmt:
-      if (nested) collectExprNodes(static_cast<ExprStmtIR*>(stmt)->expr, out);
-      break;
-    case StmtIRKind::Assign:
-      if (nested) collectExprNodes(static_cast<AssignIR*>(stmt)->value, out);
-      break;
-    case StmtIRKind::VarDecl:
-      if (nested) collectExprNodes(static_cast<VarDeclIR*>(stmt)->init, out);
-      break;
-    case StmtIRKind::Return:
-      if (nested) collectExprNodes(static_cast<ReturnIR*>(stmt)->value, out);
+    default:
       break;
   }
 }
@@ -258,48 +157,38 @@ static void replaceRefsInStmt(StmtIR* stmt, DAGNode* target,
     }
   };
 
+  // The lvalue of an element/member store is *written*, not evaluated: swapping
+  // it for a temporary would turn the store into a store to the temporary. Its
+  // index operands are ordinary expressions and are still replaced.
+  if (stmt->kind == StmtIRKind::Assign) {
+    auto* assign = static_cast<AssignIR*>(stmt);
+    if (assign->targetExpr)
+      // (by reference: the slot in the operand vector is what gets rewritten)
+      for (auto*& idx : assign->targetExpr->operands) replaceInExprTree(idx);
+  }
+  forEachExpr(stmt, [&](DAGNode*& e) { replaceInExprTree(e); },
+              /*includeLvalue=*/false);
+
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* block = static_cast<BlockIR*>(stmt);
       for (auto& s : block->stmts) replaceRefsInStmt(s.get(), target, replacement);
       break;
     }
-    case StmtIRKind::VarDecl: {
-      auto* decl = static_cast<VarDeclIR*>(stmt);
-      replaceInExprTree(decl->init);
-      break;
-    }
-    case StmtIRKind::Assign: {
-      auto* assign = static_cast<AssignIR*>(stmt);
-      replaceInExprTree(assign->value);
-      break;
-    }
-    case StmtIRKind::ExprStmt: {
-      auto* exprStmt = static_cast<ExprStmtIR*>(stmt);
-      replaceInExprTree(exprStmt->expr);
-      break;
-    }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
       replaceRefsInStmt(f->init.get(), target, replacement);
-      replaceInExprTree(f->cond);
-      replaceInExprTree(f->update);
-      replaceInExprTree(f->updateRhs);
       replaceRefsInStmt(f->body.get(), target, replacement);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      replaceInExprTree(ie->cond);
       replaceRefsInStmt(ie->thenBranch.get(), target, replacement);
       replaceRefsInStmt(ie->elseBranch.get(), target, replacement);
       break;
     }
-    case StmtIRKind::Return: {
-      auto* ret = static_cast<ReturnIR*>(stmt);
-      replaceInExprTree(ret->value);
+    default:
       break;
-    }
   }
 }
 

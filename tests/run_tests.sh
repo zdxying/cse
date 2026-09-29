@@ -69,13 +69,13 @@ cost_stage() {
 
 cost_stage "default" "" default \
   basic_cse=10 features=50 namespace_case=4 equilibrium_d3q19=84 \
-  safety_cases=20 parens=19 store_aware=18
+  safety_cases=20 parens=19 store_aware=20
 cost_stage "-r" "-r" r \
   recombine=21
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
-  parens=19 store_aware=18 float_identities=4
+  parens=19 store_aware=20 float_identities=4
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -94,6 +94,19 @@ for pat in "${!RECOMBINE_SHAPE[@]}"; do
   fi
 done
 (( shape_fail == 0 )) || exit 1
+
+# The index of a store is an expression slot like any other: when it is shared
+# with a second statement, CSE has to rewrite it on both sides. Counting the
+# uses of the extracted variable catches the failure mode where the lvalue is
+# collected but never substituted (or substituted only in the value).
+echo "=== store-aware shape checks ==="
+uses=$(grep -c "buf\[_cse_[0-9]*_[0-9]*\]" "$WORK/default/store_aware.cpp.cse" || true)
+if [[ "$uses" -eq 2 ]]; then
+  echo "ok    store index rewritten on both sides"
+else
+  echo "FAIL  store index: expected the extracted variable in 2 places, got $uses" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 2. numerical verifiers.

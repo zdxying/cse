@@ -8,6 +8,7 @@
 
 #include "../ir/dag_node.h"
 #include "../ir/ir_module.h"
+#include "../ir/stmt_walk.h"
 #include "../ir/statement.h"
 
 namespace cse {
@@ -51,48 +52,12 @@ void collectFreq(DAGNode* n, bool parentAdditive,
 }
 
 void collectFreqStmt(StmtIR* stmt, std::map<TermKey, int>& freq) {
-  if (!stmt) return;
-  auto visitExpr = [&](DAGNode* e) {
+  forEachExprDeep(stmt, [&](DAGNode*& e) {
     if (!e) return;
     std::set<TermKey> seen;
     collectFreq(e, false, seen);
     for (auto& k : seen) freq[k]++;
-  };
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) collectFreqStmt(s.get(), freq);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      collectFreqStmt(f->init.get(), freq);
-      visitExpr(f->cond);
-      visitExpr(f->update);
-      visitExpr(f->updateRhs);
-      collectFreqStmt(f->body.get(), freq);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      visitExpr(ie->cond);
-      collectFreqStmt(ie->thenBranch.get(), freq);
-      collectFreqStmt(ie->elseBranch.get(), freq);
-      break;
-    }
-    case StmtIRKind::ExprStmt:
-      visitExpr(static_cast<ExprStmtIR*>(stmt)->expr);
-      break;
-    case StmtIRKind::Assign:
-      visitExpr(static_cast<AssignIR*>(stmt)->value);
-      break;
-    case StmtIRKind::VarDecl:
-      visitExpr(static_cast<VarDeclIR*>(stmt)->init);
-      break;
-    case StmtIRKind::Return:
-      visitExpr(static_cast<ReturnIR*>(stmt)->value);
-      break;
-  }
+  });
 }
 
 class ReassociateVisitor {
@@ -104,46 +69,7 @@ class ReassociateVisitor {
   const std::map<TermKey, int>& freq;
 
   void visitStmt(StmtIR* stmt) {
-    if (!stmt) return;
-    switch (stmt->kind) {
-      case StmtIRKind::Block: {
-        auto* b = static_cast<BlockIR*>(stmt);
-        for (auto& s : b->stmts) visitStmt(s.get());
-        break;
-      }
-      case StmtIRKind::ForLoop: {
-        auto* f = static_cast<ForLoopIR*>(stmt);
-        visitStmt(f->init.get());
-        f->cond = rewrite(f->cond);
-        f->update = rewrite(f->update);
-        if (f->updateRhs) f->updateRhs = rewrite(f->updateRhs);
-        visitStmt(f->body.get());
-        break;
-      }
-      case StmtIRKind::IfElse: {
-        auto* ie = static_cast<IfElseIR*>(stmt);
-        ie->cond = rewrite(ie->cond);
-        visitStmt(ie->thenBranch.get());
-        visitStmt(ie->elseBranch.get());
-        break;
-      }
-      case StmtIRKind::ExprStmt:
-        if (auto* e = static_cast<ExprStmtIR*>(stmt)->expr)
-          static_cast<ExprStmtIR*>(stmt)->expr = rewrite(e);
-        break;
-      case StmtIRKind::Assign:
-        if (auto* v = static_cast<AssignIR*>(stmt)->value)
-          static_cast<AssignIR*>(stmt)->value = rewrite(v);
-        break;
-      case StmtIRKind::VarDecl:
-        if (auto* i = static_cast<VarDeclIR*>(stmt)->init)
-          static_cast<VarDeclIR*>(stmt)->init = rewrite(i);
-        break;
-      case StmtIRKind::Return:
-        if (auto* v = static_cast<ReturnIR*>(stmt)->value)
-          static_cast<ReturnIR*>(stmt)->value = rewrite(v);
-        break;
-    }
+    forEachExprDeep(stmt, [&](DAGNode*& e) { e = rewrite(e); });
   }
 
   DAGNode* rewrite(DAGNode* node) {

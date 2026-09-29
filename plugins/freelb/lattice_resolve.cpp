@@ -11,6 +11,7 @@
 #include "ir/dag_node.h"
 #include "ir/ir_module.h"
 #include "ir/statement.h"
+#include "ir/stmt_walk.h"
 
 namespace cse {
 namespace freelb {
@@ -119,49 +120,9 @@ class LatticeResolveVisitor {
   }
 
   void visitStmt(StmtIR* stmt) {
-    if (!stmt) return;
-    switch (stmt->kind) {
-      case StmtIRKind::Block: {
-        auto* b = static_cast<BlockIR*>(stmt);
-        for (auto& s : b->stmts) visitStmt(s.get());
-        break;
-      }
-      case StmtIRKind::ForLoop: {
-        auto* f = static_cast<ForLoopIR*>(stmt);
-        visitStmt(f->init.get());
-        f->cond = rewrite(f->cond);
-        f->update = rewrite(f->update);
-        if (f->updateRhs) f->updateRhs = rewrite(f->updateRhs);
-        visitStmt(f->body.get());
-        break;
-      }
-      case StmtIRKind::IfElse: {
-        auto* ie = static_cast<IfElseIR*>(stmt);
-        ie->cond = rewrite(ie->cond);
-        visitStmt(ie->thenBranch.get());
-        visitStmt(ie->elseBranch.get());
-        break;
-      }
-      case StmtIRKind::ExprStmt:
-        if (auto* e = static_cast<ExprStmtIR*>(stmt)->expr)
-          static_cast<ExprStmtIR*>(stmt)->expr = rewrite(e);
-        break;
-      case StmtIRKind::Assign:
-        if (auto* v = static_cast<AssignIR*>(stmt)->value)
-          static_cast<AssignIR*>(stmt)->value = rewrite(v);
-        break;
-      case StmtIRKind::VarDecl:
-        if (auto* i = static_cast<VarDeclIR*>(stmt)->init)
-          static_cast<VarDeclIR*>(stmt)->init = rewrite(i);
-        break;
-      case StmtIRKind::Return:
-        if (auto* v = static_cast<ReturnIR*>(stmt)->value)
-          static_cast<ReturnIR*>(stmt)->value = rewrite(v);
-        break;
-    }
+    forEachExprDeep(stmt, [&](DAGNode*& e) { e = rewrite(e); });
   }
 
-  // Index of the lattice call, as a compile-time integer, or -1.
   int constIndex(DAGNode* call) {
     if (!call || call->operands.size() < 2) return -1;
     DAGNode* idx = call->operands[1];

@@ -9,11 +9,9 @@
 #include "dag_node.h"
 #include "ir_module.h"
 #include "statement.h"
+#include "stmt_walk.h"
 
 namespace cse {
-
-// Count how many times each variable name is used across a StmtIR tree.
-inline std::unordered_map<std::string, int> countUses(StmtIR* root);
 
 namespace detail {
 
@@ -24,51 +22,16 @@ inline void countUsesExpr(DAGNode* e,
   for (auto* op : e->operands) countUsesExpr(op, counts);
 }
 
-inline void countUsesStmt(StmtIR* stmt,
-                          std::unordered_map<std::string, int>& counts) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) countUsesStmt(s.get(), counts);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      countUsesStmt(f->init.get(), counts);
-      countUsesExpr(f->cond, counts);
-      countUsesExpr(f->update, counts);
-      countUsesExpr(f->updateRhs, counts);
-      countUsesStmt(f->body.get(), counts);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      countUsesExpr(ie->cond, counts);
-      countUsesStmt(ie->thenBranch.get(), counts);
-      countUsesStmt(ie->elseBranch.get(), counts);
-      break;
-    }
-    case StmtIRKind::ExprStmt:
-      countUsesExpr(static_cast<ExprStmtIR*>(stmt)->expr, counts);
-      break;
-    case StmtIRKind::Assign:
-      countUsesExpr(static_cast<AssignIR*>(stmt)->value, counts);
-      break;
-    case StmtIRKind::VarDecl:
-      countUsesExpr(static_cast<VarDeclIR*>(stmt)->init, counts);
-      break;
-    case StmtIRKind::Return:
-      countUsesExpr(static_cast<ReturnIR*>(stmt)->value, counts);
-      break;
-  }
-}
-
 }  // namespace detail
 
+// Count how many times each variable name is used across a StmtIR tree.
+//
+// An element store counts its lvalue as a use of the root (and of its index
+// operands), which is what keeps a declaration that is only ever stored into
+// from looking unused.
 inline std::unordered_map<std::string, int> countUses(StmtIR* root) {
   std::unordered_map<std::string, int> counts;
-  detail::countUsesStmt(root, counts);
+  forEachExprDeep(root, [&](DAGNode*& e) { detail::countUsesExpr(e, counts); });
   return counts;
 }
 

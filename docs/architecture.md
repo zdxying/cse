@@ -82,7 +82,8 @@ struct CSEConfig {
 
   // 项目钩子（通用扩展点，`src/` 内无 FreeLB 语义）
   std::function<DAGNode*(IRModule&, const std::string&)> resolveName;  // 名字→常量
-  bool lowerVectors;                              // 把向量类型降级为分量标量
+  bool lowerVectors;                              // 把向量类型降级为分量标量（只影响
+                                                  // 向量代码，不改变普通语句的 IR 形状）
   int vectorDim;                                  // 向量维度（降级用）
   std::function<bool(const std::string&)> isVectorType;           // 类型判定
   std::function<bool(const std::string&)> isVectorProducingCall;  // 产生向量的调用
@@ -130,8 +131,11 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
    原则，只是作用于**标量变量**而非内存访问。
    **元素/成员写也要算写**：`a[i] = x;` / `p->f = x;` 写的是 lvalue 的**根**变量，
    两处扫描通过 `ir_utils.h:collectWrittenNames`（共用一份实现）把它记进写集合——
-   只记根是刻意的：可能有别的指针指向同一对象，此时"不知道有没有别名"只能取保守答案。
+   只记根是刻意的：可能有别的指针指向同一对象，此时"不知道是否有别名"只能取保守答案。
    `VarDecl` 不记入（它引入的是新名字，不是覆盖已有值）。
+   这类写在 IR 里是**结构化语句** `AssignIR`（`targetExpr` + `value`），不随
+   `lowerVectors` 变化——早先它只在向量降级路径下才结构化，于是默认档下是一段不透明
+   表达式，写集合漏掉了整类写。
 4. **支配安全**：出现在 `if`/`else`/循环内的子表达式标记为 nested，不参与顶层提取，
    避免把条件执行的计算提升为无条件计算。
 5. **作用域**：IRBuilder 维护作用域栈并对遮蔽变量 alpha-rename（如 `y__s1`），
@@ -349,13 +353,26 @@ return t;
 | `++k` / `--k` 前缀运算符 | 已支持 |
 | 模板函数调用 `latset::c<LatSet>(k)` | 已支持（作为不透明调用） |
 
-### 10. IR 工具函数 (ir_utils.h)
+### 10. IR 工具函数 (ir_utils.h / stmt_walk.h)
 
 提供 pass 通用的工具函数，不侵入 IRModule：
 
-- `countUses(root)` — 统计 StmtIR 树中每个变量名的使用次数
+- `forEachExpr(stmt, visit, includeLvalue=true)` —
+  **语句拥有的表达式槽位**，就地遍历（`stmt_walk.h`）。`Assign` 贡献两个槽位：
+  lvalue 与 value；引用语义允许改写。
+- `forEachExprDeep(stmt, visit, includeLvalue=true)` — 同上，含嵌套语句。
+- `countUses(root)` — 统计 StmtIR 树中每个变量名的使用次数（经 `forEachExprDeep`）
+- `lvalueRoot(node)` — lvalue 的根变量名（`a[i].m` → `a`）
+- `collectWrittenNames(stmt, out)` — 一条语句写了哪些名字（见「正确性与安全模型」第 3 条）
 - `substitute(mod, root, name, replacement)` — 在 DAG 子树中替换变量
 - `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数）
+
+**为什么要有 `stmt_walk.h`**：表达式槽位的清单原先在约十个 pass 里各写一遍
+（`countUses`、DCE、五个重写型 pass、CSE 的三处收集/替换、cost model），
+每次新增一个槽位都要同步十来处，`AssignIR::targetExpr` 就是这么被漏掉的。
+现在清单只有一份；新增语句种类或槽位时只改 `forEachExpr`。
+`includeLvalue=false` 只给一个调用者用：CSEPass 不能把 lvalue 换成临时变量
+（那会把"写某个位置"变成"写临时变量"），所以它显式排除该槽位、只替换索引里的子表达式。
 
 ### 11. 构建系统
 
@@ -451,12 +468,12 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（6→4 flops） |
 | `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（228→84 flops） |
 | `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（20→20，验证不劣化） |
-| `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（18→15 flops） |
+| `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（18→21 flops） |
 | `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
 | `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
 | `tests/verify/verify_recombine.cpp` | `-r` 输出的差分执行校验（数值等价 + 副作用出现次数） |
 | `tests/fixtures/parens.cpp` | 括号保持：右子节点在等高优先级时必须保留括号（默认档 + `-s` 档，19 flops） |
-| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名（14 flops） |
+| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名；成员、箭头、元素写；只写不读的局部必须活过 DCE；共享索引要两侧同时改写（20 flops） |
 | `tests/fixtures/float_identities.cpp` | `-s` 档必须保留 0 / ±inf / NaN 处的 IEEE 语义（4 flops） |
 | `tests/verify/verify_parens.cpp` | 括号保持的差分执行校验（覆盖 `-` `/` `*` `%` 的各种右子节点） |
 | `tests/verify/verify_store_aware.cpp` | 跨 store 重写的差分执行校验（含**真别名**调用） |
@@ -468,7 +485,10 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、
 > float_identities），而非 golden-diff。注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变
-> flops，`a*x ± a` 的提取也是 FLOP 中性的——这两类只能靠数值验证器或生成文本的形状检查。
+> flops，`a*x ± a` 的提取是 FLOP 中性的，跨成员写的错误共享也恰好省下同样的 flops
+> （store_aware 修复前后是同一个数）——这三类只能靠数值验证器或生成文本的形状检查。
+> FreeLB 侧 `verify_*.py` 是**数值**校验：解析两个文件、按公式求值再逐个比较，
+> 不做文本比对（所以重命名 `_cse_*` 这类内部标识符它发现不了）。
 > 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归（默认档 + `-r` 档 + `-s` 档）→ 数值校验 → `csegen`
 > 冒烟；`check_lattice.py` 与 FreeLB 侧 `verify_*.py` 仅在存在 FreeLB checkout
 > （`FREELB=` 或 `~/FreeLB`）时运行，否则跳过。

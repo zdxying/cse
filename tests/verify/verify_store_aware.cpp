@@ -90,6 +90,19 @@ int main() {
   double dst[1] = {0.0};
   check("cse_other_object", cse_other_object(pr3, 2.0, dst), 6.0 + 6.0);
 
+  // ---- What the representation change has to preserve --------------------
+  // `p` is only ever stored into. The declaration has to survive DCE, which is
+  // also what proves the lvalue counts as a use of the root: drop it and this
+  // file does not compile.
+  check("element_decl", element_decl(3.0), 3.0);
+
+  // A shared index gets one extracted definition that serves both the store and
+  // the load. If only one side is rewritten, the other keeps computing it (and
+  // the generated code may reference a variable that was never declared).
+  double ebuf[4] = {0.0, 0.0, 0.0, 0.0};
+  check("element_index", element_index(ebuf, 1, 5.0), 5.0);
+  checkInt("element_index store", ebuf[2] == 5.0 ? 1 : 0, 1);
+
   std::printf(failures == 0 ? "\nALL STORE-AWARE CHECKS PASSED\n"
                             : "\n%d STORE-AWARE CHECK(S) FAILED\n",
               failures);

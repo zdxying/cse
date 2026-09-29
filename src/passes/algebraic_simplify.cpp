@@ -8,6 +8,7 @@
 
 #include "../ir/ir_module.h"
 #include "../ir/statement.h"
+#include "../ir/stmt_walk.h"
 
 namespace cse {
 
@@ -45,50 +46,7 @@ class AlgebraicSimplifyVisitor {
   bool fpReassoc_;
 
   void visitStmt(StmtIR* stmt) {
-    if (!stmt) return;
-    switch (stmt->kind) {
-      case StmtIRKind::Block: {
-        auto* block = static_cast<BlockIR*>(stmt);
-        for (auto& s : block->stmts) visitStmt(s.get());
-        break;
-      }
-      case StmtIRKind::ForLoop: {
-        auto* forLoop = static_cast<ForLoopIR*>(stmt);
-        visitStmt(forLoop->init.get());
-        forLoop->cond = simplify(forLoop->cond);
-        forLoop->update = simplify(forLoop->update);
-        if (forLoop->updateRhs) forLoop->updateRhs = simplify(forLoop->updateRhs);
-        visitStmt(forLoop->body.get());
-        break;
-      }
-      case StmtIRKind::IfElse: {
-        auto* ifElse = static_cast<IfElseIR*>(stmt);
-        ifElse->cond = simplify(ifElse->cond);
-        visitStmt(ifElse->thenBranch.get());
-        visitStmt(ifElse->elseBranch.get());
-        break;
-      }
-      case StmtIRKind::ExprStmt: {
-        auto* exprStmt = static_cast<ExprStmtIR*>(stmt);
-        if (exprStmt->expr) exprStmt->expr = simplify(exprStmt->expr);
-        break;
-      }
-      case StmtIRKind::Assign: {
-        auto* assign = static_cast<AssignIR*>(stmt);
-        if (assign->value) assign->value = simplify(assign->value);
-        break;
-      }
-      case StmtIRKind::VarDecl: {
-        auto* decl = static_cast<VarDeclIR*>(stmt);
-        if (decl->init) decl->init = simplify(decl->init);
-        break;
-      }
-      case StmtIRKind::Return: {
-        auto* ret = static_cast<ReturnIR*>(stmt);
-        if (ret->value) ret->value = simplify(ret->value);
-        break;
-      }
-    }
+    forEachExprDeep(stmt, [&](DAGNode*& e) { e = simplify(e); });
   }
 
   DAGNode* simplify(DAGNode* node) {

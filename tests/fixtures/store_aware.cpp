@@ -139,3 +139,29 @@ double cse_other_object(Pair p, double x, double* q) {
   double w = p.a * x;
   return u + w;
 }
+
+// ---- What the representation change has to preserve --------------------
+//
+// These two pin the parts of the lvalue slot that are easy to lose when a store
+// stops being an opaque expression: the root is a *use* of the variable, and the
+// index is an ordinary expression that still gets optimized.
+
+// `p` is only ever written, never read -- the returned value does not touch it.
+// If an element store stops counting its root as a use, DCE drops the
+// declaration and the generated code refers to an undeclared variable.
+//@cse
+double element_decl(double v) {
+  Pair p;
+  p.a = v;
+  p.b = 2.0 * v;
+  return v;
+}
+
+// The index of a store is an ordinary expression slot: when it is shared with
+// another statement it must be collected and rewritten exactly like a value
+// operand, so that one definition serves both uses (and both uses point at it).
+//@cse
+double element_index(double* buf, int i, double v) {
+  buf[i * 2] = v;
+  return buf[i * 2];
+}

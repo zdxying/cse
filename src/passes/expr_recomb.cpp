@@ -6,6 +6,7 @@
 
 #include "../ir/ir_module.h"
 #include "../ir/statement.h"
+#include "../ir/stmt_walk.h"
 
 namespace cse {
 
@@ -21,50 +22,7 @@ class ExprRecombineVisitor {
   bool commutative_;
 
   void visitStmt(StmtIR* stmt) {
-    if (!stmt) return;
-    switch (stmt->kind) {
-      case StmtIRKind::Block: {
-        auto* block = static_cast<BlockIR*>(stmt);
-        for (auto& s : block->stmts) visitStmt(s.get());
-        break;
-      }
-      case StmtIRKind::ForLoop: {
-        auto* forLoop = static_cast<ForLoopIR*>(stmt);
-        visitStmt(forLoop->init.get());
-        forLoop->cond = rewrite(forLoop->cond);
-        forLoop->update = rewrite(forLoop->update);
-        if (forLoop->updateRhs) forLoop->updateRhs = rewrite(forLoop->updateRhs);
-        visitStmt(forLoop->body.get());
-        break;
-      }
-      case StmtIRKind::IfElse: {
-        auto* ifElse = static_cast<IfElseIR*>(stmt);
-        ifElse->cond = rewrite(ifElse->cond);
-        visitStmt(ifElse->thenBranch.get());
-        visitStmt(ifElse->elseBranch.get());
-        break;
-      }
-      case StmtIRKind::ExprStmt: {
-        auto* exprStmt = static_cast<ExprStmtIR*>(stmt);
-        if (exprStmt->expr) exprStmt->expr = rewrite(exprStmt->expr);
-        break;
-      }
-      case StmtIRKind::Assign: {
-        auto* assign = static_cast<AssignIR*>(stmt);
-        if (assign->value) assign->value = rewrite(assign->value);
-        break;
-      }
-      case StmtIRKind::VarDecl: {
-        auto* decl = static_cast<VarDeclIR*>(stmt);
-        if (decl->init) decl->init = rewrite(decl->init);
-        break;
-      }
-      case StmtIRKind::Return: {
-        auto* ret = static_cast<ReturnIR*>(stmt);
-        if (ret->value) ret->value = rewrite(ret->value);
-        break;
-      }
-    }
+    forEachExprDeep(stmt, [&](DAGNode*& e) { e = rewrite(e); });
   }
 
   DAGNode* rewrite(DAGNode* node) {

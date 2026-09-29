@@ -369,12 +369,18 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       return assign;
     }
     case StmtKind::ExprStmt: {
-      // Array/member element assignment: keep it as a statement so that the
-      // CSE/value-prop passes never treat the '=' (or its lvalue loads) as a
-      // hoistable expression.
-      if (_config.lowerVectors && stmt.expr &&
-          stmt.expr->kind == ExprKind::BinaryOp && stmt.expr->isAssignment &&
-          stmt.expr->op == '=' && stmt.expr->lhs &&
+      // Element / member assignment (`a[i] = v;`, `p->f = v;`) is a statement in
+      // its own right: it is a *write* through its lvalue, so no pass may treat
+      // the '=' or the lvalue as a hoistable expression, and it owns two
+      // expressions -- the lvalue, whose index is ordinary arithmetic, and the
+      // value being stored.
+      //
+      // This used to be gated on CSEConfig::lowerVectors, a vector-lowering
+      // switch that has nothing to do with assignment. In the default profile
+      // such a store therefore stayed an opaque BinaryOp('=') inside an
+      // ExprStmt, where every analysis that looks for writes failed to see it.
+      if (stmt.expr && stmt.expr->kind == ExprKind::BinaryOp &&
+          stmt.expr->isAssignment && stmt.expr->op == '=' && stmt.expr->lhs &&
           stmt.expr->lhs->kind != ExprKind::Variable) {
         auto assign = std::make_unique<AssignIR>();
         assign->targetExpr = buildExpr(*stmt.expr->lhs);

@@ -7,6 +7,7 @@
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
 #include "../ir/statement.h"
+#include "../ir/stmt_walk.h"
 
 namespace cse {
 
@@ -140,46 +141,7 @@ void walkStmt(StmtIR* stmt,
 // Apply substitutions to all expressions in a statement tree.
 void applyProp(StmtIR* stmt, IRModule& mod,
                const std::unordered_map<std::string, DAGNode*>& defs) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) applyProp(s.get(), mod, defs);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      applyProp(f->init.get(), mod, defs);
-      if (f->cond) f->cond = propExpr(f->cond, mod, defs);
-      if (f->update) f->update = propExpr(f->update, mod, defs);
-      if (f->updateRhs) f->updateRhs = propExpr(f->updateRhs, mod, defs);
-      applyProp(f->body.get(), mod, defs);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      if (ie->cond) ie->cond = propExpr(ie->cond, mod, defs);
-      applyProp(ie->thenBranch.get(), mod, defs);
-      applyProp(ie->elseBranch.get(), mod, defs);
-      break;
-    }
-    case StmtIRKind::ExprStmt:
-      if (auto* e = static_cast<ExprStmtIR*>(stmt)->expr)
-        static_cast<ExprStmtIR*>(stmt)->expr = propExpr(e, mod, defs);
-      break;
-    case StmtIRKind::Assign:
-      if (auto* v = static_cast<AssignIR*>(stmt)->value)
-        static_cast<AssignIR*>(stmt)->value = propExpr(v, mod, defs);
-      break;
-    case StmtIRKind::VarDecl:
-      if (auto* i = static_cast<VarDeclIR*>(stmt)->init)
-        static_cast<VarDeclIR*>(stmt)->init = propExpr(i, mod, defs);
-      break;
-    case StmtIRKind::Return:
-      if (auto* v = static_cast<ReturnIR*>(stmt)->value)
-        static_cast<ReturnIR*>(stmt)->value = propExpr(v, mod, defs);
-      break;
-  }
+  forEachExprDeep(stmt, [&](DAGNode*& e) { e = propExpr(e, mod, defs); });
 }
 
 // Remove inlined VarDecls from a block.
