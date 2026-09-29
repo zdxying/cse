@@ -7,7 +7,8 @@ class IRModule;
 
 // Base class for all optimization passes.
 // Passes operate on IRModule (DAG nodes + structured statements).
-// Pipeline: CSE → AlgebraicSimplify → ExprRecombine (optional).
+// The pipeline itself is assembled in PassManager::createDefault(); see
+// docs/architecture.md for the order and the gating of each stage.
 class Pass {
  public:
   virtual ~Pass() = default;

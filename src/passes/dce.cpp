@@ -103,6 +103,10 @@ bool pruneBlock(BlockIR* block, const std::unordered_map<std::string, int>& uses
 }  // namespace
 
 void DCEPass::run(IRModule& module) {
+  // Only a top-level block is pruned. IRBuilder guarantees that shape, but the
+  // cast below would be undefined behaviour on anything else, so check it.
+  if (!module.body || module.body->kind != StmtIRKind::Block) return;
+
   // Iterate until no more dead code is found
   for (int iter = 0; iter < 10; ++iter) {
     std::unordered_map<std::string, int> uses;
