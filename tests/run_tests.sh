@@ -2,9 +2,13 @@
 # Engine regression tests. Run via `make test` (binaries must be built).
 #
 #  1. cost regression : optimize each //@cse fixture and check the post-pass
-#                       FLOP count against the expected value
+#                       FLOP count against the expected value. This runs under
+#                       three configurations -- default, -r (recombination) and
+#                       -s (conservative) -- because several defects only show
+#                       up under a specific one. Each stage writes into its own
+#                       subdirectory so the generated headers stay separate.
 #  2. numerical       : compile/run the verifiers against freshly generated
-#                       output for the equilibrium and safety fixtures
+#                       output, plus the library-level CSEConfig contract test
 #  3. csegen          : generate tests/csegen/*.h fragments and sanity-check
 #                       that representative specializations were emitted
 #  4. FreeLB (opt.)   : if a FreeLB checkout is available (FREELB=... or
@@ -32,45 +36,110 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# fixture (in tests/fixtures) -> expected post-pass FLOP count
-declare -A EXPECTED=(
-  [basic_cse]=10
-  [features]=50
-  [namespace_case]=4
-  [equilibrium_d3q19]=84
-  [safety_cases]=20
-)
-# Keep a deterministic order (associative array iteration is unspecified).
-FIXTURE_ORDER=(
-  basic_cse features namespace_case equilibrium_d3q19 safety_cases
-)
+# ---------------------------------------------------------------------------
+# 1. cost regression: one stage per configuration.
+#    $1 label  $2 extra cse flags  $3 output subdirectory
+#    remaining args: fixture=expected-flops
+# ---------------------------------------------------------------------------
+cost_stage() {
+  local label="$1" flags="$2" dir="$3"
+  shift 3
+  local out="$WORK/$dir"
+  mkdir -p "$out"
+  echo "=== cost regression ($label) ==="
+  local fail=0 pair name want src got
+  for pair in "$@"; do
+    name="${pair%%=*}"
+    want="${pair#*=}"
+    src="$out/$name.cpp"
+    cp "$FIXTURES/$name.cpp" "$src"
+    # A single `-c` run optimizes, writes $src.cse (used by the verifiers below)
+    # and reports the cost.
+    # shellcheck disable=SC2086
+    got="$("$CSE" "$src" $flags -c 2>&1 | sed -n 's/.*After: *\([0-9]*\) flops.*/\1/p')"
+    if [[ "$got" == "$want" ]]; then
+      echo "ok    $name ($got flops)"
+    else
+      echo "FAIL  $name: got $got flops, want $want"
+      fail=1
+    fi
+  done
+  (( fail == 0 )) || exit 1
+}
 
-echo "=== cost regression ==="
-cost_fail=0
-for name in "${FIXTURE_ORDER[@]}"; do
-  src="$WORK/$name.cpp"
-  cp "$FIXTURES/$name.cpp" "$src"
-  # A single `-c` run optimizes, writes $src.cse (used by the verifiers below)
-  # and reports the cost.
-  got="$("$CSE" "$src" -c 2>&1 | sed -n 's/.*After: *\([0-9]*\) flops.*/\1/p')"
-  want="${EXPECTED[$name]}"
-  if [[ "$got" == "$want" ]]; then
-    echo "ok    $name ($got flops)"
+cost_stage "default" "" default \
+  basic_cse=10 features=50 namespace_case=4 equilibrium_d3q19=84 \
+  safety_cases=20 parens=19 store_aware=14
+cost_stage "-r" "-r" r \
+  recombine=21
+# Several defects only appear once the aggressive passes are off, so the
+# conservative profile needs its own stage.
+cost_stage "-s" "-s" s \
+  parens=19 store_aware=14 float_identities=4
+
+# The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
+# above cannot detect their loss; check the generated shape directly.
+echo "=== recombination shape checks (-r) ==="
+declare -A RECOMBINE_SHAPE=(
+  ["a * (1 + x)"]="a*x + a factored"
+  ["a * (x - 1)"]="a*x - a factored"
+)
+shape_fail=0
+for pat in "${!RECOMBINE_SHAPE[@]}"; do
+  if grep -qF "$pat" "$WORK/r/recombine.cpp.cse"; then
+    echo "ok    ${RECOMBINE_SHAPE[$pat]}"
   else
-    echo "FAIL  $name: got $got flops, want $want"
-    cost_fail=1
+    echo "FAIL  ${RECOMBINE_SHAPE[$pat]}: '$pat' missing from the generated output"
+    shape_fail=1
   fi
 done
-(( cost_fail == 0 )) || exit 1
+(( shape_fail == 0 )) || exit 1
+
+# ---------------------------------------------------------------------------
+# 2. numerical verifiers.
+#    $1 name  $2 verifier source  $3 expected banner  $4 include dir
+# ---------------------------------------------------------------------------
+run_verifier() {
+  local name="$1" src="$2" banner="$3" inc="$4"
+  "$CXX" -std=c++17 -O2 -I"$inc" "$VERIFY/$src" -o "$WORK/v_$name"
+  if "$WORK/v_$name" | grep -q "$banner"; then
+    echo "ok    $name"
+  else
+    echo "FAIL  $name" >&2
+    "$WORK/v_$name" || true
+    exit 1
+  fi
+}
 
 echo "=== numerical verifiers ==="
-"$CXX" -std=c++17 -O2 -I"$WORK" "$VERIFY/verify_equilibrium.cpp" -o "$WORK/ve"
-"$WORK/ve" | grep -q "max abs error"
-echo "ok    equilibrium"
-"$CXX" -std=c++17 -O2 -I"$WORK" "$VERIFY/verify_safety.cpp" -o "$WORK/vs"
-"$WORK/vs" | grep -q "ALL SAFETY CHECKS PASSED"
-echo "ok    safety"
+run_verifier "equilibrium" verify_equilibrium.cpp "max abs error" "$WORK/default"
+run_verifier "safety" verify_safety.cpp "ALL SAFETY CHECKS PASSED" "$WORK/default"
+run_verifier "parens" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/default"
+run_verifier "store_aware" verify_store_aware.cpp "ALL STORE-AWARE CHECKS PASSED" \
+  "$WORK/default"
+# The same two fixtures generated by the conservative profile.
+run_verifier "parens_safe" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/s"
+run_verifier "store_aware_safe" verify_store_aware.cpp \
+  "ALL STORE-AWARE CHECKS PASSED" "$WORK/s"
+# These identities are only licensed by the default profile, so the conservative
+# output is what can be checked numerically.
+run_verifier "float_identities" verify_float_identities.cpp \
+  "ALL FLOAT-IDENTITY CHECKS PASSED" "$WORK/s"
+run_verifier "recombine" verify_recombine.cpp "ALL RECOMBINE CHECKS PASSED" "$WORK/r"
 
+# Library-level CSEConfig contract: the flags added for the unsafe floating-point
+# identities and for multiplication regrouping are not reachable from the CLI,
+# which only offers "everything on" (the FreeLB profile) or "everything off"
+# (-s).
+echo "=== config contract ==="
+"$CXX" -std=c++17 -O2 -I"$ROOT/src" "$VERIFY/verify_config.cpp" \
+  "$ROOT/bin/libcse.a" -o "$WORK/v_config"
+"$WORK/v_config" | grep -q "ALL CONFIG CHECKS PASSED"
+echo "ok    config"
+
+# ---------------------------------------------------------------------------
+# 3. csegen smoke
+# ---------------------------------------------------------------------------
 echo "=== csegen smoke ==="
 # fixture base name -> a specialization that must appear in the generated output
 declare -A CSEGEN_EXPECT=(
@@ -91,6 +160,9 @@ for base in equilibrium force moment; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# 4. FreeLB (optional)
+# ---------------------------------------------------------------------------
 if [[ -d "$FREELB/src/lbm" && -f "$FREELB/tools/cse/verify_moment.py" ]]; then
   echo "=== lattice table drift guard ($FREELB) ==="
   python3 "$VERIFY/check_lattice.py" --freelb "$FREELB"
