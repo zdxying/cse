@@ -41,8 +41,10 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
   namespace / `CELL<T,LatSet<T>,TypePack>` 偏特化 / 6 个 latset）。
 - 前端保真：保留 `static`/`inline`/`const` 与引用 `&`（lexer 增 `Amp`，
   `parseType` 修复前缀与引用）。
-- `CSEConfig` per-latset 上下文（`latsetAlias/latsetName/latsetDim/latsetQ/latsetCs2`）：
-  `<LatSet>::q/d/cs2/InvCs2/InvCs4` 折叠为常量。
+- per-latset 上下文：`plugins/freelb/config.h` 的 `LatticeConfig`
+  （`alias/name/dim/q/cs2`）经 `createFreeLBConfig(latCfg)` 注入钩子，
+  `<LatSet>::q/d/cs2/InvCs2/InvCs4` 折叠为常量。**`CSEConfig` 本身不含任何 latset 字段**
+  （见第 7 节）。
 - `plugins/freelb/lattice_resolve`：全部 6 个 latset、按别名解析
   `latset::c<LatSet>/w<LatSet>`、权重符号规范化为 `latset::w<LatSet>(k)`。
 - `CodeGen::generateBody`：仅发射方法体。
@@ -87,8 +89,10 @@ FreeLB `dev-cse` 分支中 `tools/cse` 的旧解释器/优化器。
 | `verify_moment.py` | 60/60 |
 | `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
 | `verify_equilibrium.py` | PASS |
-| 引擎 FLOP 回归 `tests/fixtures/*` | `basic_cse` 10 / `features` 50 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 20 flops |
-| 引擎数值校验 `tests/verify/{verify_equilibrium,verify_safety}.cpp` | 误差阈值内 / ALL SAFETY CHECKS PASSED |
+| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 50 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 20 / `parens` 19 / `store_aware` 14 flops |
+| 引擎 FLOP 回归（`-r` 档） | `recombine` 21 flops |
+| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 14 / `float_identities` 4 flops |
+| 引擎数值校验 `tests/verify/verify_*.cpp` | equilibrium / safety / recombine / parens / store_aware / float_identities 全通过；`verify_config.cpp` 覆盖库层 `CSEConfig` 契约 |
 | `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化 |
 | `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
 
@@ -100,7 +104,8 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 - CLI：`csegen <input.h> <output.h>`；`input` basename 决定 include/namespace
   （仅 `moment.h`/`equilibrium.h`/`force.h`）。
 - `CSEConfig`（`src/frontend/cse_config.h`，通用，无 FreeLB 语义）：
-  - `assumeNumericCommutative/Associative`、`allowFpReassoc`、`noAlias`、`isPureFunction`
+  - `assumeNumericCommutative/Associative`、`allowFpReassoc`、`allowUnsafeFpIdentities`、
+    `noAlias`、`isPureFunction`
   - 钩子：`resolveName`、`lowerVectors` + `vectorDim/isVectorType/isVectorProducingCall`、
     `vectorLocalName`、`constBindings`
 - `plugins/freelb/config.h`：`LatticeConfig`、`resolveLatsetConst`、
@@ -108,7 +113,8 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 - `PassManager::createDefault(config, recombine, resolvePass, postAlgebraPass)`：
   插件在此注入 `LatticeResolvePass` 与 `CounterPropPass`。
 - `plugins/freelb/ur_emit.{h,cpp}`：`generateUrHeader(in,out)`、`detectUrConfig`。
-- `plugins/freelb/lattice_resolve.{h,cpp}`：`createLatticeResolvePass(config)`。
+- `plugins/freelb/lattice_resolve.{h,cpp}`：`createLatticeResolvePass(alias, setName)`
+  （默认两者皆空；`csegen` 传 `("LatSet", lat.name)`）。
 - 结构体分类（`ur_emit.cpp`）：`Cell` / `CellType` / `TLatSet` / `TLatSetD`。
 
 ## 4. 未完成 / TODO

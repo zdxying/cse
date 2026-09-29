@@ -95,16 +95,27 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 
 ## 安全模型
 
-在保守模式下（`-s`，也是 `CSEConfig` 的默认值），优化通过五条机制保证行为等价：
+在保守模式下（`-s`，也是 `CSEConfig` 的默认值），优化通过六条机制保证行为等价：
 
-1. **纯度**：调用默认视为有副作用，只有登记为纯的调用才允许去重或跨语句提取。
+1. **纯度**：调用默认视为有副作用，只有登记为纯的调用才允许去重或跨语句提取；
+   任何"把两处出现折叠为一处"的重写都要求被折叠的子表达式是纯的。
 2. **内存**：只有只读根的 load 可共享；可变/未知根的 load 每次独立，避免跨 store 复用。
-3. **支配**：位于 `if`/`else`/循环内的表达式标记为 nested，绝不外提。
-4. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
-5. **展开前提**：只有当循环体声明的每个局部变量都能被内联消除时才展开，否则保留循环。
+   **`const T*` 形参不再自动视为只读根**——`const` 只承诺"不通过它写"；
+   需要显式打开 `noAlias` 才恢复共享。
+3. **赋值可见性**：变量按名字驻留，重新赋值不产生新节点，同名子表达式仍是**同一个节点**。
+   因此跨语句改写必须检查写操作：CSE 只在"定义点到每个使用点之间都没有写入其操作数"时
+   才提取；值传播只内联"初值依赖的变量在整个函数内都没被写过"的定义。
+4. **支配**：位于 `if`/`else`/循环内的表达式标记为 nested，绝不外提。
+5. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
+6. **展开前提**：只有当循环体声明的每个局部变量都能被内联消除时才展开，否则保留循环。
 
-代数规则（`a*1`、交换律、重结合）需要 `assumeNumericCommutative` /
-`assumeNumericAssociative`，浮点重结合还额外需要 `allowFpReassoc`。
+代码生成还会**原样打印它拿到的树**：同优先级的右子节点一律保留括号——IEEE-754 下不仅
+`a - (b - c)`、`a / (b * c)` 不等于去括号的形式，连 `a * (b * c)` 与 `(a * b) * c`
+的舍入也不同。
+
+代数规则按授权类型分开：交换律/结合律用 `assumeNumericCommutative` /
+`assumeNumericAssociative`，浮点重排（加法重结合、乘法链重排）用 `allowFpReassoc`，
+特殊值恒等（`x*0`、`x-x`、`0/x`、`x/x`）用 `allowUnsafeFpIdentities`。
 
 ## 测试
 
@@ -112,8 +123,9 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 
 | 阶段 | 检查内容 |
 |------|----------|
-| 代价回归 | `tests/fixtures/` 下五个夹具的 FLOP 计数 |
-| 数值校验 | `verify_equilibrium` 与 `verify_safety` 编译并运行生成代码 |
+| 代价回归 | `tests/fixtures/` 下各夹具的 FLOP 计数，分三档执行（默认 / `-r` / `-s`） |
+| 数值校验 | `verify_*` 编译并运行生成代码（equilibrium、safety、recombine、parens、store_aware、float_identities） |
+| 配置契约 | `verify_config.cpp` 链接 `libcse.a`，钉住 CLI 无法隔离的 `CSEConfig` 开关行为 |
 | `csegen` 冒烟 | 生成头中出现预期的代表性特化 |
 | latset 表防漂移 | 引擎表 vs FreeLB `lattice_set.h`（无 FreeLB checkout 时跳过） |
 | FreeLB 验证脚本 | `verify_{moment,equilibrium,force}.py`（无 FreeLB checkout 时跳过） |

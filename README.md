@@ -108,22 +108,40 @@ the build entry points and the current status.
 ## Safety model
 
 In conservative mode (`-s`, and the `CSEConfig` defaults), optimization
-preserves behavior through five mechanisms:
+preserves behavior through six mechanisms:
 
 1. **Purity** — calls are assumed to have side effects; only calls registered as
-   pure may be deduplicated or hoisted across statements.
+   pure may be deduplicated or hoisted across statements. Any rewrite that
+   collapses two occurrences into one requires the collapsed subexpression to be
+   pure.
 2. **Memory** — loads from read-only roots may be shared; loads from writable or
    unknown roots are kept independent so nothing is reused across a store.
-3. **Dominance** — expressions computed inside `if`/`else`/loops are marked
+   `const T*` parameters get no special treatment: `const` only promises the
+   pointee is not written *through that pointer*. Opt in to `noAlias` to share
+   them.
+3. **Store visibility** — variables are interned by name, so reassigning one does
+   not create a new node and two identical subexpressions remain the *same* node.
+   Cross-statement rewrites therefore check for intervening writes: CSE only
+   hoists a subexpression when none of its operands is written between the
+   definition point and every later use, and value propagation only inlines an
+   initializer whose variables are never written anywhere in the function.
+4. **Dominance** — expressions computed inside `if`/`else`/loops are marked
    nested and never lifted out.
-4. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
+5. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
    with the same name are never merged.
-5. **Loop unrolling precondition** — a loop is only unrolled when every local it
+6. **Loop unrolling precondition** — a loop is only unrolled when every local it
    declares can be inlined away; otherwise the loop stays.
 
-Algebraic rules (`a*1`, commutativity, reassociation) require
-`assumeNumericCommutative` / `assumeNumericAssociative`, and floating-point
-reassociation additionally requires `allowFpReassoc`.
+The code generator also always prints the tree it was given: a right child at
+equal precedence keeps its parentheses, because under IEEE-754 not only
+`a - (b - c)` and `a / (b * c)` but even `a * (b * c)` differ from the
+un-parenthesised form.
+
+Algebraic rules are opt-in per licence: commutativity/associativity via
+`assumeNumericCommutative` / `assumeNumericAssociative`, floating-point
+reassociation (additive and multiplicative regrouping) via `allowFpReassoc`, and
+the special-value identities (`x*0`, `x-x`, `0/x`, `x/x`) via
+`allowUnsafeFpIdentities`.
 
 ## Tests
 
@@ -131,8 +149,9 @@ reassociation additionally requires `allowFpReassoc`.
 
 | Stage | What it checks |
 |-------|----------------|
-| Cost regression | FLOP counts for the five fixtures in `tests/fixtures/` |
-| Numerical | `verify_equilibrium` and `verify_safety` compile and run generated output |
+| Cost regression | FLOP counts for the fixtures in `tests/fixtures/`, run under three configurations (default, `-r`, `-s`) |
+| Numerical | `verify_*` compile and run generated output (equilibrium, safety, recombine, parens, store_aware, float_identities) |
+| Config contract | `verify_config.cpp` links `libcse.a` and pins the `CSEConfig` switch behaviour the CLI cannot isolate |
 | `csegen` smoke | representative specializations appear in generated headers |
 | Lattice drift guard | engine tables vs FreeLB `lattice_set.h` (skipped without a FreeLB checkout) |
 | FreeLB verifiers | `verify_{moment,equilibrium,force}.py` (skipped without a FreeLB checkout) |
