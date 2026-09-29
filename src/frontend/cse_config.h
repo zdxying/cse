@@ -40,9 +40,19 @@ struct CSEConfig {
   // Only meaningful when assumeNumericAssociative is true.
   bool allowFpReassoc = false;
 
-  // Assume that distinct pointer/array parameters do not alias. When false,
-  // any call that may write memory is treated as writing through every
-  // non-const pointer.
+  // Allow the "field" identities that hold only when no operand is a
+  // floating-point special value:
+  //   x / x -> 1   and   0 / x -> 0    (both need x != 0)
+  //   x - x -> 0   and   x * 0 -> 0    (both need x finite, i.e. not inf/NaN)
+  // Commutativity and associativity do not imply these: they additionally
+  // require division to be total and the expressions to stay finite. Off by
+  // default.
+  bool allowUnsafeFpIdentities = false;
+
+  // Assume that distinct pointer/array parameters do not alias. When false, no
+  // load through a pointer/array parameter is shareable -- including through a
+  // `const T*`, which promises only that the pointee is not written *through
+  // that pointer*. See IRBuilder::isReadOnlyRoot.
   bool noAlias = false;
 
   // Predicate deciding whether a function call is pure (no side effects, result

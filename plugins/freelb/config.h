@@ -63,6 +63,7 @@ inline CSEConfig createFreeLBConfig(const LatticeConfig& lat = {}) {
   config.assumeNumericCommutative = true;
   config.assumeNumericAssociative = true;
   config.allowFpReassoc = true;
+  config.allowUnsafeFpIdentities = true;
   config.noAlias = false;
   config.isPureFunction = isFreeLBPureFunction;
 

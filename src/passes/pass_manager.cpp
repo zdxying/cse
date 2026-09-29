@@ -38,8 +38,10 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   }
   const bool comm = config.assumeNumericCommutative;
   const bool assoc = config.assumeNumericAssociative;
+  const bool unsafeIdent = config.allowUnsafeFpIdentities;
   pm.addPass(createConstantFoldPass());
-  pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
+  pm.addPass(createAlgebraicSimplifyPass(comm, assoc, unsafeIdent,
+                                         config.allowFpReassoc));
   if (postAlgebraPass) {
     pm.addPass(std::move(postAlgebraPass));
   }
@@ -51,7 +53,8 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   pm.addPass(createCSEPass());
   if (enableRecombine) {
     pm.addPass(createExprRecombinePass());
-    pm.addPass(createAlgebraicSimplifyPass(comm, assoc));
+    pm.addPass(createAlgebraicSimplifyPass(comm, assoc, unsafeIdent,
+                                           config.allowFpReassoc));
   }
   pm.addPass(createValuePropPass());
   pm.addPass(createDCEPass());

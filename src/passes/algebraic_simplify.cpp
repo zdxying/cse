@@ -26,13 +26,23 @@ std::string numText(double v) {
 
 class AlgebraicSimplifyVisitor {
  public:
-  AlgebraicSimplifyVisitor(IRModule& mod, bool commutative, bool associative)
-      : module(mod), numeric_(commutative && associative) {}
+  AlgebraicSimplifyVisitor(IRModule& mod, bool commutative, bool associative,
+                           bool unsafeFpIdentities, bool fpReassoc)
+      : module(mod),
+        numeric_(commutative && associative),
+        unsafeIdentities_(unsafeFpIdentities),
+        fpReassoc_(fpReassoc) {}
   IRModule& module;
   int simplifications = 0;
   // Numeric reordering rules require both commutativity and associativity; the
   // pass exposes the two flags separately for callers but applies them jointly.
   bool numeric_;
+  // `x/x -> 1`, `0/x -> 0`, `x-x -> 0` and `x*0 -> 0` need more than a field
+  // assumption -- they also require the operands to avoid 0 / +-inf / NaN -- so
+  // they carry their own opt-in.
+  bool unsafeIdentities_;
+  // Regrouping a multiplication chain changes floating-point rounding.
+  bool fpReassoc_;
 
   void visitStmt(StmtIR* stmt) {
     if (!stmt) return;
@@ -152,7 +162,8 @@ class AlgebraicSimplifyVisitor {
     return n->kind == NodeKind::Constant && n->constVal == val;
   }
 
-  // x * 2 → x + x, x * 0.5 → x / 2.0
+  // x * 2 -> x + x. Exact in IEEE-754 (doubling only changes the exponent), and
+  // overflow behaves the same way, so this needs no opt-in.
   DAGNode* strengthReduce(DAGNode* node) {
     if (node->op != '*') return node;
     DAGNode* lhs = node->operands[0];
@@ -221,9 +232,15 @@ class AlgebraicSimplifyVisitor {
       }
     }
 
+    // All factors are constant: always fold, this is exact.
     if (nonConst.empty()) {
       return module.createConst(constProd, numText(constProd));
     }
+
+    // Rebuilding the chain left-associatively regroups the multiplications
+    // (`a * (b * c)` becomes `(a * b) * c`), which changes floating-point
+    // rounding -- so it needs the same opt-in as ReassociatePass.
+    if (!fpReassoc_) return node;
 
     DAGNode* acc = nullptr;
     if (hasConst && constProd != 1.0) {
@@ -277,7 +294,11 @@ class AlgebraicSimplifyVisitor {
     if (node->op == '*') {
       if (isConst(lhs, 1)) { simplifications++; return rhs; }
       if (isConst(rhs, 1)) { simplifications++; return lhs; }
-      if (isConst(lhs, 0) || isConst(rhs, 0)) { simplifications++; return module.createConst(0, "0"); }
+      // x * 0 -> 0 is wrong for x = +-inf / NaN.
+      if (unsafeIdentities_ && (isConst(lhs, 0) || isConst(rhs, 0))) {
+        simplifications++;
+        return module.createConst(0, "0");
+      }
     }
 
     if (node->op == '+') {
@@ -293,8 +314,11 @@ class AlgebraicSimplifyVisitor {
     if (node->op == '-') {
       if (isConst(rhs, 0)) { simplifications++; return lhs; }
       if (isConst(lhs, 0)) { simplifications++; return module.createUnaryOp('-', rhs); }
-      // a - a → 0
-      if (lhs->id == rhs->id) { simplifications++; return module.createConst(0, "0"); }
+      // a - a -> 0 is wrong for a = +-inf / NaN.
+      if (unsafeIdentities_ && lhs->id == rhs->id) {
+        simplifications++;
+        return module.createConst(0, "0");
+      }
       // a - (-b) → a + b
       if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-') {
         simplifications++;
@@ -304,9 +328,16 @@ class AlgebraicSimplifyVisitor {
 
     if (node->op == '/') {
       if (isConst(rhs, 1)) { simplifications++; return lhs; }
-      if (isConst(lhs, 0)) { simplifications++; return module.createConst(0, "0"); }
-      // a / a → 1
-      if (lhs->id == rhs->id) { simplifications++; return module.createConst(1, "1"); }
+      // 0 / a -> 0 and a / a -> 1 are both wrong at a = 0 (NaN), and a / a is
+      // also wrong for a = +-inf / NaN.
+      if (unsafeIdentities_ && isConst(lhs, 0)) {
+        simplifications++;
+        return module.createConst(0, "0");
+      }
+      if (unsafeIdentities_ && lhs->id == rhs->id) {
+        simplifications++;
+        return module.createConst(1, "1");
+      }
     }
 
     return node;
@@ -359,7 +390,8 @@ class AlgebraicSimplifyVisitor {
 };
 
 void AlgebraicSimplifyPass::run(IRModule& module) {
-  AlgebraicSimplifyVisitor visitor(module, _commutative, _associative);
+  AlgebraicSimplifyVisitor visitor(module, _commutative, _associative,
+                                   _unsafeFpIdentities, _fpReassoc);
   visitor.visitStmt(module.body.get());
 }
 
