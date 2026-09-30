@@ -53,21 +53,52 @@ inline std::string lvalueRoot(DAGNode* n) {
   return "";
 }
 
+// Every variable name an expression writes: `++x` / `x--`, and an assignment
+// spelled as an expression (`a[i] = v` arrives as `BinaryOp(=)` whenever the
+// builder kept it unlowered). The whole subtree is walked, because a write can
+// sit anywhere inside one.
+inline void collectExprWrites(DAGNode* e,
+                              std::unordered_set<std::string>& out) {
+  if (!e) return;
+  if (isIncDec(e) && !e->operands.empty()) {
+    std::string root = lvalueRoot(e->operands[0]);
+    if (!root.empty()) out.insert(root);
+  } else if (e->kind == NodeKind::BinaryOp && e->op == '=' &&
+             e->operands.size() == 2) {
+    std::string root = lvalueRoot(e->operands[0]);
+    if (!root.empty()) out.insert(root);
+  }
+  for (auto* op : e->operands) collectExprWrites(op, out);
+}
+
 // Collect every variable name a statement writes, nested statements included.
 // Conditional writes count: callers use this to answer "may this have been
 // written between A and B", and the conservative answer needs no dominator
 // analysis.
 //
-// Three spellings of a write occur in this IR:
-//   * `x = v;`                 -> AssignIR, plain `target`
-//   * `a[i] = v;` / `p->f = v;`-> AssignIR, `targetExpr` (only the *root* is
-//     recorded: some other pointer may alias the same object, so naming the
-//     root is the conservative choice)
-//   * `++x;` / `--x;`          -> a UnaryOp statement
-// The second form also arrives as an ExprStmt wrapping an opaque
-// `BinaryOp(=)` whenever the builder kept it unlowered, so both spellings are
-// handled -- missing one of them is exactly how a store becomes invisible to
-// the passes that ask this question.
+// This is a *completeness* question, so it is answered by scanning the
+// expression slots rather than by enumerating statement kinds. A write can sit
+// in any slot, and the kind-by-kind version -- which listed the kinds it knew
+// about and recursed into Block / ForLoop / IfElse -- never looked inside a
+// declaration's initializer. In `double z = ++y;` the increment of `y` was
+// therefore invisible, `y` counted as never written, and ValueProp inlined
+// `double y = a;` at every use, including one that reads it *after* the
+// increment:
+//
+//   double y = a; double z = ++y; return a * 100.0 + z;  // source: 100a + a + 1
+//   -> double z = ++a; return z + 100 * a;               // emitted: 101a + 101
+//
+// `forEachExprDeep` (stmt_walk.h) owns the slot list, so this scan cannot go
+// stale again when a statement kind or a slot is added.
+//
+// Two writes are not expression slots and are added explicitly:
+//   * the lvalue root of a structured store (`a[i] = v;` / `p->f = v;` build an
+//     AssignIR whose lvalue is not evaluated as an expression). Only the *root*
+//     is recorded: some other pointer may alias the same object, so naming the
+//     root is the conservative choice;
+//   * a `for` update the builder normalized out of the expression tree into
+//     "variable op= rhs" (`i = i + 1`), which is not visible as an expression
+//     at all.
 //
 // A `VarDecl` is deliberately *not* recorded: it introduces a fresh
 // (alpha-renamed) name rather than overwriting an existing value, and no
@@ -75,6 +106,13 @@ inline std::string lvalueRoot(DAGNode* n) {
 inline void collectWrittenNames(StmtIR* stmt,
                                std::unordered_set<std::string>& out) {
   if (!stmt) return;
+
+  // The slots this statement owns, then its nested statements. Scanning the
+  // slots with forEachExpr (stmt_walk.h) rather than by statement kind is what
+  // makes the initializer case visible above; the recursion stays because the
+  // two writes below are not expression slots at all.
+  forEachExpr(stmt, [&](DAGNode*& e) { collectExprWrites(e, out); });
+
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
@@ -85,6 +123,10 @@ inline void collectWrittenNames(StmtIR* stmt,
       auto* f = static_cast<ForLoopIR*>(stmt);
       collectWrittenNames(f->init.get(), out);
       collectWrittenNames(f->body.get(), out);
+      if (f->updateOp != 0 && f->update &&
+          f->update->kind == NodeKind::Variable) {
+        out.insert(f->update->name);
+      }
       break;
     }
     case StmtIRKind::IfElse: {
@@ -100,19 +142,6 @@ inline void collectWrittenNames(StmtIR* stmt,
         if (!root.empty()) out.insert(root);
       } else if (!a->target.empty()) {
         out.insert(a->target);
-      }
-      break;
-    }
-    case StmtIRKind::ExprStmt: {
-      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      if (!e) break;
-      if (isIncDec(e) && !e->operands.empty()) {
-        std::string root = lvalueRoot(e->operands[0]);
-        if (!root.empty()) out.insert(root);
-      } else if (e->kind == NodeKind::BinaryOp && e->op == '=' &&
-                 e->operands.size() == 2) {
-        std::string root = lvalueRoot(e->operands[0]);
-        if (!root.empty()) out.insert(root);
       }
       break;
     }
