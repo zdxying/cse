@@ -51,33 +51,18 @@ class ExprRecombineVisitor {
   }
 
  private:
-  bool sameExpr(DAGNode* a, DAGNode* b) {
-    if (!a || !b) return false;
-    // Compare by ID (same node in DAG) or by structural equality
-    if (a->id == b->id) return true;
-    if (a->kind != b->kind) return false;
-    if (a->op != b->op) return false;
-    if (a->operands.size() != b->operands.size()) return false;
-    if (a->kind == NodeKind::Constant && a->constVal != b->constVal) return false;
-    if (a->kind == NodeKind::Variable && a->name != b->name) return false;
-    if (a->kind == NodeKind::MemberAccess && a->name != b->name) return false;
-    if (a->kind == NodeKind::ArrowAccess && a->name != b->name) return false;
-    for (size_t i = 0; i < a->operands.size(); i++) {
-      if (!sameExpr(a->operands[i], b->operands[i])) return false;
-    }
-    return true;
-  }
-
   // May `a` and `b` be used as one shared factor?
   //
   // The rewrite collapses two textual occurrences into a single one, so the
   // matched subexpression must be referentially transparent: dropping one
   // evaluation of an impure node (a side-effecting call, a load from a writable
-  // location) changes behaviour. `sameExpr` compares structure, and the IR
-  // deliberately keeps impure nodes distinct precisely so that a structural
-  // match does NOT imply interchangeability -- hence the explicit purity test.
+  // location) changes behaviour. A pure node is interned, so two pure
+  // subexpressions are interchangeable exactly when they are the *same node* --
+  // compare by identity. A structural walk used to live here and drifted: it
+  // compared kind/op/operands but not the cast type, so the distinct pure Cast
+  // nodes `(int)x` and `(float)x` were judged equal and one cast was dropped.
   bool samePureExpr(DAGNode* a, DAGNode* b) {
-    return a && b && a->pure && b->pure && sameExpr(a, b);
+    return a && b && a->pure && b->pure && a->id == b->id;
   }
 
   bool isMul(DAGNode* n) {

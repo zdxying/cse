@@ -33,6 +33,13 @@ int main() {
   check("factor_plus_one", factor_plus_one(2.0, 3.0), 2.0 * 3.0 + 2.0);
   check("factor_minus_one", factor_minus_one(7.0, 3.0), 7.0 * 3.0 - 7.0);
 
+  // A cast is part of a node's identity: `(int)x` and `(float)x` must not be
+  // merged into one factor. `(int)2.5` truncates to 2, `(float)2.5` is 2.5.
+  check("cast_vs_cast(2.5)", cast_vs_cast(2.5, 3.0, 4.0),
+        (double)(int)2.5 * 3.0 + (float)2.5 * 4.0);
+  check("cast_vs_cast(-3.25)", cast_vs_cast(-3.25, 3.0, 4.0),
+        (double)(int)(-3.25) * 3.0 + (float)(-3.25) * 4.0);
+
   // Division must remain two separate divisions. A value of 8.0 here means the
   // old `(a + b) * x` rewrite came back.
   double div = division_unfactored(3.0, 1.0, 2.0);

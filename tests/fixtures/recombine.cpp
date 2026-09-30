@@ -58,6 +58,15 @@ double factor_minus_one(double a, double x) {
   return a * x - a;
 }
 
+// A distinct cast must not be treated as the same factor: `(int)x` and `(float)x`
+// are both pure Cast nodes but denote different values, so the recombination
+// stage must not collapse them into one (it used to compare structure while
+// ignoring the cast type).
+//@cse
+double cast_vs_cast(double x, double y, double z) {
+  return ((int)x) * y + ((float)x) * z;
+}
+
 //@cse
 double division_unfactored(double a, double b, double x) {
   return a / x + b / x;

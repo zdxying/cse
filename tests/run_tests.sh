@@ -78,7 +78,7 @@ cost_stage "default" "" default \
   safety_cases=20 parens=19 store_aware=20 mixed_ops=5 write_visibility=8 \
   effect_duplication=7 frontend_forms=12 comment_braces=4 dead_store_effects=1 constant_edges=5 void_param=4 incdec_safety=6
 cost_stage "-r" "-r" r \
-  recombine=21
+  recombine=24
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
