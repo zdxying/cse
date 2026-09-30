@@ -344,28 +344,20 @@ std::unique_ptr<Expr> Parser::parseMulDiv() {
 }
 
 std::unique_ptr<Expr> Parser::parseUnary() {
-  // Handle ++ and -- prefix operators (lexer produces two Plus/Minus tokens)
-  if (check(TokenType::Plus) && _pos + 1 < _tokens.size() &&
-      _tokens[_pos + 1].type == TokenType::Plus) {
-    advance(); advance();  // consume ++
+  // `++x` / `--x`: one token, because the lexer merged the two characters.
+  // `name` records the spelling and `op` the character whose semantics it is
+  // confused with, which is what lets the IR keep the two apart.
+  if (check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) {
+    auto op = advance();
     auto operand = parseUnary();
     auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
-    expr->op = '+';
-    expr->name = "++";  // store full operator in name field
+    expr->op = (op.type == TokenType::PlusPlus) ? '+' : '-';
+    expr->name = op.text;  // "++" / "--"
     expr->operand = std::move(operand);
     return expr;
   }
-  if (check(TokenType::Minus) && _pos + 1 < _tokens.size() &&
-      _tokens[_pos + 1].type == TokenType::Minus) {
-    advance(); advance();  // consume --
-    auto operand = parseUnary();
-    auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
-    expr->op = '-';
-    expr->name = "--";  // store full operator in name field
-    expr->operand = std::move(operand);
-    return expr;
-  }
-  if (check(TokenType::Minus) || check(TokenType::Not)) {
+  // `-x`, `!x`, `+x`.
+  if (check(TokenType::Minus) || check(TokenType::Not) || check(TokenType::Plus)) {
     auto op = advance();
     auto operand = parseUnary();
     auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
@@ -395,6 +387,18 @@ std::unique_ptr<Expr> Parser::parseUnary() {
 std::unique_ptr<Expr> Parser::parsePostfix() {
   auto expr = parsePrimary();
   while (true) {
+    // Postfix `x++` / `x--`. This is where the most common C++ loop update
+    // (`for (...; i++)`) arrives, and there was no rule for it at all: the
+    // parser reported "unexpected token '+'" and the driver aborted.
+    if (check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) {
+      auto op = advance();
+      auto post = std::make_unique<Expr>(ExprKind::PostfixOp, expr->loc);
+      post->op = (op.type == TokenType::PlusPlus) ? '+' : '-';
+      post->name = op.text;  // "++" / "--"
+      post->operand = std::move(expr);
+      expr = std::move(post);
+      continue;
+    }
     if (match(TokenType::LBrack)) {
       auto idx = parseExpr();
       expect(TokenType::RBrack);

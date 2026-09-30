@@ -57,19 +57,27 @@ std::vector<Token> Lexer::tokenize() {
     _pos++;
     switch (c) {
       case '+':
-        if (peek() == '=') {
+        // `++` is tested before `+=`: maximal munch, so `a+++b` is `(a++) + b`.
+        if (peek() == '+') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::PlusPlus, "++"));
+        } else if (peek() == '=') {
           _pos++;
           tokens.push_back(makeToken(TokenType::PlusAssign, "+="));
         } else
           tokens.push_back(makeToken(TokenType::Plus, "+"));
         break;
       case '-':
-        if (peek() == '=') {
+        // `--` first, then `->`, then `-=`: longest match wins.
+        if (peek() == '-') {
           _pos++;
-          tokens.push_back(makeToken(TokenType::MinusAssign, "-="));
+          tokens.push_back(makeToken(TokenType::MinusMinus, "--"));
         } else if (peek() == '>') {
           _pos++;
           tokens.push_back(makeToken(TokenType::Arrow, "->"));
+        } else if (peek() == '=') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::MinusAssign, "-="));
         } else
           tokens.push_back(makeToken(TokenType::Minus, "-"));
         break;
@@ -230,11 +238,43 @@ void Lexer::skipBlockComment() {
   }
 }
 
+// Integer / fraction / exponent / suffix, as one literal.
+//
+// The old version consumed digits and '.' only, so `1e16` lexed as the number 1
+// followed by the identifier `e16` -- every scientific-notation constant in a
+// real kernel was a syntax error.
 Token Lexer::readNumber() {
   size_t start = _pos;
   size_t startCol = _col;
-  while (_pos < _src.size() && (std::isdigit(peek()) || peek() == '.')) advance();
-  std::string text = _src.substr(start, _pos - start);
+
+  while (_pos < _src.size() && std::isdigit(peek())) advance();
+  if (peek() == '.') {
+    advance();
+    while (_pos < _src.size() && std::isdigit(peek())) advance();
+  }
+
+  // Exponent. It is only consumed when a digit actually follows, so `1e` (or a
+  // number butted up against an identifier) still lexes as `1` + identifier and
+  // reports a syntax error at the right place.
+  if (peek() == 'e' || peek() == 'E') {
+    size_t save = _pos;
+    size_t saveCol = _col;
+    advance();
+    if (peek() == '+' || peek() == '-') advance();
+    if (_pos < _src.size() && std::isdigit(peek())) {
+      while (_pos < _src.size() && std::isdigit(peek())) advance();
+    } else {
+      _pos = save;
+      _col = saveCol;
+    }
+  }
+
+  // The numeric core is everything up to here; a trailing float suffix is part
+  // of the literal but not of the value.
+  size_t coreEnd = _pos;
+  if (peek() == 'f' || peek() == 'F' || peek() == 'l' || peek() == 'L') advance();
+
+  std::string text = _src.substr(start, coreEnd - start);
   double val = std::stod(text);
   Token tok;
   tok.type = TokenType::Number;

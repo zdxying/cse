@@ -35,6 +35,10 @@ enum class TokenType {
   // Operators
   Plus,
   Minus,
+  // `++` / `--` are lexed as one token, the way C++ maximal munch does it: with
+  // two separate tokens `a++ + b` and `a + +b` are indistinguishable.
+  PlusPlus,
+  MinusMinus,
   Star,
   Slash,
   Percent,
@@ -131,6 +135,10 @@ inline const char* tokenTypeName(TokenType t) {
       return "Plus";
     case TokenType::Minus:
       return "Minus";
+    case TokenType::PlusPlus:
+      return "PlusPlus";
+    case TokenType::MinusMinus:
+      return "MinusMinus";
     case TokenType::Star:
       return "Star";
     case TokenType::Slash:

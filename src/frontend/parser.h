@@ -57,8 +57,8 @@ class Parser {
   std::unique_ptr<Expr> parseComparison();  // < > <= >=
   std::unique_ptr<Expr> parseAddSub();      // + -
   std::unique_ptr<Expr> parseMulDiv();      // * / %
-  std::unique_ptr<Expr> parseUnary();       // - ! (type)cast
-  std::unique_ptr<Expr> parsePostfix();     // a.b a->b a[i] f(x)
+  std::unique_ptr<Expr> parseUnary();       // - + ! ++x --x (type)cast
+  std::unique_ptr<Expr> parsePostfix();     // a.b a->b a[i] f(x) x++ x--
   std::unique_ptr<Expr> parsePrimary();     // literals, identifiers, (expr)
 
   // Statement parsing
