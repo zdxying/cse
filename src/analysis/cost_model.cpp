@@ -72,6 +72,26 @@ void analyzeStmt(StmtIR* stmt, std::unordered_set<DAGNode*>& visited,
 
   // The expression slots this statement owns -- an element store contributes
   // both its lvalue and its value, since computing the index costs work too.
+  //
+  // `visited` is cleared per *statement* deliberately: a node that several
+  // statements mention is counted once for each of them. The DAG is hash-consed,
+  // so those statements share the one node -- but codegen prints that node at
+  // every use site, and the count is meant to approximate the code that is
+  // emitted, not the size of the DAG. This is not an oversight; deduplicating
+  // across the whole function makes the number worse:
+  //
+  //   for (int i = 0; i < 4; i++) a += b;   // unrolled to four `a = a + b;`
+  //
+  // is four additions in the output, and the four statements share one `+` node.
+  // Per-statement counting reports 4; whole-function dedup reports 1.
+  // `frontend_forms` in run_tests.sh pins this at 12, of which that function is
+  // 4 -- a switch to whole-function dedup reads 9 and fails the test.
+  //
+  // Known approximation, kept deliberately: a node repeated *within* one
+  // statement (`a*b + a*b`) is counted once. Counting references rather than
+  // first visits would fix that, but it changes what the model measures rather
+  // than fixing a bug, and the number is only ever reported -- nothing decides
+  // anything from it.
   forEachExpr(stmt, [&](DAGNode*& e) {
     visited.clear();
     analyzeExpr(e, visited, result);

@@ -67,6 +67,12 @@ cost_stage() {
   (( fail == 0 )) || exit 1
 }
 
+# The expected counts are "once per statement that mentions the node", not
+# "once per node in the DAG": the DAG is hash-consed while codegen prints a
+# shared node at every use site, so the per-statement rule is the one that
+# tracks the emitted code. `frontend_forms` is the case that shows it -- its
+# `counted_postfix` unrolls to four `a = a + b;`, four real additions sharing
+# one node, and it is 4 of the 12.
 cost_stage "default" "" default \
   basic_cse=10 features=50 namespace_case=4 equilibrium_d3q19=84 \
   safety_cases=20 parens=19 store_aware=20 mixed_ops=5 write_visibility=8 \
