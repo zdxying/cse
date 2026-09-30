@@ -3,6 +3,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "diagnostics.h"
+
 namespace cse {
 
 Parser::Parser(const std::vector<Token>& tokens, const CSEConfig& config)
@@ -25,10 +27,9 @@ bool Parser::match(TokenType type) {
 Token Parser::expect(TokenType type) {
   if (check(type)) return advance();
   std::ostringstream oss;
-  oss << "Line " << peek().line << ":" << peek().col << " expected "
-      << tokenTypeName(type) << " but got " << tokenTypeName(peek().type) << " '"
-      << peek().text << "'";
-  throw std::runtime_error(oss.str());
+  oss << "expected " << tokenTypeName(type) << " but got "
+      << tokenTypeName(peek().type) << " '" << peek().text << "'";
+  throw CSEError({"parse", peek().line, peek().col, oss.str()});
 }
 
 SourceLoc Parser::currentLoc() const {
@@ -530,9 +531,8 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
     return expr;
   }
   std::ostringstream oss;
-  oss << "Line " << peek().line << ":" << peek().col << " unexpected token '"
-      << peek().text << "'";
-  throw std::runtime_error(oss.str());
+  oss << "unexpected token '" << peek().text << "'";
+  throw CSEError({"parse", peek().line, peek().col, oss.str()});
 }
 
 // ===== Statement parsing =====

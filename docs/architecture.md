@@ -107,6 +107,11 @@ cse::CSEConfig config = cse::freelb::createFreeLBConfig();
 
 CLI：默认使用 FreeLB 配置；`-s/--safe` 切换到保守语义（保留 token 过滤）。
 
+每个 `//@cse` 区域独立走完整流水线，一个区域读不了不影响其余：解析失败的区域**原样输出**，
+诊断按 `文件:行:列` 报出（行号是**文件**里的行，不是区域内的偏移）。退出码：0 = 全部成功，
+2 = 部分区域被跳过，3 = 全部区域都失败。输出文件在最后统一写出，因此**只要进程正常返回，
+就一定有输出文件**——这也是把"出错"与"崩溃"区分开的实际意义。
+
 FreeLB 特定逻辑位于 `plugins/freelb/`：
 - `cuda_skip.h/cpp` — 过滤 `__any__`、`__host__`、`__device__` 等 CUDA 注解
 - `config.h` — FreeLB 默认配置工厂函数 + 纯函数注册

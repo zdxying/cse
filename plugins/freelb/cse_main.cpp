@@ -8,6 +8,7 @@
 
 #include "analysis/cost_model.h"
 #include "backend/codegen.h"
+#include "frontend/diagnostics.h"
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
 #include "frontend/region_extractor.h"
@@ -25,7 +26,10 @@ static void printUsage(const char* prog) {
             << "  -s, --safe         Conservative mode (no unsafe algebraic rules)\n"
             << "  -v, --verbose      Print each pass as it runs (to stderr)\n"
             << "  --json             Output in JSON format (use with -c)\n"
-            << "  -h, --help         Show this help\n";
+            << "  -h, --help         Show this help\n"
+            << "\n"
+            << "Exit status: 0 if every region was optimized, 2 if some were left\n"
+            << "             unchanged because they could not be read, 3 if none could.\n";
 }
 
 struct OptResult {
@@ -261,6 +265,7 @@ int main(int argc, char* argv[]) {
   }
 
   cse::CostResult totalBefore, totalAfter;
+  size_t skippedRegions = 0;
 
   for (const auto& region : regions) {
     // Copy lines before this region
@@ -273,20 +278,41 @@ int main(int argc, char* argv[]) {
       output += allLines[region.startLine - 1] + "\n";
     }
 
-    // Optimize and output the region
-    auto opt = optimizeRegion(region.code, config, enableRecombine, collectCost,
-                              verbose);
-    output += opt.code;
+    // Optimize and output the region. A region the frontend cannot read is
+    // reported and passed through unchanged while the rest of the file is still
+    // optimized: the first parse error used to reach std::terminate, and since
+    // the output file is only created at the end, that cost the user *every*
+    // region in the file, including the ones already optimized successfully.
+    try {
+      auto opt = optimizeRegion(region.code, config, enableRecombine,
+                               collectCost, verbose);
+      output += opt.code;
 
-    if (collectCost) {
-      totalBefore.flops += opt.costBefore.flops;
-      totalBefore.totalNodes += opt.costBefore.totalNodes;
-      totalBefore.stmts += opt.costBefore.stmts;
-      totalBefore.vars += opt.costBefore.vars;
-      totalAfter.flops += opt.costAfter.flops;
-      totalAfter.totalNodes += opt.costAfter.totalNodes;
-      totalAfter.stmts += opt.costAfter.stmts;
-      totalAfter.vars += opt.costAfter.vars;
+      if (collectCost) {
+        totalBefore.flops += opt.costBefore.flops;
+        totalBefore.totalNodes += opt.costBefore.totalNodes;
+        totalBefore.stmts += opt.costBefore.stmts;
+        totalBefore.vars += opt.costBefore.vars;
+        totalAfter.flops += opt.costAfter.flops;
+        totalAfter.totalNodes += opt.costAfter.totalNodes;
+        totalAfter.stmts += opt.costAfter.stmts;
+        totalAfter.vars += opt.costAfter.vars;
+      }
+    } catch (const cse::CSEError& e) {
+      // The diagnostic's line is relative to the region text; report the line in
+      // the file the user handed us (the region body starts one line after its
+      // //@cse marker, which is region.startLine).
+      const cse::Diagnostic& d = e.diagnostic();
+      std::cerr << inputFile << ":" << (region.startLine + d.line) << ":" << d.col
+                << ": " << d.phase << " error: " << d.message
+                << " -- region passed through unchanged\n";
+      output += region.code;
+      skippedRegions++;
+    } catch (const std::exception& e) {
+      std::cerr << inputFile << ":" << region.startLine
+                << ": region passed through unchanged: " << e.what() << "\n";
+      output += region.code;
+      skippedRegions++;
     }
 
     lastEnd = region.endLine;
@@ -309,6 +335,11 @@ int main(int argc, char* argv[]) {
 
   std::cout << "Optimized output written to " << outputFile << "\n";
 
+  if (skippedRegions > 0) {
+    std::cerr << skippedRegions << " of " << regions.size()
+              << " regions were left unoptimized\n";
+  }
+
   // Cost analysis output
   if (collectCost) {
     if (outputJson) {
@@ -324,7 +355,8 @@ int main(int argc, char* argv[]) {
       int saved = totalBefore.savedFlops(totalAfter);
       double pct = totalBefore.savedPercent(totalAfter);
       std::cout << "  \"saved\": {\"flops\":" << saved
-                << ",\"percent\":" << std::round(pct * 10.0) / 10.0 << "}\n";
+                << ",\"percent\":" << std::round(pct * 10.0) / 10.0 << "},\n";
+      std::cout << "  \"skipped\": " << skippedRegions << "\n";
       std::cout << "}\n";
     } else {
       std::cout << "\n=== FLOP Cost Analysis ===\n";
@@ -348,5 +380,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  return 0;
+  // 0 = every region optimized, 2 = some skipped, 3 = none could be.
+  if (skippedRegions == 0) return 0;
+  return skippedRegions == regions.size() ? 3 : 2;
 }

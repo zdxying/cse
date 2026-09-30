@@ -4,6 +4,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "diagnostics.h"
+
 namespace cse {
 
 Lexer::Lexer(const std::string& source, const CSEConfig& config)
@@ -181,11 +183,9 @@ std::vector<Token> Lexer::tokenize() {
         // Skip preprocessor directives (#include, #ifdef, #else, #endif, #pragma, etc.)
         while (_pos < _src.size() && peek() != '\n') advance();
         break;
-      default: {
-        std::ostringstream oss;
-        oss << "Line " << _line << ":" << _col - 1 << " unexpected character '" << c << "'";
-        throw std::runtime_error(oss.str());
-      }
+      default:
+        throw CSEError({"lex", _line, _col,
+                        std::string("unexpected character '") + c + "'"});
     }
   }
   tokens.push_back(makeToken(TokenType::Eof, ""));

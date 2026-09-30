@@ -120,6 +120,66 @@ else
   exit 1
 fi
 
+# A region the frontend cannot read must not cost the user the rest of the file.
+# Before this, the first parse error ran into std::terminate, and because the
+# output file is written at the very end, *no* file was produced at all.
+echo "=== error containment ==="
+cat > "$WORK/containment.cpp" <<'EOF'
+//@cse
+double good(double a, double b) {
+    double x = a * b;
+    double y = a * b;
+    return x + y;
+}
+//@cse
+//@cse
+double bad(double a) {
+    return a @ 1.0;
+}
+//@cse
+EOF
+contain_fail=0
+set +e
+"$CSE" "$WORK/containment.cpp" > "$WORK/containment.out" 2> "$WORK/containment.err"
+contain_rc=$?
+set -e
+if [[ "$contain_rc" -ne 2 ]]; then
+  echo "FAIL  expected exit 2 (one of two regions skipped), got $contain_rc" >&2
+  contain_fail=1
+fi
+if ! grep -q "_cse_[0-9]*_[0-9]*" "$WORK/containment.cpp.cse" 2>/dev/null; then
+  echo "FAIL  the readable region was not optimized" >&2
+  contain_fail=1
+fi
+if ! grep -q "a @ 1.0" "$WORK/containment.cpp.cse" 2>/dev/null; then
+  echo "FAIL  the unreadable region was not passed through unchanged" >&2
+  contain_fail=1
+fi
+# The diagnostic has to name the file and the line *in it*, not the offset inside
+# the region.
+if ! grep -q "containment.cpp:10:14" "$WORK/containment.err"; then
+  echo "FAIL  the diagnostic does not point at containment.cpp:10:14" >&2
+  cat "$WORK/containment.err" >&2
+  contain_fail=1
+fi
+# Every region failing is a different outcome from some failing.
+printf '//@cse\ndouble bad(double a) { return a @ 1.0; }\n//@cse\n' \
+  > "$WORK/containment_all.cpp"
+set +e
+"$CSE" "$WORK/containment_all.cpp" > /dev/null 2>&1
+contain_rc_all=$?
+set -e
+if [[ "$contain_rc_all" -ne 3 ]]; then
+  echo "FAIL  expected exit 3 when no region could be read, got $contain_rc_all" >&2
+  contain_fail=1
+fi
+if [[ ! -f "$WORK/containment_all.cpp.cse" ]]; then
+  echo "FAIL  no output file was written when every region failed" >&2
+  contain_fail=1
+fi
+(( contain_fail == 0 )) || exit 1
+echo "ok    a failing region is skipped and passed through, exit 2 / 3 as expected"
+
 # ---------------------------------------------------------------------------
 # 2. numerical verifiers.
 #    $1 name  $2 verifier source  $3 expected banner  $4 include dir
