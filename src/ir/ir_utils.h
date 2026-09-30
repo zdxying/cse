@@ -22,6 +22,25 @@ inline bool hasImpureCall(DAGNode* e) {
   return false;
 }
 
+// Does the expression do something that has to survive even when its value is
+// thrown away? An impure call writes or observes mutable state; `++`/`--` writes
+// its operand; and an assignment spelled as an expression (the `a[i] = v` shape
+// the builder did not lower into an AssignIR) writes its target.
+//
+// This is `hasImpureCall` widened by the writes. Arithmetic has no effect, so
+// discarding its result is free -- but the increment sitting in the same
+// expression is not, and DCE asked only about calls. `unused = y++;` was
+// therefore deleted whole and the increment of `y` disappeared with it.
+inline bool hasSideEffect(const DAGNode* e) {
+  if (!e) return false;
+  if (e->kind == NodeKind::Call && !e->pure) return true;
+  if (isIncDec(e)) return true;
+  if (e->kind == NodeKind::BinaryOp && e->op == '=') return true;
+  for (const auto* op : e->operands)
+    if (hasSideEffect(op)) return true;
+  return false;
+}
+
 // Add every variable occurrence in an expression to `counts`.
 inline void countVarUses(DAGNode* e,
                          std::unordered_map<std::string, int>& counts) {
