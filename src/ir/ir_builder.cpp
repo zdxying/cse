@@ -3,7 +3,34 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "../frontend/diagnostics.h"
+
 namespace cse {
+
+namespace {
+
+// A slot the parser always fills in, and that this file used to dereference
+// unconditionally. A null one is a bug in the parser, and `*nullptr` is undefined
+// behaviour that no build reports -- the process reads whatever is at that
+// address. Reject it with a position instead: the driver turns a CSEError into
+// "the region is passed through unchanged", which is a diagnosable outcome.
+const Stmt& requireStmt(const std::unique_ptr<Stmt>& stmt, const char* what,
+                        SourceLoc loc) {
+  if (!stmt)
+    throw CSEError(
+        {"build", loc.line, loc.col, std::string("empty statement slot: ") + what});
+  return *stmt;
+}
+
+const Expr& requireExpr(const std::unique_ptr<Expr>& expr, const char* what,
+                        SourceLoc loc) {
+  if (!expr)
+    throw CSEError(
+        {"build", loc.line, loc.col, std::string("empty expression slot: ") + what});
+  return *expr;
+}
+
+}  // namespace
 
 IRBuilder::IRBuilder(IRModule* module, const CSEConfig& config)
     : _module(module), _config(config) {}
@@ -254,7 +281,7 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
     }
   }
 
-  _module->body = buildStmt(*func.body);
+  _module->body = buildStmt(requireStmt(func.body, "function body", func.loc));
 }
 
 std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
@@ -289,15 +316,16 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
           forIR->update = buildExpr(*stmt.forUpdate);
         }
       }
-      forIR->body = buildStmt(*stmt.forBody);
+      forIR->body = buildStmt(requireStmt(stmt.forBody, "loop body", stmt.loc));
       popScope();
       return forIR;
     }
     case StmtKind::IfElse: {
       auto ifIR = std::make_unique<IfElseIR>();
       ifIR->isConstexpr = stmt.isConstexpr;
-      ifIR->cond = buildExpr(*stmt.ifCond);
-      ifIR->thenBranch = buildStmt(*stmt.ifThen);
+      ifIR->cond = buildExpr(requireExpr(stmt.ifCond, "if condition", stmt.loc));
+      ifIR->thenBranch =
+          buildStmt(requireStmt(stmt.ifThen, "if branch", stmt.loc));
       if (stmt.ifElse) ifIR->elseBranch = buildStmt(*stmt.ifElse);
       return ifIR;
     }

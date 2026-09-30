@@ -693,6 +693,15 @@ std::unique_ptr<Stmt> Parser::parseExprStmt() {
 std::vector<FunctionDef::Param> Parser::parseParamList() {
   std::vector<FunctionDef::Param> params;
   expect(TokenType::LParen);
+  // `f(void)` -- the C spelling of an empty parameter list. `void` is a type
+  // keyword, so the loop below took it for a parameter's type and then demanded a
+  // name where it found `)`: `expected Identifier but got RParen`. The region was
+  // reported unreadable and passed through, so a function written the C way was
+  // silently never optimized.
+  if (check(TokenType::Void) && _pos + 1 < _tokens.size() &&
+      _tokens[_pos + 1].type == TokenType::RParen) {
+    advance();
+  }
   if (!check(TokenType::RParen)) {
     do {
       FunctionDef::Param p;
