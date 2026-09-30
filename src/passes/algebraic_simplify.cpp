@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/statement.h"
 #include "../ir/stmt_walk.h"
 
@@ -58,7 +59,7 @@ class AlgebraicSimplifyVisitor {
     // later deduplication.
     if (node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
       DAGNode* child = simplify(node->operands[0]);
-      if (child != node->operands[0]) node = module.createUnaryOp(node->op, child);
+      if (child != node->operands[0]) node = rebuildWithOperands(module, node, {child});
     } else if (node->kind == NodeKind::BinaryOp && node->operands.size() == 2) {
       DAGNode* lhs = simplify(node->operands[0]);
       DAGNode* rhs = simplify(node->operands[1]);
@@ -142,7 +143,8 @@ class AlgebraicSimplifyVisitor {
   // If `n` represents the negation of some expression, return the inner expr.
   DAGNode* negInner(DAGNode* n) {
     if (!n) return nullptr;
-    if (n->kind == NodeKind::UnaryOp && n->op == '-' && n->operands.size() == 1) {
+    if (n->kind == NodeKind::UnaryOp && n->op == '-' && !isIncDec(n) &&
+        n->operands.size() == 1) {
       return n->operands[0];
     }
     if (n->kind == NodeKind::BinaryOp && n->op == '*' && n->operands.size() == 2) {
@@ -241,7 +243,8 @@ class AlgebraicSimplifyVisitor {
 
   DAGNode* applyIdentities(DAGNode* node) {
     // UnaryOp: --a → a
-    if (node->kind == NodeKind::UnaryOp && node->op == '-' && !node->operands.empty()) {
+    if (node->kind == NodeKind::UnaryOp && node->op == '-' && !isIncDec(node) &&
+        !node->operands.empty()) {
       DAGNode* inner = node->operands[0];
       if (inner->kind == NodeKind::UnaryOp && inner->op == '-') {
         simplifications++;
@@ -270,7 +273,7 @@ class AlgebraicSimplifyVisitor {
       if (isConst(lhs, 0)) { simplifications++; return rhs; }
       if (isConst(rhs, 0)) { simplifications++; return lhs; }
       // a + (-b) → a - b
-      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-') {
+      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-' && !isIncDec(rhs)) {
         simplifications++;
         return module.createBinaryOp('-', lhs, rhs->operands[0]);
       }
@@ -285,7 +288,7 @@ class AlgebraicSimplifyVisitor {
         return module.createConst(0, "0");
       }
       // a - (-b) → a + b
-      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-') {
+      if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-' && !isIncDec(rhs)) {
         simplifications++;
         return module.createBinaryOp('+', lhs, rhs->operands[0]);
       }

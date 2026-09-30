@@ -8,6 +8,7 @@
 
 #include "../ir/dag_node.h"
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/stmt_walk.h"
 #include "../ir/statement.h"
 
@@ -29,7 +30,7 @@ void flatten(DAGNode* n, int sign, std::vector<SignedTerm>& out) {
   } else if (n->kind == NodeKind::BinaryOp && n->op == '-') {
     flatten(n->operands[0], sign, out);
     flatten(n->operands[1], -sign, out);
-  } else if (n->kind == NodeKind::UnaryOp && n->op == '-') {
+  } else if (n->kind == NodeKind::UnaryOp && n->op == '-' && !isIncDec(n)) {
     flatten(n->operands[0], -sign, out);
   } else {
     out.push_back({sign, n});
@@ -128,7 +129,7 @@ class ReassociateVisitor {
           return module.createBinaryOp(node->op, newOps[0], newOps[1]);
         break;
       case NodeKind::UnaryOp:
-        if (newOps.size() == 1) return module.createUnaryOp(node->op, newOps[0]);
+        if (newOps.size() == 1) return rebuildWithOperands(module, node, newOps);
         break;
       case NodeKind::ArrayAccess:
         if (newOps.size() == 2)

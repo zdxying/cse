@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../ir/ir_module.h"
+#include "../ir/ir_utils.h"
 #include "../ir/statement.h"
 
 namespace cse {
@@ -107,7 +108,7 @@ DAGNode* rewriteIndexes(DAGNode* n, const Ctx& ctx) {
       if (ops.size() == 2) return ctx.mod.createBinaryOp(n->op, ops[0], ops[1]);
       break;
     case NodeKind::UnaryOp:
-      if (ops.size() == 1) return ctx.mod.createUnaryOp(n->op, ops[0]);
+      if (ops.size() == 1) return rebuildWithOperands(ctx.mod, n, ops);
       break;
     case NodeKind::ArrayAccess:
       if (ops.size() == 2) return ctx.mod.createArrayAccess(ops[0], ops[1], n->pure);

@@ -87,7 +87,7 @@ class ExprRecombineVisitor {
 
   // The inner expression of a negation (`-t` -> t), or nullptr.
   DAGNode* negInner(DAGNode* n) {
-    if (n && n->kind == NodeKind::UnaryOp && n->op == '-' &&
+    if (n && n->kind == NodeKind::UnaryOp && n->op == '-' && !isIncDec(n) &&
         n->operands.size() == 1)
       return n->operands[0];
     return nullptr;
