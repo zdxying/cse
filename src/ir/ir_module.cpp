@@ -12,7 +12,12 @@ namespace cse {
 namespace {
 
 // Format a constant for code emission with round-trip precision.
+//
+// Negative zero is not zero: `1.0 / -0.0` is -inf while `1.0 / 0.0` is +inf, so
+// the sign has to survive emission. Without this the `val == floor(val)` branch
+// below turns it into "0" -- an *integer* literal, which converts back to +0.0.
 std::string formatConst(double val) {
+  if (val == 0.0 && std::signbit(val)) return "-0.0";
   if (val == std::floor(val) && std::fabs(val) < 1e15)
     return std::to_string(static_cast<long long>(val));
   std::ostringstream oss;
@@ -125,12 +130,13 @@ DAGNode* IRModule::intern(DAGNode* candidate) {
 DAGNode* IRModule::createConst(double val, const std::string& text) {
   auto candidate = createNode(NodeKind::Constant);
   candidate->constVal = val;
-  std::string t = text.empty() ? formatConst(val) : text;
-  // Render integral constants without a trailing ".0" (array indices, etc.).
-  if (val == std::floor(val) && std::fabs(val) < 1e15) {
-    t = std::to_string(static_cast<long long>(val));
-  }
-  candidate->numText = t;
+  // A caller that knows the source spelling keeps it. Re-deriving the text from
+  // the double loses information the source had: `1e16` becomes a 17-digit
+  // integer, and `-0.0` becomes `-0` -- an integer literal again, i.e. +0.0 --
+  // which silently changed the value of `1.0 / -0.0`. Only a constant that
+  // nobody spelled is formatted here, and formatConst drops the trailing ".0"
+  // for integral values (array indices, and so on).
+  candidate->numText = text.empty() ? formatConst(val) : text;
   candidate->recomputeHash();
   return intern(candidate);
 }

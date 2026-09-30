@@ -1,5 +1,6 @@
 #include "codegen.h"
 
+#include <cmath>
 #include <algorithm>
 #include <unordered_set>
 
@@ -331,7 +332,22 @@ std::string CodeGen::emitExpr(DAGNode* node) {
 
     case NodeKind::ArrayAccess: {
       if (node->operands.size() != 2) return "";
-      return emitExpr(node->operands[0]) + "[" + emitExpr(node->operands[1]) + "]";
+      // A subscript has to be an integral expression, and `1.0` is not one.
+      // A constant's text is its *source spelling* and is deliberately not part
+      // of its identity (see dag_node.h), so one node can be reached both from
+      // an arithmetic operand (`1.0 * x`) and from an index slot (`feq[1]`).
+      // Emitting the spelling blindly produced `feq[1.0]`, which does not
+      // compile; an integral constant is written as an integer here.
+      DAGNode* idx = node->operands[1];
+      std::string index;
+      if (idx && idx->kind == NodeKind::Constant && idx->symbol.empty() &&
+          idx->constVal == std::floor(idx->constVal) &&
+          std::fabs(idx->constVal) < 1e15) {
+        index = std::to_string(static_cast<long long>(idx->constVal));
+      } else {
+        index = emitExpr(idx);
+      }
+      return emitExpr(node->operands[0]) + "[" + index + "]";
     }
 
     case NodeKind::MemberAccess: {

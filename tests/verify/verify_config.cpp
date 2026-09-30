@@ -6,6 +6,7 @@
 //
 // Build: g++ -std=c++17 -O2 -Isrc tests/verify/verify_config.cpp bin/libcse.a
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 
 #include "backend/codegen.h"
@@ -40,9 +41,36 @@ bool has(const std::string& hay, const std::string& needle) {
   return hay.find(needle) != std::string::npos;
 }
 
+// The value a single-statement function returns, when its body is exactly
+// `return <k>;`.
+//
+// Compared numerically rather than textually on purpose. A constant node carries
+// one spelling for every context it is reached from -- its text is not part of
+// its identity -- so the zero an identity folds to is emitted as `0` or as the
+// `0.0` the source wrote, depending on which came first. What the contract
+// promises is the value, not the spelling, and asserting the spelling is how a
+// test stops being able to see a real change.
+bool returnsValue(const std::string& out, double want) {
+  const size_t p = out.find("return ");
+  if (p == std::string::npos) return false;
+  const size_t e = out.find(';', p);
+  if (e == std::string::npos) return false;
+  const std::string expr = out.substr(p + 7, e - (p + 7));
+  try {
+    // std::stod parses a prefix and ignores the rest, so `0.0 * x` would read as
+    // the value 0. Require the whole expression to be consumed.
+    size_t used = 0;
+    const double v = std::stod(expr, &used);
+    return v == want &&
+           expr.find_first_not_of(" \t\r\n", used) == std::string::npos;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 // A value collapsed to 0 or 1 means the identity fired.
 bool collapsed(const std::string& out) {
-  return has(out, "return 0;") || has(out, "return 1;");
+  return returnsValue(out, 0.0) || returnsValue(out, 1.0);
 }
 
 int failures = 0;
@@ -93,13 +121,13 @@ int main() {
   // 3. allowUnsafeFpIdentities turns exactly those four on.
   cse::CSEConfig u = numericOnly();
   u.allowUnsafeFpIdentities = true;
-  expect("unsafe identities: x / x -> 1", has(optimize(selfDiv, u), "return 1;"),
+  expect("unsafe identities: x / x -> 1", returnsValue(optimize(selfDiv, u), 1.0),
          optimize(selfDiv, u));
-  expect("unsafe identities: x - x -> 0", has(optimize(selfSub, u), "return 0;"),
+  expect("unsafe identities: x - x -> 0", returnsValue(optimize(selfSub, u), 0.0),
          optimize(selfSub, u));
   expect("unsafe identities: x * 0 -> 0",
-         has(optimize(timesZero, u), "return 0;"), optimize(timesZero, u));
-  expect("unsafe identities: 0 / x -> 0", has(optimize(zeroOver, u), "return 0;"),
+         returnsValue(optimize(timesZero, u), 0.0), optimize(timesZero, u));
+  expect("unsafe identities: 0 / x -> 0", returnsValue(optimize(zeroOver, u), 0.0),
          optimize(zeroOver, u));
 
   // 4. Regrouping a multiplication chain changes FP rounding, so it needs
