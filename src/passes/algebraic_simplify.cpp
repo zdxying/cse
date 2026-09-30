@@ -121,14 +121,21 @@ class AlgebraicSimplifyVisitor {
   }
 
   // x * 2 -> x + x. Exact in IEEE-754 (doubling only changes the exponent), and
-  // overflow behaves the same way, so this needs no opt-in.
+  // overflow behaves the same way, so for *values* it needs no opt-in.
+  //
+  // It does duplicate the operand, though, so it may only be applied to an
+  // operand that can be evaluated twice. `2 * f()` calls f once while
+  // `f() + f()` calls it twice; `2 * ++y` increments y once while `++y + ++y`
+  // increments it twice and returns a different number. `pure` is precisely the
+  // "may be repeated or shared without changing anything" mark, so it gates the
+  // rewrite.
   DAGNode* strengthReduce(DAGNode* node) {
     if (node->op != '*') return node;
     DAGNode* lhs = node->operands[0];
     DAGNode* rhs = node->operands[1];
     // x * 2 → x + x
-    if (isConst(rhs, 2)) return module.createBinaryOp('+', lhs, lhs);
-    if (isConst(lhs, 2)) return module.createBinaryOp('+', rhs, rhs);
+    if (isConst(rhs, 2) && lhs->pure) return module.createBinaryOp('+', lhs, lhs);
+    if (isConst(lhs, 2) && rhs->pure) return module.createBinaryOp('+', rhs, rhs);
     return node;
   }
 
