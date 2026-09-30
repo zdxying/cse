@@ -55,7 +55,15 @@ bool DAGNode::sameContentAs(const DAGNode& other) const {
     // they were never interned.
     if (operands[i]->id != other.operands[i]->id) return false;
   }
-  if (kind == NodeKind::Constant && constVal != other.constVal) return false;
+  if (kind == NodeKind::Constant) {
+    // Compare the raw bits so `-0.0` and `+0.0` stay distinct, exactly as
+    // computeHash() hashes them. The `!=` test treats them as equal, which
+    // broke the "identity and hash fold the same field list" invariant.
+    uint64_t a, b;
+    std::memcpy(&a, &constVal, sizeof(a));
+    std::memcpy(&b, &other.constVal, sizeof(b));
+    if (a != b) return false;
+  }
   return true;
 }
 

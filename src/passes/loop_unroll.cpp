@@ -1,5 +1,7 @@
 #include "loop_unroll.h"
 
+#include <climits>
+#include <cmath>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -316,7 +318,13 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   DAGNode* rhs = f->cond->operands[1];
   if (!(lhs->kind == NodeKind::Variable && lhs->name == d->name)) return false;
   if (rhs->kind != NodeKind::Constant) return false;
-  int n = static_cast<int>(rhs->constVal);
+  // The bound must be exactly integral and fit an int: `i < 4.5` is a real loop
+  // of five iterations, and truncating it to `int` (4) would silently drop the
+  // last one; a bound above INT_MAX would overflow the cast.
+  double bound = rhs->constVal;
+  if (bound != std::floor(bound)) return false;
+  if (bound < 0.0 || bound > static_cast<double>(INT_MAX)) return false;
+  int n = static_cast<int>(bound);
   if (begin < 0 || n <= begin || (n - begin) > maxUnroll) return false;
 
   // update: ++var, var++, or var = var + 1

@@ -139,6 +139,17 @@ int main() {
   expect("allowFpReassoc: a * (b * c) regrouped",
          !has(optimize(mulChain, r), "(b * c)"), optimize(mulChain, r));
 
+  // 5. `-0.0` and `+0.0` are different constants: they compare equal under
+  //    `!=`, but they differ as values (1/-0.0 is -inf, 1/0.0 is +inf) and as
+  //    bit patterns. Identity must compare the raw bits, exactly as the hash
+  //    does; a `!=` here would silently re-merge them.
+  {
+    cse::IRModule m;
+    cse::DAGNode* neg = m.createConst(-0.0, "-0.0");
+    cse::DAGNode* pos = m.createConst(0.0, "0.0");
+    expect("sameContentAs: -0.0 and +0.0 differ", !neg->sameContentAs(*pos), "");
+  }
+
   std::printf(failures == 0 ? "\nALL CONFIG CHECKS PASSED\n"
                             : "\n%d CONFIG CHECK(S) FAILED\n",
               failures);

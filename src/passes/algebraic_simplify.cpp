@@ -15,15 +15,6 @@ namespace cse {
 
 namespace {
 
-// Format a constant for code emission with round-trip precision.
-std::string numText(double v) {
-  if (v == static_cast<long long>(v) && std::abs(v) < 1e15)
-    return std::to_string(static_cast<long long>(v));
-  std::ostringstream oss;
-  oss << std::setprecision(17) << v;
-  return oss.str();
-}
-
 }  // namespace
 
 class AlgebraicSimplifyVisitor {
@@ -201,7 +192,7 @@ class AlgebraicSimplifyVisitor {
 
     // All factors are constant: always fold, this is exact.
     if (nonConst.empty()) {
-      return module.createConst(constProd, numText(constProd));
+      return module.createConst(constProd, "");
     }
 
     // Rebuilding the chain left-associatively regroups the multiplications
@@ -211,7 +202,7 @@ class AlgebraicSimplifyVisitor {
 
     DAGNode* acc = nullptr;
     if (hasConst && constProd != 1.0) {
-      acc = module.createConst(constProd, numText(constProd));
+      acc = module.createConst(constProd, "");
     }
     for (auto* f : nonConst) {
       acc = acc ? module.createBinaryOp('*', acc, f) : f;

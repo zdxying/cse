@@ -287,15 +287,11 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
         case 'g': result = (lhs->constVal >= rhs->constVal) ? 1 : 0; break;
         default: return node;
       }
-      std::string text;
-      if (result == std::floor(result) && std::fabs(result) < 1e15) {
-        text = std::to_string(static_cast<long long>(result));
-      } else {
-        std::ostringstream oss;
-        oss << std::setprecision(17) << result;
-        text = oss.str();
-      }
-      return mod.createConst(result, text);
+      // Spelling is createConst()'s job: an empty text makes it re-derive the
+      // literal from the value through formatConst(), which keeps `-0.0` from
+      // collapsing to the integer `0` (i.e. +0.0). This local copy used to do
+      // its own formatting and dropped the sign.
+      return mod.createConst(result, "");
     }
   }
   return node;
