@@ -22,8 +22,13 @@ struct FuncSignature {
 };
 
 // IR Module — owns all DAG nodes and holds the function body.
-// Node pool ensures stable pointers; _hash_map enables CSE deduplication.
-// createBinaryOp/createMemberAccess/etc. check _hash_map before creating new nodes.
+//
+// The node pool keeps pointers stable and _hash_map implements hash-consing
+// (the CSE deduplication). Every node is built through one of the create*
+// factories below: they fill in all of the node's fields, compute its hash, and
+// only then offer it to intern(). `createNode` and `intern` are private --
+// deliberately, so that no call site can get that order wrong. The interning
+// protocol itself is documented in dag_node.h.
 class IRModule {
  public:
   IRModule() = default;
@@ -34,10 +39,10 @@ class IRModule {
   // Function body (structured statements)
   std::unique_ptr<StmtIR> body;
 
-  // Create a new DAG node
-  DAGNode* createNode(NodeKind kind);
+  // ----- Constants -----
 
-  // Create a constant node
+  // Create a constant node, deduplicated by value so that expressions built
+  // around the same literal share a DAG node (enables cross-statement CSE).
   DAGNode* createConst(double val, const std::string& text = "");
 
   // Create a constant node that carries a symbolic (declared) form for code
@@ -45,15 +50,33 @@ class IRModule {
   // value exists without a symbol, the symbol is attached to it.
   DAGNode* createSymbolicConst(double val, const std::string& symbol);
 
-  // Create a variable node
-  DAGNode* createVar(const std::string& name);
+  // ----- Leaves -----
+
+  // Get or create variable
+  DAGNode* getVar(const std::string& name);
+
+  // ----- Operators -----
 
   // Create a binary op node with CSE (hash-based dedup)
-  // Returns existing node if structurally identical node already exists.
   DAGNode* createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs);
 
-  // Create a unary op node
+  // A plain unary operator: `-x`, `!x`. Shared when its operand is.
   DAGNode* createUnaryOp(char op, DAGNode* operand);
+
+  // `++x` / `--x`. Carries a side effect, so it is never shared and never
+  // hoisted; the prefix form also yields the new value.
+  DAGNode* createPreIncDec(char op, DAGNode* operand);
+
+  // `x++` / `x--`. As above, but yields the old value.
+  DAGNode* createPostIncDec(char op, DAGNode* operand);
+
+  // `(typeName)operand`.
+  DAGNode* createCast(const std::string& typeName, DAGNode* operand);
+
+  // `cond ? trueExpr : falseExpr`.
+  DAGNode* createTernary(DAGNode* cond, DAGNode* trueExpr, DAGNode* falseExpr);
+
+  // ----- Memory access and calls -----
 
   // Create an array access node.
   // `shareable`: if true, structurally identical loads share a node. Only safe
@@ -76,19 +99,33 @@ class IRModule {
   DAGNode* createCall(DAGNode* callee, const std::vector<DAGNode*>& args,
                       bool pure = false);
 
-  // CSE lookup: find existing node with same structural hash.
-  // If found, returns existing (dedup); otherwise registers candidate.
-  DAGNode* findExistingNode(DAGNode* candidate);
+  // ----- Invariants -----
 
-  // Get or create variable
-  DAGNode* getVar(const std::string& name);
+  // Debug-build check of the interning protocol: every interned node is
+  // shareable, every interned node's hash still describes its content, and no
+  // bucket holds two distinct nodes that denote the same node. A few lines that
+  // catch exactly the class of defect that silently produced wrong code.
+  // Compiled out under NDEBUG.
+  void verify() const;
 
  private:
+  // Allocate a node. It is NOT interned: the caller must finish filling it in,
+  // call recomputeHash(), and then hand it to intern().
+  DAGNode* createNode(NodeKind kind);
+
+  // Offer a fully built node to the hash map: returns an existing
+  // content-identical node when there is one, registers the candidate
+  // otherwise, and returns the candidate unregistered when it is not shareable.
+  DAGNode* intern(DAGNode* candidate);
+
+  DAGNode* createUnaryOpImpl(char op, DAGNode* operand, const std::string& name,
+                             bool postfix, bool pure);
+
   // Node pool - owns all DAG nodes
   std::vector<std::unique_ptr<DAGNode>> _node_pool;
 
   // Hash map for CSE: hash → nodes with that hash (bucket, so hash collisions
-  // never evict each other).
+  // never evict each other). Only shareable nodes are registered here.
   std::unordered_map<uint64_t, std::vector<DAGNode*>> _hash_map;
 
   // Variable cache: name → node

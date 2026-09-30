@@ -24,6 +24,10 @@ void PassManager::runAll(IRModule& module, bool verbose) {
       std::cerr << "[cse] pass: " << pass->name() << "\n";
     }
     pass->run(module);
+    // A pass may not leave the DAG in a state the next one cannot reason about.
+    // Free in a release build; in a debug build it asserts on the first pass
+    // that breaks the interning invariant (see dag_node.h).
+    module.verify();
   }
 }
 

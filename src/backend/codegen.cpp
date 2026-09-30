@@ -316,12 +316,10 @@ std::string CodeGen::emitExpr(DAGNode* node) {
     case NodeKind::UnaryOp: {
       if (node->operands.empty()) return "";
       std::string operand = emitExpr(node->operands[0]);
-      if (node->name == "postfix") {
-        return operand + node->op;
-      }
-      // Check for ++ and -- operators stored in name field
-      if (node->name == "++" || node->name == "--") {
-        return node->name + operand;
+      if (isIncDec(node)) {
+        // `x++` yields the old value and `++x` the new one. Which of the two
+        // this is lives in `postfix`; the spelling alone cannot say it.
+        return node->postfix ? operand + node->name : node->name + operand;
       }
       // Prefix unary: parenthesize compound operands to preserve precedence.
       if (node->operands[0]->kind == NodeKind::BinaryOp ||

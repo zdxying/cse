@@ -224,8 +224,7 @@ void processBlock(BlockIR* block, const Ctx& outer) {
       }
     } else if (stmt->kind == StmtIRKind::ExprStmt) {
       auto* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      if (e && e->kind == NodeKind::UnaryOp &&
-          (e->name == "++" || e->name == "--") && !e->operands.empty() &&
+      if (e && isIncDec(e) && !e->operands.empty() &&
           e->operands[0]->kind == NodeKind::Variable) {
         auto it = known.find(e->operands[0]->name);
         if (it != known.end()) it->second += (e->name == "++") ? 1.0 : -1.0;

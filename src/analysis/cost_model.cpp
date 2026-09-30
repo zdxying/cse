@@ -35,7 +35,7 @@ int loopTripCount(ForLoopIR* f) {
   if (n <= 0) return 0;
 
   bool updateOk = false;
-  if (f->update && f->update->kind == NodeKind::UnaryOp && f->update->name == "++" &&
+  if (isIncDec(f->update) && f->update->name == "++" &&
       !f->update->operands.empty() && f->update->operands[0]->kind == NodeKind::Variable &&
       f->update->operands[0]->name == d->name) {
     updateOk = true;

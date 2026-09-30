@@ -101,49 +101,9 @@ DAGNode* freshen(IRModule& mod, DAGNode* n) {
     if (r != op) changed = true;
   }
   if (n->pure && !changed) return n;
-  switch (n->kind) {
-    case NodeKind::Constant:
-    case NodeKind::Variable:
-      return n;
-    case NodeKind::BinaryOp:
-      if (ops.size() == 2) return mod.createBinaryOp(n->op, ops[0], ops[1]);
-      break;
-    case NodeKind::UnaryOp:
-      if (ops.size() == 1) {
-        DAGNode* u = mod.createUnaryOp(n->op, ops[0]);
-        if (!n->name.empty()) u->name = n->name;
-        return u;
-      }
-      break;
-    case NodeKind::ArrayAccess:
-      if (ops.size() == 2) return mod.createArrayAccess(ops[0], ops[1], n->pure);
-      break;
-    case NodeKind::MemberAccess:
-      if (ops.size() == 1) return mod.createMemberAccess(ops[0], n->name, n->pure);
-      break;
-    case NodeKind::ArrowAccess:
-      if (ops.size() == 1) return mod.createArrowAccess(ops[0], n->name, n->pure);
-      break;
-    case NodeKind::Call: {
-      std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
-      return mod.createCall(ops[0], args, n->pure);
-    }
-    case NodeKind::Cast: {
-      DAGNode* node = mod.createNode(NodeKind::Cast);
-      node->name = n->name;
-      node->operands = ops;
-      return mod.findExistingNode(node);
-    }
-    case NodeKind::Ternary: {
-      DAGNode* node = mod.createNode(NodeKind::Ternary);
-      node->op = n->op;
-      node->operands = ops;
-      return mod.findExistingNode(node);
-    }
-    default:
-      break;
-  }
-  return n;
+  // Impure nodes are never interned, so rebuilding them -- even with unchanged
+  // operands -- is what gives each unrolled iteration its own load / call.
+  return rebuildWithOperands(mod, n, ops);
 }
 
 // Give every expression in the statement tree its own impure loads / calls.
@@ -361,7 +321,7 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
 
   // update: ++var, var++, or var = var + 1
   bool updateOk = false;
-  if (f->update && f->update->kind == NodeKind::UnaryOp && f->update->name == "++" &&
+  if (isIncDec(f->update) && f->update->name == "++" &&
       f->update->op == '+' && !f->update->operands.empty() &&
       f->update->operands[0]->kind == NodeKind::Variable &&
       f->update->operands[0]->name == d->name) {

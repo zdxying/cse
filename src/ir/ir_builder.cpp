@@ -442,31 +442,25 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
     case ExprKind::Call:
       return buildCall(expr);
 
+    // Operands are built in a fixed order and passed in, rather than as
+    // function arguments: argument evaluation order is unspecified, and node
+    // ids -- which the extracted temporary names are derived from -- have to be
+    // reproducible.
     case ExprKind::Ternary: {
       DAGNode* cond = buildExpr(*expr.cond);
       DAGNode* trueExpr = buildExpr(*expr.trueExpr);
       DAGNode* falseExpr = buildExpr(*expr.falseExpr);
-      auto node = _module->createNode(NodeKind::Ternary);
-      node->op = '?';
-      node->operands = {cond, trueExpr, falseExpr};
-      return _module->findExistingNode(node);
+      return _module->createTernary(cond, trueExpr, falseExpr);
     }
 
     case ExprKind::Cast: {
       DAGNode* operand = buildExpr(*expr.operand);
-      auto node = _module->createNode(NodeKind::Cast);
-      node->name = expr.castType;
-      node->operands = {operand};
-      return _module->findExistingNode(node);
+      return _module->createCast(expr.castType, operand);
     }
 
     case ExprKind::PostfixOp: {
       DAGNode* operand = buildExpr(*expr.operand);
-      auto node = _module->createNode(NodeKind::UnaryOp);
-      node->op = expr.op;
-      node->operands = {operand};
-      node->name = "postfix";
-      return _module->findExistingNode(node);
+      return _module->createPostIncDec(expr.op, operand);
     }
   }
   return nullptr;
@@ -545,29 +539,19 @@ IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
 
     case ExprKind::Cast: {
       DAGNode* op = buildValue(*expr.operand).scalar;
-      auto node = _module->createNode(NodeKind::Cast);
-      node->name = expr.castType;
-      node->operands = {op};
-      return makeScalar(_module->findExistingNode(node));
+      return makeScalar(_module->createCast(expr.castType, op));
     }
 
     case ExprKind::Ternary: {
       DAGNode* cond = buildValue(*expr.cond).scalar;
       DAGNode* t = buildValue(*expr.trueExpr).scalar;
       DAGNode* f = buildValue(*expr.falseExpr).scalar;
-      auto node = _module->createNode(NodeKind::Ternary);
-      node->op = '?';
-      node->operands = {cond, t, f};
-      return makeScalar(_module->findExistingNode(node));
+      return makeScalar(_module->createTernary(cond, t, f));
     }
 
     case ExprKind::PostfixOp: {
       DAGNode* op = buildValue(*expr.operand).scalar;
-      auto node = _module->createNode(NodeKind::UnaryOp);
-      node->op = expr.op;
-      node->operands = {op};
-      node->name = "postfix";
-      return makeScalar(_module->findExistingNode(node));
+      return makeScalar(_module->createPostIncDec(expr.op, op));
     }
   }
   return makeScalar(nullptr);
@@ -609,14 +593,19 @@ IRBuilder::VecValue IRBuilder::valueBinary(const Expr& expr) {
 
 IRBuilder::VecValue IRBuilder::valueUnary(const Expr& expr) {
   VecValue a = buildValue(*expr.operand);
+  // `++` / `--` share a character with the sign they are not: they mean a
+  // different operation, and they have a side effect. They have to be built as
+  // such, not as a plain unary that gets patched afterwards.
+  const bool incDec = (expr.name == "++" || expr.name == "--");
   if (a.vec) {
     std::vector<DAGNode*> comps;
-    for (auto* ci : a.comps) comps.push_back(_module->createUnaryOp(expr.op, ci));
+    for (auto* ci : a.comps)
+      comps.push_back(incDec ? _module->createPreIncDec(expr.op, ci)
+                             : _module->createUnaryOp(expr.op, ci));
     return makeVector(std::move(comps));
   }
-  DAGNode* n = _module->createUnaryOp(expr.op, a.scalar);
-  if (expr.name == "++" || expr.name == "--") n->name = expr.name;
-  return makeScalar(n);
+  return makeScalar(incDec ? _module->createPreIncDec(expr.op, a.scalar)
+                           : _module->createUnaryOp(expr.op, a.scalar));
 }
 
 IRBuilder::VecValue IRBuilder::valueArray(const Expr& expr) {
@@ -696,14 +685,13 @@ DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
 
 DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
   DAGNode* operand = buildExpr(*expr.operand);
-  // ++ / -- have side effects: keep them distinct and never hoist/dedupe them.
-  bool isIncDec = (expr.name == "++" || expr.name == "--");
-  auto node = _module->createUnaryOp(expr.op, operand);
-  if (isIncDec) {
-    node->name = expr.name;
-    node->pure = false;
-  }
-  return node;
+  // `++x` / `--x` have side effects: the operator spelling and the
+  // not-shareable mark belong to the node from the start, because they are part
+  // of its identity. Creating it as a plain unary and writing those two fields
+  // afterwards is exactly how `-x` and `--x` came to share one node.
+  if (expr.name == "++" || expr.name == "--")
+    return _module->createPreIncDec(expr.op, operand);
+  return _module->createUnaryOp(expr.op, operand);
 }
 
 DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {

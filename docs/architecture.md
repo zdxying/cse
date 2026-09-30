@@ -204,10 +204,15 @@ DAGNode* IRModule::createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs) {
     auto candidate = createNode(NodeKind::BinaryOp);
     candidate->op = op;
     candidate->operands = {lhs, rhs};
-    candidate->recomputeHash();
-    return findExistingNode(candidate);  // 结构相同则复用已有节点
+    candidate->recomputeHash();   // 语义字段全部写完之后才计算
+    return intern(candidate);     // 结构相同则复用；不 pure 则原样返回
 }
 ```
+
+`createNode` 与 `intern` 都是 private：节点只能经由按种类划分的工厂产生，而工厂负责
+「先填满语义字段 → 再算哈希 → 再入桶」这个顺序，`intern` 统一拒绝把不 `pure` 的节点
+登记进表。文档化的协议与不变量检查见 `src/ir/dag_node.h` 与
+`IRModule::verify()`（每个 Pass 之后在 debug 构建下断言）。
 
 **优点**：零额外开销，在构建时自动完成
 **局限**：只识别结构完全相同的表达式，不识别代数等价（如 `(a*b)*c` ≠ `a*(b*c)`）

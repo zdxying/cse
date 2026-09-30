@@ -49,41 +49,27 @@ bool initDepsStable(DAGNode* init,
 }
 
 // Substitute variables in a DAG subtree, rebuilding parent nodes as needed.
+// The kind -> factory mapping lives in rebuildWithOperands (ir_utils.h); this
+// function only owns the "when to rebuild" decision. It used to carry its own
+// copy of the switch, which dropped the ++/-- spelling of a rebuilt unary and
+// silently discarded a substitution into a cast or a conditional.
 DAGNode* propExpr(DAGNode* e, IRModule& mod,
-                   const std::unordered_map<std::string, DAGNode*>& defs) {
+                  const std::unordered_map<std::string, DAGNode*>& defs) {
   if (!e) return nullptr;
   if (e->kind == NodeKind::Variable) {
     auto it = defs.find(e->name);
-    if (it != defs.end()) return it->second;
-    return e;
+    return it != defs.end() ? it->second : e;
   }
   bool changed = false;
   std::vector<DAGNode*> newOps;
+  newOps.reserve(e->operands.size());
   for (auto* op : e->operands) {
     DAGNode* r = propExpr(op, mod, defs);
     newOps.push_back(r);
     if (r != op) changed = true;
   }
   if (!changed) return e;
-  // Rebuild node through factory for CSE dedup
-  switch (e->kind) {
-    case NodeKind::BinaryOp:
-      return mod.createBinaryOp(e->op, newOps[0], newOps[1]);
-    case NodeKind::UnaryOp:
-      return mod.createUnaryOp(e->op, newOps[0]);
-    case NodeKind::ArrayAccess:
-      return mod.createArrayAccess(newOps[0], newOps[1], e->pure);
-    case NodeKind::MemberAccess:
-      return mod.createMemberAccess(newOps[0], e->name, e->pure);
-    case NodeKind::ArrowAccess:
-      return mod.createArrowAccess(newOps[0], e->name, e->pure);
-    case NodeKind::Call: {
-      std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
-      return mod.createCall(newOps[0], args, e->pure);
-    }
-    default:
-      return e;
-  }
+  return rebuildWithOperands(mod, e, newOps);
 }
 
 // Walk statements and collect the definitions that may be inlined.

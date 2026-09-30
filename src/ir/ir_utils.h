@@ -106,8 +106,7 @@ inline void collectWrittenNames(StmtIR* stmt,
     case StmtIRKind::ExprStmt: {
       DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
       if (!e) break;
-      if (e->kind == NodeKind::UnaryOp &&
-          (e->name == "++" || e->name == "--") && !e->operands.empty()) {
+      if (isIncDec(e) && !e->operands.empty()) {
         std::string root = lvalueRoot(e->operands[0]);
         if (!root.empty()) out.insert(root);
       } else if (e->kind == NodeKind::BinaryOp && e->op == '=' &&
@@ -122,58 +121,84 @@ inline void collectWrittenNames(StmtIR* stmt,
   }
 }
 
+// Rebuild `node` with a new operand list, through IRModule's factories -- so the
+// result is hashed and interned exactly like a node the frontend built.
+//
+// This is the single place that knows the node-kind -> factory mapping. It used
+// to be copied into every pass that rewrote a subtree (substitute, ValueProp,
+// the unroller), and the copies had drifted: ValueProp's dropped the ++/--
+// spelling, and none of them handled Cast or Ternary -- so a substitution into a
+// cast was silently discarded.
+//
+// Returns `node` unchanged when the kind has no rebuild rule or the arity does
+// not match, so callers can treat "nothing to do" and "cannot rebuild" alike.
+inline DAGNode* rebuildWithOperands(IRModule& mod, DAGNode* node,
+                                    const std::vector<DAGNode*>& ops) {
+  if (!node) return nullptr;
+  switch (node->kind) {
+    case NodeKind::BinaryOp:
+      if (ops.size() == 2) return mod.createBinaryOp(node->op, ops[0], ops[1]);
+      break;
+    case NodeKind::UnaryOp:
+      if (ops.size() == 1) {
+        // The spelling and the prefix/postfix form are part of the node's
+        // identity, so they go through the factory. Patching them onto the
+        // returned node would leave its hash describing a different node.
+        if (isIncDec(node)) {
+          return node->postfix ? mod.createPostIncDec(node->op, ops[0])
+                               : mod.createPreIncDec(node->op, ops[0]);
+        }
+        return mod.createUnaryOp(node->op, ops[0]);
+      }
+      break;
+    case NodeKind::ArrayAccess:
+      if (ops.size() == 2) return mod.createArrayAccess(ops[0], ops[1], node->pure);
+      break;
+    case NodeKind::MemberAccess:
+      if (ops.size() == 1)
+        return mod.createMemberAccess(ops[0], node->name, node->pure);
+      break;
+    case NodeKind::ArrowAccess:
+      if (ops.size() == 1)
+        return mod.createArrowAccess(ops[0], node->name, node->pure);
+      break;
+    case NodeKind::Call:
+      if (!ops.empty()) {
+        std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
+        return mod.createCall(ops[0], args, node->pure);
+      }
+      break;
+    case NodeKind::Cast:
+      if (ops.size() == 1) return mod.createCast(node->name, ops[0]);
+      break;
+    case NodeKind::Ternary:
+      if (ops.size() == 3) return mod.createTernary(ops[0], ops[1], ops[2]);
+      break;
+    case NodeKind::Constant:
+    case NodeKind::Variable:
+      break;
+  }
+  return node;
+}
+
 // Replace all Variable nodes with the given name in a DAG subtree.
 // Returns the (possibly new) root of the subtree.
 inline DAGNode* substitute(IRModule& mod, DAGNode* root,
                            const std::string& name, DAGNode* replacement) {
   if (!root) return nullptr;
-  if (root->kind == NodeKind::Variable && root->name == name)
-    return replacement;
+  if (root->kind == NodeKind::Variable && root->name == name) return replacement;
   if (root->operands.empty()) return root;
 
   bool changed = false;
   std::vector<DAGNode*> newOps;
+  newOps.reserve(root->operands.size());
   for (auto* op : root->operands) {
     DAGNode* r = substitute(mod, op, name, replacement);
     newOps.push_back(r);
     if (r != op) changed = true;
   }
   if (!changed) return root;
-
-  // Rebuild node through factory to get CSE dedup
-  switch (root->kind) {
-    case NodeKind::BinaryOp:
-      return mod.createBinaryOp(root->op, newOps[0], newOps[1]);
-    case NodeKind::UnaryOp: {
-      DAGNode* u = mod.createUnaryOp(root->op, newOps[0]);
-      if (!root->name.empty()) u->name = root->name;  // preserve ++ / --
-      return u;
-    }
-    case NodeKind::ArrayAccess:
-      return mod.createArrayAccess(newOps[0], newOps[1], root->pure);
-    case NodeKind::MemberAccess:
-      return mod.createMemberAccess(newOps[0], root->name, root->pure);
-    case NodeKind::ArrowAccess:
-      return mod.createArrowAccess(newOps[0], root->name, root->pure);
-    case NodeKind::Call: {
-      std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
-      return mod.createCall(newOps[0], args, root->pure);
-    }
-    case NodeKind::Cast: {
-      DAGNode* node = mod.createNode(NodeKind::Cast);
-      node->name = root->name;
-      node->operands = newOps;
-      return mod.findExistingNode(node);
-    }
-    case NodeKind::Ternary: {
-      DAGNode* node = mod.createNode(NodeKind::Ternary);
-      node->op = root->op;
-      node->operands = newOps;
-      return mod.findExistingNode(node);
-    }
-    default:
-      return root;
-  }
+  return rebuildWithOperands(mod, root, newOps);
 }
 
 // Constant folding: if a BinaryOp has two Constant operands, compute the result.

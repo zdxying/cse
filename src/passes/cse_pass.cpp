@@ -134,57 +134,74 @@ static bool usesAreStable(DAGNode* node, const std::vector<size_t>& uses,
 
 // ===== Phase 2: Replace all references to a target node with a variable =====
 
+// Rewrite every reference to `target` *inside* `node` -- never `node` itself.
+//
+// The rewrite is bottom-up and produces its results through the module's
+// factories rather than assigning into an existing node's operand vector. That
+// assignment was the last place where an interned node's content could change
+// behind its hash: the node stayed registered under a hash that described a
+// different node, so the same node could later be handed back for two different
+// expressions. IRModule::verify() now catches that class of write.
+static DAGNode* rewriteOperands(IRModule& module, DAGNode* node, DAGNode* target,
+                                DAGNode* replacement) {
+  if (!node) return nullptr;
+  bool changed = false;
+  std::vector<DAGNode*> ops;
+  ops.reserve(node->operands.size());
+  for (DAGNode* op : node->operands) {
+    DAGNode* r = (op == target)
+                     ? replacement
+                     : rewriteOperands(module, op, target, replacement);
+    ops.push_back(r);
+    if (r != op) changed = true;
+  }
+  if (!changed) return node;
+  return rebuildWithOperands(module, node, ops);
+}
+
 // Recursively walk a statement tree and replace all DAGNode* that match
 // `target` with `replacement` in expression positions.
-static void replaceRefsInStmt(StmtIR* stmt, DAGNode* target,
+static void replaceRefsInStmt(IRModule& module, StmtIR* stmt, DAGNode* target,
                                DAGNode* replacement) {
   if (!stmt) return;
 
-  // Recursive replacement on operands vectors
-  std::function<void(DAGNode*&)> replaceInExprTree = [&](DAGNode*& node) {
-    if (!node) return;
-    if (node == target) {
-      node = replacement;
-      return;
-    }
-    // Recurse into operands (need to handle the vector elements)
-    for (size_t i = 0; i < node->operands.size(); i++) {
-      if (node->operands[i] == target) {
-        node->operands[i] = replacement;
-      } else if (node->operands[i]) {
-        replaceInExprTree(node->operands[i]);
-      }
-    }
-  };
-
   // The lvalue of an element/member store is *written*, not evaluated: swapping
-  // it for a temporary would turn the store into a store to the temporary. Its
-  // index operands are ordinary expressions and are still replaced.
+  // it for a temporary would turn the store into a store to the temporary. Only
+  // its index operands -- ordinary expressions -- are rewritten, which is why
+  // the root of the lvalue is passed to rewriteOperands rather than to the
+  // expression-slot rewrite below.
   if (stmt->kind == StmtIRKind::Assign) {
     auto* assign = static_cast<AssignIR*>(stmt);
-    if (assign->targetExpr)
-      // (by reference: the slot in the operand vector is what gets rewritten)
-      for (auto*& idx : assign->targetExpr->operands) replaceInExprTree(idx);
+    if (assign->targetExpr) {
+      assign->targetExpr =
+          rewriteOperands(module, assign->targetExpr, target, replacement);
+    }
   }
-  forEachExpr(stmt, [&](DAGNode*& e) { replaceInExprTree(e); },
-              /*includeLvalue=*/false);
+  forEachExpr(
+      stmt,
+      [&](DAGNode*& e) {
+        e = (e == target) ? replacement
+                          : rewriteOperands(module, e, target, replacement);
+      },
+      /*includeLvalue=*/false);
 
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* block = static_cast<BlockIR*>(stmt);
-      for (auto& s : block->stmts) replaceRefsInStmt(s.get(), target, replacement);
+      for (auto& s : block->stmts)
+        replaceRefsInStmt(module, s.get(), target, replacement);
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      replaceRefsInStmt(f->init.get(), target, replacement);
-      replaceRefsInStmt(f->body.get(), target, replacement);
+      replaceRefsInStmt(module, f->init.get(), target, replacement);
+      replaceRefsInStmt(module, f->body.get(), target, replacement);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      replaceRefsInStmt(ie->thenBranch.get(), target, replacement);
-      replaceRefsInStmt(ie->elseBranch.get(), target, replacement);
+      replaceRefsInStmt(module, ie->thenBranch.get(), target, replacement);
+      replaceRefsInStmt(module, ie->elseBranch.get(), target, replacement);
       break;
     }
     default:
@@ -298,7 +315,7 @@ void CSEPass::run(IRModule& module) {
 
       // Replace all references to target with varNode across all statements
       for (auto& stmt : block->stmts) {
-        replaceRefsInStmt(stmt.get(), target, varNode);
+        replaceRefsInStmt(module, stmt.get(), target, varNode);
       }
 
       // Find the first statement that uses the extracted expression
