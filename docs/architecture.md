@@ -261,6 +261,14 @@ ForLoopIR
 
 通过 `foldConst()` 递归遍历 DAG，当 BinaryOp 的两个操作数都是 Constant 时计算结果。
 
+**例外：除数为 0 时不折叠。** 整数除零是未定义行为、浮点除零是 inf/NaN，`0` 是唯一对两者
+都错的答案，而 IR 不携带类型、无法区分二者。该表达式原样保留，交给编译器诊断或求值。
+
+**常量文本保留字面量拼写。** `createConst` 只在调用方未给出拼写时才自行格式化成不带
+`.0` 的整数值；源码里的 `1e16` / `0.5` / `-0.0` 按原样发射。`numText` 不参与节点身份，
+所以同一个常量节点可能同时出现在算术位置（`1.0 * x`）与下标位置（`feq[1]`）——
+下标由 `codegen` 强制发射为整数字面量，否则会写出不编译的 `feq[1.0]`。
+
 ### 5. 代数简化 (AlgebraicSimplifyPass)
 
 恒等消除 + 强度削减 + 叶子交换。整组规则受 `numeric_`（= 交换律 ∧ 结合律）门控；
@@ -347,6 +355,19 @@ return t;
 
 迭代至不动点，因为删除可能暴露新的死代码。
 
+**三条独立的不删除条件**（每一条都曾是生成错误代码的成因）：
+
+| 条件 | 反例 |
+|------|------|
+| 复杂 lvalue（`a[i] = v;`、`p->f = v;`）写的是内存，lvalue 不是一个可推理的名字 | —— |
+| 目标不是本函数**自己声明**的局部（形参 + 本模块的 `VarDecl`），可能是全局 | `g = a;` 曾被整条删除，函数外看不到赋值 |
+| 右值本身有副作用（`hasSideEffect`：不纯调用 / `++` `--` / 表达式形式的赋值） | `unused = y++;` 曾被删除，`y` 的增量随之消失，函数返回 `a` 而非 `a+1` |
+
+声明可删的条件同样是两个：**既没被读也没被写**。`countUses` 只数出现次数（读），
+对被写入过、却从没被读的名字一无所知——保留了一条 `unused = y++;` 之后，
+若把 `double unused` 删掉，留下的语句就引用了一个不存在的变量。
+`reads` 与 `written` 每轮重算，所以"删除赋值 → 下一轮释放声明"会自行收敛。
+
 ### 9. 前端 C++ 语法支持
 
 | 语法 | 状态 |
@@ -361,6 +382,11 @@ return t;
 | `#include` / `#ifdef` 等预处理指令 | 已跳过 |
 | `T{1}` 括号初始化 | 已支持（可配置简化） |
 | `++k` / `--k` 前缀运算符 | 已支持 |
+| `k++` / `k--` 后缀运算符 | 已支持（最长匹配成词，否则 `a++ + b` 与 `a + +b` 同流） |
+| 一元 `+` | 已支持 |
+| 科学计数法 / 浮点后缀字面量 | 已支持（`1e16` 曾lex成 `1` + 标识符 `e16`） |
+| `f(void)` 空形参列表 | 已支持（`void` 是类型关键字，需在 `)` 前特判） |
+| 字符串 / 字符字面量 | **不支持**（`"..."` 仍是 parse error；区域会被跳过并原样输出） |
 | 模板函数调用 `latset::c<LatSet>(k)` | 已支持（作为不透明调用） |
 
 ### 10. IR 工具函数 (ir_utils.h / stmt_walk.h)
@@ -375,7 +401,9 @@ return t;
 - `lvalueRoot(node)` — lvalue 的根变量名（`a[i].m` → `a`）
 - `collectWrittenNames(stmt, out)` — 一条语句写了哪些名字（见「正确性与安全模型」第 3 条）
 - `substitute(mod, root, name, replacement)` — 在 DAG 子树中替换变量
-- `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数）
+- `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数；除数为 0 时不折叠）
+- `hasSideEffect(node)` — 丢弃这个值会不会丢掉副作用（不纯调用 / `++` `--` / `=`
+  形式的赋值）。`hasImpureCall` 只看调用，DCE 曾因此删掉 `unused = y++;` 里的自增
 
 **为什么要有 `stmt_walk.h`**：表达式槽位的清单原先在约十个 pass 里各写一遍
 （`countUses`、DCE、五个重写型 pass、CSE 的三处收集/替换、cost model），
@@ -435,7 +463,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 |------|------|------|
 | **结合律仅限加法** | 乘法链只在常量因子层面重排 | 一般结合律仍不识别 |
 | **类型系统不完整** | 类型用字符串表示 | 不支持类型检查、模板实例化、类型推导 |
-| **无错误恢复** | 解析错误抛异常后终止 | 一次只能报告一个错误 |
+| **区域内无错误恢复** | 区域解析失败时整块跳过、原样输出，退出码区分全部成功 / 部分跳过 / 全失败 | 一个区域内只报第一个错误；跨区域已能继续 |
 | **仅处理标记区域** | 只解析 `//@cse` 标记的代码 | 无法跨区域优化 |
 | **作用域实现较浅** | alpha-rename 处理遮蔽；`for` 内声明简化为同一作用域 | 复杂的声明/生命周期场景可能不准 |
 | **数组复合赋值未建模** | `a[i] += x` 未展开为 `a[i] = a[i] + x` | 仅与变量 `x += y` 等价 |
@@ -443,6 +471,8 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | **引用型形参未纳入别名判据** | `_pointerParams` 只认类型含 `*`/`[` 的形参 | `const T&` 与另一个可写引用别名时，其 load 仍可能被跨 store 复用；`noAlias` 是出口 |
 | **写集合只看 lvalue 的根** | `collectWrittenNames` 对元素/成员写只记根变量名 | 若两个不同根实际别名同一对象，检查会认为"没写"；`noAlias` 与"根名不同即不别名"是当前的全部依据 |
 | **写集合不含声明** | `VarDecl` 不计入写集合 | 名字遮蔽已做 alpha-rename，故不会与旧绑定混淆；新增读写分析时注意这一点 |
+| **FLOP 口径是「每条语句一次」** | `cost_model` 按**提及该节点的语句数**计数，而不是 DAG 节点数 | 它要近似的是**生成代码**的开销：DAG 已哈希去重，而 codegen 在每个使用点重印该节点。改成整函数去重会把 `for (i<4) a+=b;` 展开出的四条 `a = a + b;` 报成 1 flop（实为 4），所以不是缺陷；真正未解决的是同一条语句内重复的子表达式只计一次 |
+| **常量文本不进身份** | `numText` / `symbol` 不是节点身份的一部分 | 同一个常量节点只有一份拼写，可能被算术位置与下标位置共用；下标由 codegen 保证整型 |
 
 > 注：不纯调用合并、跨 store 复用 load、分支外提、遮蔽、`==`/`<=` 运算符等
 > 正确性问题已在通用安全模式下修复（见「正确性与安全模型」）。
@@ -489,17 +519,31 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/verify/verify_store_aware.cpp` | 跨 store 重写的差分执行校验（含**真别名**调用） |
 | `tests/verify/verify_float_identities.cpp` | 特殊值下的数值校验（NaN 是否仍然产生） |
 | `tests/verify/verify_config.cpp` | 库层 `CSEConfig` 契约（CLI 无法隔离的新开关） |
+| `tests/fixtures/comment_braces.cpp` | 区域提取：注释里的 `{` `}` 不参与括号计数（默认档 + `-s` 档，4 flops） |
+| `tests/fixtures/dead_store_effects.cpp` | DCE 保留带副作用的死存储；纯死存储仍删除（1 flops + 三条形状检查） |
+| `tests/fixtures/constant_edges.cpp` | 除零不折叠、`-0.0` 与 `1e16` 拼写保留、共享字面量的下标仍为整数（5 / `-s` 6 flops + 三条文本检查） |
+| `tests/fixtures/void_param.cpp` | `f(void)` 可解析，普通形参列表不受影响（4 flops） |
+| `tests/verify/verify_comment_braces.cpp` | 注释含括号的区域的数值校验 |
+| `tests/verify/verify_dead_store_effects.cpp` | 自增/自减、全局写、不纯调用、纯死存储的数值校验 |
+| `tests/verify/verify_constant_edges.cpp` | 除零得 inf、`-0.0` 的符号、共享字面量下标的数值校验 |
+| `tests/verify/verify_void_param.cpp` | `(void)` 三种形态的数值校验 |
+| `tests/verify/verify_builder_guards.cpp` | 库层：空语句槽位必须被拒绝为 `CSEError` 而不是解引用空指针 |
 | `tests/verify/check_lattice.py` | 引擎 latset 表 vs FreeLB `lattice_set.h` 防漂移 |
 | `tests/csegen/{equilibrium,force,moment}.h` | `csegen` `.ur.h` 生成冒烟（Cell/TLatSet/TLatSetD/CellType 各形态） |
 
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、
-> float_identities），而非 golden-diff。注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变
-> flops，`a*x ± a` 的提取是 FLOP 中性的，跨成员写的错误共享也恰好省下同样的 flops
-> （store_aware 修复前后是同一个数）——这三类只能靠数值验证器或生成文本的形状检查。
+> float_identities、mixed_ops、write_visibility、effect_duplication、frontend_forms、
+> comment_braces、dead_store_effects、constant_edges、void_param），而非 golden-diff。
+> 注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变 flops，`a*x ± a` 的提取是 FLOP 中性的，
+> 跨成员写的错误共享也恰好省下同样的 flops（store_aware 修复前后是同一个数），
+> `y++` 与 `-0.0` 更是完全不进 flops——这几类只能靠数值验证器或生成文本的形状检查，
+> 因此 `run_tests.sh` 里另有一组 grep 形状检查（重组形态、强度削减、死存储、常量发射、
+> store 索引）。
 > FreeLB 侧 `verify_*.py` 是**数值**校验：解析两个文件、按公式求值再逐个比较，
-> 不做文本比对（所以重命名 `_cse_*` 这类内部标识符它发现不了）。
-> 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归（默认档 + `-r` 档 + `-s` 档）→ 数值校验 → `csegen`
+> 不做文本比对（所以重命名 `_cse_*` 这类内部标识符它发现不了，字面量拼写变化也不影响它）。
+> 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归（默认档 + `-r` 档 + `-s` 档）→
+> 形状检查 → 数值校验 → 库层契约（`verify_config` + `verify_builder_guards`）→ `csegen`
 > 冒烟；`check_lattice.py` 与 FreeLB 侧 `verify_*.py` 仅在存在 FreeLB checkout
 > （`FREELB=` 或 `~/FreeLB`）时运行，否则跳过。
 
