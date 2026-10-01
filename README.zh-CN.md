@@ -35,7 +35,7 @@ double compute(double a, double b, double c, double d, double e) {
 
 ```
 LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra]
-  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE
+  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE → Cleanup
 ```
 
 方括号中的环节可选或受配置门控。各 pass 的说明、插件槽位与完整的安全模型见
@@ -73,7 +73,7 @@ make clean
 
 | 选项 | 作用 |
 |------|------|
-| `-c`, `--cost` | 打印优化前后的 FLOP / 节点 / 语句 / 变量计数 |
+| `-c`, `--cost` | 打印优化前后的 FLOP / 向量操作 / 访存 / 节点 / 语句计数 |
 | `--json` | 以 JSON 输出代价报告（配合 `-c`） |
 | `-r`, `--recombine` | 启用提取公因子（`a*x + a*y → a*(x+y)`） |
 | `-s`, `--safe` | 面向任意 C++ 的保守语义 |
@@ -84,11 +84,18 @@ make clean
 
 ```bash
 ./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
+./bin/csegen --cost --lattice D3Q19 tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
 `csegen <input.h> <output.h>` 读取带 `// @cse` 标记的生产头文件，为每个受支持的格子集
 （D2Q5、D2Q9、D3Q7、D3Q15、D3Q19、D3Q27）发射完全展开的特化。输入文件的 basename
 必须是 `moment`、`equilibrium` 或 `force` 之一。
+
+`--cost` 报告与生成同一管线测得的优化前后 FLOP（`--json` 机器可读，
+`--lattice NAME` 可重复以限定格子集）。每次运行还会向 stderr 打印覆盖率报告
+（区域数 / 结构体数 / 发射与跳过数 / 特化总数），生成器无法处理的结构体会显式
+可见而不是被悄悄丢掉：
+`csegen: coverage: 7 regions, 7 structs (7 emitted, 0 skipped), 42 specializations`。
 
 FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构建入口与当前状态见
 [docs/freelb_port_status.md](docs/freelb_port_status.md)。
@@ -100,8 +107,9 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 1. **纯度**：调用默认视为有副作用，只有登记为纯的调用才允许去重或跨语句提取；
    任何"把两处出现折叠为一处"的重写都要求被折叠的子表达式是纯的。
 2. **内存**：只有只读根的 load 可共享；可变/未知根的 load 每次独立，避免跨 store 复用。
-   **`const T*` 形参不再自动视为只读根**——`const` 只承诺"不通过它写"；
-   需要显式打开 `noAlias` 才恢复共享。
+   **指针与引用形参（`T*`、`T&`、数组）一律不视为只读根**——`const` 只承诺"不通过它写"，
+   不承诺没有别的名字指向同一对象（`f(x, x)` 可把 `const T&` 与 `T&` 绑到同一实参）；
+   显式打开 `noAlias` 才恢复共享（FreeLB profile 已打开：其 kernel 的实参从不互为别名）。
 3. **赋值可见性**：变量按名字驻留，重新赋值不产生新节点，同名子表达式仍是**同一个节点**。
    因此跨语句改写必须检查写操作：CSE 只在"定义点到每个使用点之间都没有写入其操作数"时
    才提取；值传播只内联"初值依赖的变量在整个函数内都没被写过"的定义。元素/成员写
@@ -126,15 +134,16 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 | 阶段 | 检查内容 |
 |------|----------|
 | 代价回归 | `tests/fixtures/` 下各夹具的 FLOP 计数，分三档执行（默认 / `-r` / `-s`） |
-| 数值校验 | `verify_*` 编译并运行生成代码（equilibrium、safety、recombine、parens、store_aware、float_identities） |
+| 数值校验 | `verify_*` 编译并运行生成代码（equilibrium、safety、recombine、parens、store_aware、float_identities、ref_alias） |
 | 配置契约 | `verify_config.cpp` 链接 `libcse.a`，钉住 CLI 无法隔离的 `CSEConfig` 开关行为 |
 | `csegen` 冒烟 | 生成头中出现预期的代表性特化 |
 | latset 表防漂移 | 引擎表 vs FreeLB `lattice_set.h`（无 FreeLB checkout 时跳过） |
 | FreeLB 验证脚本 | `verify_{moment,equilibrium,force}.py`（无 FreeLB checkout 时跳过） |
 
-示例结果：`basic_cse` 11 → 10、`features` 51 → 50、
-`equilibrium_d3q19` 228 → 84 FLOPs（−63.2%）、`safety_cases` 20 → 20
-（验证等价，而非减少）。
+示例结果（before → after）：`basic_cse` 10 → 10、`features` 49 → 49、
+`equilibrium_d3q19` 323 → 84 FLOPs（−74.0%）、`safety_cases` 22 → 19、
+`cost_nested` 478 → 355（`const` 形参不再视为只读根后的保守计数）、
+`cost_descending` 35 → 35。
 
 ## 仓库结构
 

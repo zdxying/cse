@@ -90,11 +90,11 @@ FreeLB `tools/cse` 中原有的旧解释器/优化器。
 | `verify_moment.py` | 60/60 |
 | `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
 | `verify_equilibrium.py` | PASS |
-| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 49 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 19 / `parens` 19 / `store_aware` 19 / `cost_nested` 355 / `cost_descending` 35 flops（向量加权成本模型） |
+| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 49 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 19 / `parens` 19 / `cost_nested` 355 / `cost_descending` 35 flops（向量加权成本模型；另有 mixed_ops、write_visibility、effect_duplication 等 13 个夹具） |
 | 引擎 FLOP 回归（`-r` 档） | `recombine` 24 flops |
-| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 19 / `float_identities` 4 flops |
+| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 19（别名敏感，移入此档）/ `float_identities` 4 / `ref_alias` 1 / `mixed_ops` 9 / `constant_edges` 7 等 |
 | 引擎数值校验 `tests/verify/verify_*.cpp` | equilibrium / safety / recombine / parens / store_aware / float_identities 等全通过；`verify_config.cpp` 覆盖库层 `CSEConfig` 契约 |
-| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化；`csegen --cost` 输出 Total |
+| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化；`csegen --cost` 输出 Total；每次运行向 stderr 打印覆盖率（emitted/skipped） |
 | `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
 
 > FreeLB 头文件成本由 `csegen --cost`（`make cost`）测量，与生成 `.ur.h` 走同一
@@ -106,10 +106,16 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 ## 3. 已实现的接口/配置（供扩展参考）
 
 - CLI：`csegen <input.h> <output.h>`；`input` basename 决定 include/namespace
-  （仅 `moment.h`/`equilibrium.h`/`force.h`）。
+  （仅 `moment.h`/`equilibrium.h`/`force.h`）。支持 `--cost`（与生成同管线的
+  FLOP 报告，`--json` 机器可读）与 `--lattice NAME`（限定 latset，可重复）；
+  每次运行向 stderr 打印覆盖率报告（区域/结构体/发射/跳过）。
 - `CSEConfig`（`src/frontend/cse_config.h`，通用，无 FreeLB 语义）：
   - `assumeNumericCommutative/Associative`、`allowFpReassoc`、`allowUnsafeFpIdentities`、
     `noAlias`、`isPureFunction`
+  - **FreeLB profile 显式置 `noAlias = true`**：引用别名修复（`&` 形参与 `*`/`[` 同一条
+    规则）后，`const Vector&` / `CELL&` 形参的 load 不再跨写共享，force 特化会从
+    341/143 退到 626/217 flops；FreeLB kernel 的实参（cell / momenta / force 缓冲）
+    从不互为别名，因此在调用点断言并打开该许可。通用默认仍为 `false`。
   - 钩子：`resolveName`、`lowerVectors` + `vectorDim/isVectorType/isVectorProducingCall`、
     `vectorLocalName`、`constBindings`
 - `plugins/freelb/config.h`：`LatticeConfig`、`resolveLatsetConst`、

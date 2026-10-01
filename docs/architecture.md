@@ -77,7 +77,7 @@ struct CSEConfig {
   bool assumeNumericAssociative = false;          // 允许结合律/重结合
   bool allowFpReassoc = false;                    // 允许浮点重结合（含乘法链重排）
   bool allowUnsafeFpIdentities = false;           // 允许 x*0→0 / x-x→0 / 0/x→0 / x/x→1
-  bool noAlias = false;                           // 假设不同指针参数不别名
+  bool noAlias = false;                           // 假设不同指针/引用参数互不别名
   std::function<bool(const std::string&)> isPureFunction;  // 纯函数判定
 
   // 项目钩子（通用扩展点，`src/` 内无 FreeLB 语义）
@@ -169,7 +169,7 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 
 ```
 LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra]
-  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE
+  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE → Cleanup
 ```
 
 | Pass | 功能 |
@@ -184,6 +184,7 @@ LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra
 | **ExprRecombine** | 乘法因子提取（-r 启用；除法与不纯节点不参与，见「表达式重组」节） |
 | **ValueProp** | 内联简单初值到使用处（初值依赖的变量须在整个函数内未被写过） |
 | **DCE** | 删除未使用的变量声明和赋值 |
+| **Cleanup** | 末段清扫：删除没被读也没被写的零初始化声明、自赋值；合并链式赋值 |
 
 ### 插件注入
 
@@ -369,6 +370,12 @@ return t;
 若把 `double unused` 删掉，留下的语句就引用了一个不存在的变量。
 `reads` 与 `written` 每轮重算，所以"删除赋值 → 下一轮释放声明"会自行收敛。
 
+DCE 之后还跑一个 **CleanupPass** 做末段清扫：删除没被读**也没被写**的零初始化声明
+（与 DCE 同一条 written 判定——只看"没被读"会把 `unused = y++;` 的声明删掉、留下
+编译不过的悬空赋值，合并时曾真实发生）、删除自赋值（`u_value[i] = u_value[i];`）、
+合并链式的声明赋值与赋值语句。`pruneBlock` 目前只清理函数体顶层 `Block`，
+嵌套块的局限见"未完成"清单。
+
 ### 9. 前端 C++ 语法支持
 
 | 语法 | 状态 |
@@ -516,22 +523,24 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（4 flops after） |
 | `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（向量加权后 84 flops） |
 | `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（19 flops after） |
-| `tests/fixtures/cost_nested.cpp` | 成本模型：三角 dim 循环、runtime-bound 循环（计一次并标记 unknownLoops）、向量加权、helper call（355 flops after，合并后实测） |
+| `tests/fixtures/cost_nested.cpp` | 成本模型：三角 dim 循环、runtime-bound 循环（计一次并标记 unknownLoops）、向量加权、helper call（355 flops after，合并后实测；247 是依赖已删除的 `const`-shortcut 的旧值） |
 | `tests/fixtures/cost_descending.cpp` | 成本模型：递减循环（`>=`+`--`、`>`+`-=k`）正确计数，runtime-bound 循环标记 unknownLoops（35 flops） |
 | `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（24 flops after） |
 | `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
 | `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
 | `tests/verify/verify_recombine.cpp` | `-r` 输出的差分执行校验（数值等价 + 副作用出现次数） |
 | `tests/fixtures/parens.cpp` | 括号保持：右子节点在等高优先级时必须保留括号（默认档 + `-s` 档，19 flops） |
-| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名；成员、箭头、元素写；只写不读的局部必须活过 DCE；共享索引要两侧同时改写（20 flops） |
+| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名；成员、箭头、元素写；只写不读的局部必须活过 DCE；共享索引要两侧同时改写（19 flops，`-s` 档） |
 | `tests/fixtures/float_identities.cpp` | `-s` 档必须保留 0 / ±inf / NaN 处的 IEEE 语义（4 flops） |
 | `tests/verify/verify_parens.cpp` | 括号保持的差分执行校验（覆盖 `-` `/` `*` `%` 的各种右子节点） |
 | `tests/verify/verify_store_aware.cpp` | 跨 store 重写的差分执行校验（含**真别名**调用） |
+| `tests/fixtures/ref_alias.cpp` | 引用形参与指针同一条别名规则：`f(const V& v, V& w)` 以同一对象调用时不得跨写复用 `v` 的 load（1 flops，`-s` 档） |
+| `tests/verify/verify_ref_alias.cpp` | 真别名调用 `f(x, x)` 的数值校验（修复前得 2.0，应为 10.0） |
 | `tests/verify/verify_float_identities.cpp` | 特殊值下的数值校验（NaN 是否仍然产生） |
 | `tests/verify/verify_config.cpp` | 库层 `CSEConfig` 契约（CLI 无法隔离的新开关） |
 | `tests/fixtures/comment_braces.cpp` | 区域提取：注释里的 `{` `}` 不参与括号计数（默认档 + `-s` 档，4 flops） |
-| `tests/fixtures/dead_store_effects.cpp` | DCE 保留带副作用的死存储；纯死存储仍删除（1 flops + 三条形状检查） |
-| `tests/fixtures/constant_edges.cpp` | 除零不折叠、`-0.0` 与 `1e16` 拼写保留、共享字面量的下标仍为整数（5 / `-s` 6 flops + 三条文本检查） |
+| `tests/fixtures/dead_store_effects.cpp` | DCE 保留带副作用的死存储；纯死存储仍删除（3 flops + 三条形状检查） |
+| `tests/fixtures/constant_edges.cpp` | 除零不折叠、`-0.0` 与 `1e16` 拼写保留、共享字面量的下标仍为整数（6 / `-s` 7 flops + 三条文本检查） |
 | `tests/fixtures/void_param.cpp` | `f(void)` 可解析，普通形参列表不受影响（4 flops） |
 | `tests/verify/verify_comment_braces.cpp` | 注释含括号的区域的数值校验 |
 | `tests/verify/verify_dead_store_effects.cpp` | 自增/自减、全局写、不纯调用、纯死存储的数值校验 |
@@ -542,7 +551,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/csegen/{equilibrium,force,moment}.h` | `csegen` `.ur.h` 生成冒烟（Cell/TLatSet/TLatSetD/CellType 各形态） |
 
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
-> 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、
+> 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、ref_alias、
 > float_identities、mixed_ops、write_visibility、effect_duplication、frontend_forms、
 > comment_braces、dead_store_effects、constant_edges、void_param），而非 golden-diff。
 > 注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变 flops，`a*x ± a` 的提取是 FLOP 中性的，

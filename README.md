@@ -42,7 +42,7 @@ double compute(double a, double b, double c, double d, double e) {
 
 ```
 LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra]
-  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE
+  → [Reassociate] → CSEPass → [ExprRecombine → AlgebraicSimplify] → ValueProp → DCE → Cleanup
 ```
 
 Bracketed stages are optional or gated by configuration. The pass table, the
@@ -108,6 +108,11 @@ repeatable to restrict sets). This is what FreeLB's `make cost` uses, so the
 reported cost always matches the generated `.ur.h` — unlike running the generic
 `cse -c`, which does not apply the generator's per-shape vector lowering.
 
+Every run also prints a coverage report to stderr — regions, structs, emitted
+vs skipped, specialization count — so a struct the generator could not handle
+is visible instead of silently dropped:
+`csegen: coverage: 7 regions, 7 structs (7 emitted, 0 skipped), 42 specializations`.
+
 FreeLB consumes this through its `third_party/cse` submodule: see
 [docs/freelb_port_status.md](docs/freelb_port_status.md) for the integration,
 the build entry points and the current status.
@@ -123,9 +128,11 @@ preserves behavior through six mechanisms:
    pure.
 2. **Memory** — loads from read-only roots may be shared; loads from writable or
    unknown roots are kept independent so nothing is reused across a store.
-   `const T*` parameters get no special treatment: `const` only promises the
-   pointee is not written *through that pointer*. Opt in to `noAlias` to share
-   them.
+   Pointer *and* reference parameters (`T*`, `T&`, arrays) get no special
+   treatment: `const` only promises the pointee is not written *through that
+   parameter* — `f(x, x)` may legally bind a `const T&` and a `T&` to the same
+   object. Opt in to `noAlias` to share them (the FreeLB profile does, since
+   its kernels never alias their arguments).
 3. **Store visibility** — variables are interned by name, so reassigning one does
    not create a new node and two identical subexpressions remain the *same* node.
    Cross-statement rewrites therefore check for intervening writes: CSE only
@@ -159,7 +166,7 @@ the special-value identities (`x*0`, `x-x`, `0/x`, `x/x`) via
 | Stage | What it checks |
 |-------|----------------|
 | Cost regression | FLOP counts for the fixtures in `tests/fixtures/`, run under three configurations (default, `-r`, `-s`) |
-| Numerical | `verify_*` compile and run generated output (equilibrium, safety, recombine, parens, store_aware, float_identities, …) |
+| Numerical | `verify_*` compile and run generated output (equilibrium, safety, recombine, parens, store_aware, float_identities, ref_alias, …) |
 | Config contract | `verify_config.cpp` links `libcse.a` and pins the `CSEConfig` switch behaviour the CLI cannot isolate |
 | `csegen` smoke | representative specializations appear in generated headers |
 | Lattice drift guard | engine tables vs FreeLB `lattice_set.h` (skipped without a FreeLB checkout) |
@@ -173,7 +180,8 @@ as a lower bound. See `docs/cost_model_redesign.md`.
 
 Sample results (before → after): `basic_cse` 10 → 10, `features` 49 → 49,
 `equilibrium_d3q19` 323 → 84 FLOPs (−74.0%), `safety_cases` 22 → 19,
-`cost_nested` 478 → 247, `cost_descending` 35 → 35.
+`cost_nested` 478 → 355 (conservative since `const` parameters stopped being
+assumed read-only roots), `cost_descending` 35 → 35.
 
 ## Repository layout
 
