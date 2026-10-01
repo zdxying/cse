@@ -1,15 +1,12 @@
 #include "lattice_resolve.h"
 
 #include <algorithm>
-#include <array>
-#include <cctype>
-#include <iomanip>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include "ir/dag_node.h"
 #include "ir/ir_module.h"
+#include "ir/ir_utils.h"
 #include "ir/statement.h"
 #include "ir/stmt_walk.h"
 
@@ -147,7 +144,7 @@ class LatticeResolveVisitor {
         if (comp >= 0 && comp < lat->dim) {
           resolved++;
           double val = static_cast<double>(lat->c[k * lat->dim + comp]);
-          return module.createConst(val, numText(val));
+          return module.createConst(val);
         }
       }
     }
@@ -196,7 +193,7 @@ class LatticeResolveVisitor {
       if (r != op) changed = true;
     }
     if (!changed) return node;
-    return rebuild(node, newOps);
+    return rebuildWithOperands(module, node, newOps);
   }
 
  private:
@@ -243,41 +240,6 @@ class LatticeResolveVisitor {
     return sum;
   }
 
-  DAGNode* rebuild(DAGNode* node, const std::vector<DAGNode*>& ops) {
-    switch (node->kind) {
-      case NodeKind::BinaryOp:
-        if (ops.size() == 2) return module.createBinaryOp(node->op, ops[0], ops[1]);
-        break;
-      case NodeKind::UnaryOp:
-        if (ops.size() == 1) return module.createUnaryOp(node->op, ops[0]);
-        break;
-      case NodeKind::ArrayAccess:
-        if (ops.size() == 2)
-          return module.createArrayAccess(ops[0], ops[1], node->pure);
-        break;
-      case NodeKind::MemberAccess:
-        if (ops.size() == 1)
-          return module.createMemberAccess(ops[0], node->name, node->pure);
-        break;
-      case NodeKind::ArrowAccess:
-        if (ops.size() == 1)
-          return module.createArrowAccess(ops[0], node->name, node->pure);
-        break;
-      case NodeKind::Call: {
-        std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
-        return module.createCall(ops[0], args, node->pure);
-      }
-      default:
-        break;
-    }
-    return node;
-  }
-
-  static std::string numText(double v) {
-    std::ostringstream oss;
-    oss << std::setprecision(17) << v;
-    return oss.str();
-  }
 };
 
 class LatticeResolvePass : public Pass {

@@ -104,13 +104,6 @@ static void collectNestedNodes(StmtIR* stmt, bool nested,
 // variables it reads has been written in between. `collectWrittenNames` (in
 // ir_utils.h, shared with ValueProp) supplies the first half of that check.
 
-// Every variable name read by a subexpression.
-static void collectVarNames(DAGNode* n, std::unordered_set<std::string>& out) {
-  if (!n) return;
-  if (n->kind == NodeKind::Variable && !n->name.empty()) out.insert(n->name);
-  for (auto* op : n->operands) collectVarNames(op, out);
-}
-
 // Is it safe to hoist `node` to just before statement `insertPos`, given that it
 // is used by the statements in `uses`? Only if no statement strictly between the
 // definition point and a later use writes a variable the node reads.

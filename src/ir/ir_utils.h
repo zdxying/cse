@@ -46,6 +46,15 @@ inline void countVarUses(DAGNode* e,
   for (auto* op : e->operands) countVarUses(op, counts);
 }
 
+// Add every variable name read by an expression to `out` (deduplicated). Shared
+// by the passes that ask "which variables does this node depend on?" -- CSE's
+// stability check and the counter propagator each used to carry a private copy.
+inline void collectVarNames(DAGNode* n, std::unordered_set<std::string>& out) {
+  if (!n) return;
+  if (n->kind == NodeKind::Variable && !n->name.empty()) out.insert(n->name);
+  for (auto* op : n->operands) collectVarNames(op, out);
+}
+
 // Count how many times each variable name is used across a StmtIR tree.
 //
 // An element store counts its lvalue as a use of the root (and of its index

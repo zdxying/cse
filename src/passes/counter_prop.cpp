@@ -25,12 +25,6 @@ struct Ctx {
   const VectorLocalName& vecLocal;
 };
 
-void collectVarNamesExpr(DAGNode* e, std::unordered_set<std::string>& out) {
-  if (!e) return;
-  if (e->kind == NodeKind::Variable && !e->name.empty()) out.insert(e->name);
-  for (auto* op : e->operands) collectVarNamesExpr(op, out);
-}
-
 void collectVarNamesStmt(StmtIR* s, std::unordered_set<std::string>& out) {
   if (!s) return;
   switch (s->kind) {
@@ -41,37 +35,37 @@ void collectVarNamesStmt(StmtIR* s, std::unordered_set<std::string>& out) {
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(s);
       collectVarNamesStmt(f->init.get(), out);
-      collectVarNamesExpr(f->cond, out);
-      collectVarNamesExpr(f->update, out);
-      collectVarNamesExpr(f->updateRhs, out);
+      collectVarNames(f->cond, out);
+      collectVarNames(f->update, out);
+      collectVarNames(f->updateRhs, out);
       collectVarNamesStmt(f->body.get(), out);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(s);
-      collectVarNamesExpr(ie->cond, out);
+      collectVarNames(ie->cond, out);
       collectVarNamesStmt(ie->thenBranch.get(), out);
       collectVarNamesStmt(ie->elseBranch.get(), out);
       break;
     }
     case StmtIRKind::ExprStmt:
-      collectVarNamesExpr(static_cast<ExprStmtIR*>(s)->expr, out);
+      collectVarNames(static_cast<ExprStmtIR*>(s)->expr, out);
       break;
     case StmtIRKind::Assign: {
       auto* a = static_cast<AssignIR*>(s);
       if (!a->target.empty()) out.insert(a->target);
-      collectVarNamesExpr(a->targetExpr, out);
-      collectVarNamesExpr(a->value, out);
+      collectVarNames(a->targetExpr, out);
+      collectVarNames(a->value, out);
       break;
     }
     case StmtIRKind::VarDecl: {
       auto* d = static_cast<VarDeclIR*>(s);
       if (!d->name.empty()) out.insert(d->name);
-      collectVarNamesExpr(d->init, out);
+      collectVarNames(d->init, out);
       break;
     }
     case StmtIRKind::Return:
-      collectVarNamesExpr(static_cast<ReturnIR*>(s)->value, out);
+      collectVarNames(static_cast<ReturnIR*>(s)->value, out);
       break;
   }
 }
