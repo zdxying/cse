@@ -67,7 +67,16 @@ inline CSEConfig createFreeLBConfig(const LatticeConfig& lat = {}) {
   config.assumeNumericAssociative = true;
   config.allowFpReassoc = true;
   config.allowUnsafeFpIdentities = true;
-  config.noAlias = false;
+
+  // FreeLB kernels are never called with two parameters aliasing the same
+  // object: the cell, the momenta vectors and the force array are distinct
+  // buffers, and a `const Vector&` parameter is read-only for the kernel's
+  // lifetime. Asserting it re-enables sharing loads through reference
+  // parameters -- without it the aliasing rule makes every reference parameter
+  // a non-shareable root, which costs the force kernels ~85% of their CSE
+  // (D3Q19: 341 -> 626 flops). Generic C++ must not set this; `-s` keeps it
+  // off and stays sound.
+  config.noAlias = true;
   config.isPureFunction = isFreeLBPureFunction;
 
   config.resolveName = [lat](IRModule& mod, const std::string& name) {
