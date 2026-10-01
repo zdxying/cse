@@ -72,19 +72,24 @@ cost_stage() {
 # shared node at every use site, so the per-statement rule is the one that
 # tracks the emitted code. `frontend_forms` is the case that shows it -- its
 # `counted_postfix` unrolls to four `a = a + b;`, four real additions sharing
-# one node, and it is 4 of the 12.
+# one node.
+#
+# The numbers below are re-measured under the vector-weighted, unique-node cost
+# model merged from origin/main (vector ops cost their lane count; shared DAG
+# nodes count once), so several differ from the pre-merge values.
 cost_stage "default" "" default \
-  basic_cse=10 features=50 namespace_case=4 equilibrium_d3q19=84 \
-  safety_cases=20 parens=19 store_aware=20 mixed_ops=5 write_visibility=8 \
-  effect_duplication=7 frontend_forms=12 comment_braces=4 dead_store_effects=1 constant_edges=5 void_param=4 incdec_safety=6 loop_bound=4
+  basic_cse=10 features=49 namespace_case=4 equilibrium_d3q19=84 \
+  safety_cases=19 parens=19 store_aware=19 mixed_ops=8 write_visibility=12 \
+  effect_duplication=8 frontend_forms=13 comment_braces=4 dead_store_effects=3 constant_edges=6 void_param=4 incdec_safety=12 loop_bound=8 \
+  cost_nested=355 cost_descending=35
 cost_stage "-r" "-r" r \
   recombine=24
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
-  parens=19 store_aware=20 float_identities=4 mixed_ops=5 write_visibility=8 \
-  effect_duplication=7 frontend_forms=12 comment_braces=4 \
-  dead_store_effects=1 constant_edges=6 void_param=4 incdec_safety=6 loop_bound=4
+  parens=19 store_aware=19 float_identities=4 mixed_ops=9 write_visibility=12 \
+  effect_duplication=8 frontend_forms=13 comment_braces=4 \
+  dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -368,6 +373,16 @@ for base in equilibrium force moment; do
     exit 1
   fi
 done
+
+# --cost measures the emitted pipeline and must report a total.
+"$CSEGEN" --cost --lattice D3Q19 "$CSEGEN_DIR/moment.h" "$WORK/moment_cost.ur.h" \
+  >"$WORK/moment_cost.txt"
+if grep -q "Total: Before" "$WORK/moment_cost.txt"; then
+  echo "ok    csegen --cost"
+else
+  echo "FAIL  csegen --cost produced no report" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. FreeLB (optional)

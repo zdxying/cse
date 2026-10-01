@@ -72,6 +72,10 @@ class IRBuilder {
   std::string resolve(const std::string& name) const;
   DAGNode* varRef(const std::string& name);
 
+  // Lane count (0/1 = scalar) for a declared type, via
+  // CSEConfig::vectorLanes. Used to tag variable nodes for the cost model.
+  int typeLanes(const std::string& type) const;
+
   IRModule* _module;
   CSEConfig _config;
 

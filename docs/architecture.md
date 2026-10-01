@@ -499,16 +499,25 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | **错误恢复** | 遇到 `;` 或 `}` 时同步，继续解析 | 待实现 |
 | **CFG 支持** | 支持 break/continue/goto | 待实现 |
 
+### 延后项（可选）
+
+| 项 | 描述 | 状态 |
+|----|------|------|
+| **Cleanup 递归清理** | `CleanupPass::pruneBlock` 目前只清理函数体顶层 `Block`，不递归进入 `if`/嵌套块。向量 lowering 产生的自赋值（`u_value[i] = u_value[i];`）在 `LoopUnroll` 后位于顶层，已由本次修复覆盖；更深的嵌套场景需让 `pruneBlock` 递归 | 待实现 |
+| **生成物自赋值回归断言** | 在 `tests/run_tests.sh` 的 csegen 冒烟中，对生成输出断言不存在 `a[i] = a[i];`（python 正则 backreference），防止 `CleanupPass` 自赋值删除逻辑回归 | 待实现 |
+
 ## 测试覆盖
 
 | 测试 | 覆盖功能 |
 |------|----------|
-| `tests/fixtures/basic_cse.cpp` | 基本 CSE / 乘积链因式分解（11→10 flops） |
-| `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（51→50 flops） |
-| `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（6→4 flops） |
-| `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（228→84 flops） |
-| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（20→20，验证不劣化） |
-| `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（18→21 flops） |
+| `tests/fixtures/basic_cse.cpp` | 基本 CSE / 乘积链因式分解（10 flops after） |
+| `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（49 flops after；含 runtime-bound 循环，报告为下界） |
+| `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（4 flops after） |
+| `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（向量加权后 84 flops） |
+| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（19 flops after） |
+| `tests/fixtures/cost_nested.cpp` | 成本模型：三角 dim 循环、runtime-bound 循环（计一次并标记 unknownLoops）、向量加权、helper call（355 flops after，合并后实测） |
+| `tests/fixtures/cost_descending.cpp` | 成本模型：递减循环（`>=`+`--`、`>`+`-=k`）正确计数，runtime-bound 循环标记 unknownLoops（35 flops） |
+| `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（24 flops after） |
 | `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
 | `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
 | `tests/verify/verify_recombine.cpp` | `-r` 输出的差分执行校验（数值等价 + 副作用出现次数） |
@@ -547,20 +556,51 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 > 冒烟；`check_lattice.py` 与 FreeLB 侧 `verify_*.py` 仅在存在 FreeLB checkout
 > （`FREELB=` 或 `~/FreeLB`）时运行，否则跳过。
 
-### D3Q19 equilibrium 实测（cse -c，成本模型已计入循环次数）
+### 成本模型（重设计）
+
+成本模型现在按 **标量 FLOP、向量按 lane 加权** 计算：向量算子的代价为其 lane
+数，向量点积为 `2d-1`，纯 helper/intrinsic 调用由 FreeLB 插件按名给定代价
+（`getnorm2 -> 2d-1` 等），未知调用与无法解析的循环会被显式计数
+（`unknownLoops` / `unmodeledCalls`）。共享子表达式按 **唯一 DAG 节点** 计一次
+（与生成的 CSE 临时变量一致），循环体按执行次数缩放（三角 `for (b=a; b<d; ++b)`
+嵌套精确计数）。详见 `docs/cost_model_redesign.md`。
+
+### D3Q19 equilibrium 实测（cse -c，向量加权 + 唯一节点）
+
+`tests/fixtures/equilibrium_d3q19.cpp`（通用 `cse -c` 入口，引擎回归用）：
 
 | 版本 | FLOPs |
 |------|:-----:|
-| 原始循环版（Before） | 228 |
-| 手写展开版参考（历史基线） | 89 |
+| 原始循环版（Before） | 323 |
 | **CSE 工具输出（After）** | **84** |
 
-工具输出相对原始循环版节省 144 flops（63.2%）。结构：`var0 = 1 - 1.5*u²`
+工具输出相对原始循环版节省 239 flops（74.0%）。结构：`var0 = 1 - 1.5*u²`
 提取一次，每组方向对共享 `var0 + 4.5*uc²` 与 `3*uc`（符号规范化后正反方向
 复用同一 `3*uc` 节点），每条 feq 只做 `±3*uc` 与权重乘；数值校验最大误差 ~1e-17。
 
-> 注：手写版内联了 `u²`（7 flops），而工具把 `u.getnorm2()` 视为不透明的
-> Call（计 0 flops，隐藏 5 flops）。若按同一口径计入，工具与手写版均为 89。
+### 真实头文件成本（`make cost`，由 csegen 测量）
+
+FreeLB 头文件的成本由 **`csegen --cost`** 测量：它与生成 `.ur.h` 使用**同一条
+管线**（per-struct `lowerVectors`、`CounterPropPass`、recombine 设置），因此数值
+与生成代码严格一致。
+
+> 早期 `make cost` 调用 `cse -c`：既没有按 struct kind 开启向量 lowering，又用
+> `-r` 开启了 csegen 未启用的 recombine，导致 `moment/force` 的 After 多出一批
+> 并不存在的“向量操作”。改为 `csegen --cost` 后，`vector-ops` 在 moment/force
+> 上为 `0->0`，与标量化的 `.ur.h` 一致。（`cse -c` 仍是通用引擎入口，仅供夹具。）
+
+`make cost`（`tools/cse/Makefile`，默认 `LATTICES="D2Q9 D3Q19"`）输出：
+
+| 头文件 | lattice | Before | After | Saved | vector-ops |
+|--------|:-------:|:------:|:-----:|:-----:|:----------:|
+| `moment.h` | D2Q9 | 958 | 339 | 64.6% | 0→0 |
+| `moment.h` | D3Q19 | 3115 | 749 | 76.0% | 0→0 |
+| `equilibrium.h` | D2Q9 | 138 | 43 | 68.8% | 1→0 |
+| `equilibrium.h` | D3Q19 | 328 | 89 | 72.9% | 1→0 |
+| `force.h` | D2Q9 | 360 | 143 | 60.3% | 0→0 |
+| `force.h` | D3Q19 | 1254 | 341 | 72.8% | 0→0 |
+
+`equilibrium` 的 After=89 与手写参考基线一致。
 
 ## 构建
 

@@ -154,7 +154,14 @@ UrConfig detectUrConfig(const std::string& inputPath) {
 }
 
 bool generateUrHeader(const std::string& inputPath,
-                      const std::string& outputPath) {
+                      const std::string& outputPath,
+                      const UrGenerateOptions& opts) {
+  auto wantLattice = [&opts](const char* name) {
+    if (opts.lattices.empty()) return true;
+    for (const auto& l : opts.lattices)
+      if (l == name) return true;
+    return false;
+  };
   std::ifstream ifs(inputPath);
   if (!ifs.is_open()) {
     std::cerr << "csegen: cannot open " << inputPath << "\n";
@@ -180,13 +187,29 @@ bool generateUrHeader(const std::string& inputPath,
   out += "#include \"" + cfg.include + "\"\n";
   out += "#ifdef _UNROLLFOR\n";
   out += "namespace " + cfg.ns + " {\n\n";
+  // The POP storage strategy (cudev::DirectPop / cudev::RegPop) is a trailing
+  // template parameter of the cell, and the specialisations below are emitted
+  // generic over it.  Both branches therefore take the same four parameters so
+  // that one piece of emitted text parses in the host pass and in the device
+  // pass alike; the host alias accepts POPPOLICY and ignores it, which leaves it
+  // a free (unused) template parameter of the specialisation there.
   out += "#ifdef __CUDA_ARCH__\n";
-  out += "template <typename T, typename LatSet, typename TypePack>\n";
-  out += "using CELL = cudev::Cell<T, LatSet, TypePack>;\n";
+  out += "template <typename T, typename LatSet, typename TypePack, typename POPPOLICY>\n";
+  out += "using CELL = cudev::Cell<T, LatSet, TypePack, POPPOLICY>;\n";
   out += "#else\n";
-  out += "template <typename T, typename LatSet, typename TypePack>\n";
+  out += "template <typename T, typename LatSet, typename TypePack, typename POPPOLICY>\n";
   out += "using CELL = Cell<T, LatSet, TypePack>;\n";
   out += "#endif\n\n";
+  // In the host pass the alias above drops POPPOLICY, so nvcc emits one
+  // "template parameter POPPOLICY is not used in or cannot be deduced" (#842-D)
+  // per specialisation below -- 72 of them for the three bases, drowning any
+  // real diagnostic.  It is inherent to sharing one piece of emitted text
+  // between the two passes, so the warning is suppressed for exactly this file
+  // and re-enabled at the end of it.  g++ has no equivalent diagnostic, hence
+  // the __NVCC__ guard.
+  out += "#ifdef __NVCC__\n";
+  out += "#pragma nv_diag_suppress 842\n";
+  out += "#endif\n";
 
   int structCount = 0;
   // Coverage accounting: what was in the marked regions vs. what actually came
@@ -196,7 +219,9 @@ bool generateUrHeader(const std::string& inputPath,
   int skippedStructs = 0;
   int functionsInRegions = 0;
   std::vector<std::string> skippedNames;
-  const int latCount = static_cast<int>(sizeof(kLatsets) / sizeof(kLatsets[0]));
+  int latCount = 0;
+  for (const auto& l : kLatsets)
+    if (wantLattice(l.name)) ++latCount;
 
   for (const auto& region : regions) {
     CSEConfig parseCfg = createFreeLBConfig();
@@ -235,6 +260,7 @@ bool generateUrHeader(const std::string& inputPath,
       }
 
       for (const auto& lat : kLatsets) {
+        if (!wantLattice(lat.name)) continue;
         LatticeConfig latCfg{"LatSet", lat.name, lat.d, lat.q, 1.0 / 3.0};
         CSEConfig base = createFreeLBConfig(latCfg);
         // Only the force/moment shapes need Vector lowering; keep the
@@ -251,6 +277,8 @@ bool generateUrHeader(const std::string& inputPath,
             IRModule module;
             IRBuilder builder(&module, cfg2);
             builder.buildFunction(*method);
+            CostResult before;
+            if (opts.report) before = analyzeCost(module, &cfg2);
             std::unique_ptr<Pass> counterProp;
             if (cfg2.lowerVectors) {
               counterProp = createCounterPropPass(cfg2.vectorLocalName);
@@ -259,6 +287,15 @@ bool generateUrHeader(const std::string& inputPath,
                 cfg2, false, createLatticeResolvePass("LatSet", lat.name),
                 std::move(counterProp));
             pm.runAll(module);
+            if (opts.report) {
+              UrCostEntry e;
+              e.lattice = lat.name;
+              e.function = sd.name + "::" + method->name;
+              e.component = bindD ? static_cast<int>(dVal) : -1;
+              e.before = before;
+              e.after = analyzeCost(module, &cfg2);
+              opts.report->entries.push_back(std::move(e));
+            }
             CodeGen codegen;
             std::string body = codegen.generateBody(module, 2);
             body = replaceAll(body, "auto ", "const T ");
@@ -271,15 +308,31 @@ bool generateUrHeader(const std::string& inputPath,
               methods.find("GenericRho") != std::string::npos) {
             spec += "using GenericRho = typename CELLTYPE::GenericRho;\n";
           }
+          // For CellType structs, rewrite method signatures to use CELLTYPE
+          // instead of CELL (the source uses `using CELL = CELLTYPE;` internally)
+          if (kind == StructKind::CellType) {
+            methods = replaceAll(methods, " CELL&", " CELLTYPE&");
+            methods = replaceAll(methods, "CELL&", "CELLTYPE&");
+            methods = replaceAll(methods, " CELL ", " CELLTYPE ");
+            methods = replaceAll(methods, "CELL,", "CELLTYPE,");
+            methods = replaceAll(methods, "CELL)", "CELLTYPE)");
+          }
           spec += methods;
           spec += "};\n\n";
           out += spec;
         };
 
         const std::string latT = std::string(lat.name) + "<T>";
+        // POPPOLICY is forwarded into the specialisation so that one emitted
+        // specialisation covers every cell storage strategy (cudev::DirectPop,
+        // cudev::RegPop, ...).  It MUST stay last in the pattern: the CELL alias
+        // takes <T, LatSet, TypePack, POPPOLICY>, so anything else silently
+        // fails to match and falls back to the loop-based primary template.
         if (kind == StructKind::Cell) {
-          std::string header = "template <typename T, typename TypePack>\n";
-          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>>{\n";
+          std::string header =
+              "template <typename T, typename TypePack, typename POPPOLICY>\n";
+          header += "struct " + sd.name + "<CELL<T, " + latT +
+                    ", TypePack, POPPOLICY>>{\n";
           emitOne(header, "using LatSet = " + latT + ";\n", 0, false);
         } else if (kind == StructKind::CellType) {
           std::string extraDecl, extraArg;
@@ -288,12 +341,12 @@ bool generateUrHeader(const std::string& inputPath,
             extraDecl += ", " + tp.paramType + " " + tp.paramName;
             extraArg += ", " + tp.paramName;
           }
-          std::string header = "template <typename T, typename TypePack" +
+          std::string header = "template <typename T, typename TypePack, typename POPPOLICY" +
                                extraDecl + ">\n";
-          header += "struct " + sd.name + "<CELL<T, " + latT + ", TypePack>" +
-                    extraArg + ">{\n";
-          std::string aliases = "using CELLTYPE = CELL<T, " + latT + ", TypePack>;\n";
-          aliases += "using CELL = CELLTYPE;\n";
+          header += "struct " + sd.name + "<CELL<T, " + latT +
+                    ", TypePack, POPPOLICY>" + extraArg + ">{\n";
+          std::string aliases =
+              "using CELLTYPE = CELL<T, " + latT + ", TypePack, POPPOLICY>;\n";
           aliases += "using LatSet = " + latT + ";\n";
           emitOne(header, aliases, 0, false);
         } else if (kind == StructKind::TLatSet) {
@@ -314,6 +367,9 @@ bool generateUrHeader(const std::string& inputPath,
   }
 
   out += "}  // namespace " + cfg.ns + "\n";
+  out += "#ifdef __NVCC__\n";
+  out += "#pragma nv_diag_default 842\n";
+  out += "#endif\n";
   out += "#endif  // _UNROLLFOR\n";
 
   std::ofstream ofs(outputPath);

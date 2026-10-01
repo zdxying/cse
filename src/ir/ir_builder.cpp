@@ -253,6 +253,10 @@ DAGNode* IRBuilder::varRef(const std::string& name) {
   return _module->getVar(resolve(name));
 }
 
+int IRBuilder::typeLanes(const std::string& type) const {
+  return _config.vectorLanes ? _config.vectorLanes(type) : 0;
+}
+
 // ===== Build =====
 
 void IRBuilder::buildFunction(const FunctionDef& func) {
@@ -272,7 +276,7 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
   pushScope();  // parameter/base scope
   for (const auto& p : func.params) {
     _scopes.back()[p.name] = p.name;
-    _module->getVar(p.name);
+    _module->getVar(p.name)->vecDim = typeLanes(p.type);
     if (_config.lowerVectors && _config.isVectorType &&
         _config.isVectorType(p.type)) {
       _vectorVars.insert(p.name);
@@ -354,6 +358,7 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       if (stmt.init) decl->init = buildExpr(*stmt.init);
       // Declare after the initializer (initializer sees the outer binding).
       decl->name = declare(stmt.varName);
+      _module->getVar(decl->name)->vecDim = typeLanes(stmt.varType);
       return decl;
     }
     case StmtKind::Return: {

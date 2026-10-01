@@ -75,7 +75,7 @@ std::string Parser::parseType() {
     type += advance().text + " ";
   }
 
-  // Handle typename prefix: typename CELL::FloatType
+  // Handle typename prefix: typename ProjectType::FloatType
   if (check(TokenType::Typename)) {
     advance();  // consume 'typename'
     type = parseFullType();
@@ -423,7 +423,7 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
           if (check(TokenType::Greater)) depth--;
           if (depth > 0) {
             memberName += advance().text;
-            memberName += " ";  // keep `typename CELL` etc. separated
+            memberName += " ";  // keep `typename ProjectType` etc. separated
           } else {
             advance();  // >
           }

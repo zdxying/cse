@@ -4,6 +4,7 @@
 
 #include "../ir/ir_module.h"
 #include "algebraic_simplify.h"
+#include "cleanup.h"
 #include "constant_fold.h"
 #include "cse_pass.h"
 #include "dce.h"
@@ -62,6 +63,7 @@ PassManager PassManager::createDefault(const CSEConfig& config,
   }
   pm.addPass(createValuePropPass());
   pm.addPass(createDCEPass());
+  pm.addPass(createCleanupPass());
   return pm;
 }
 

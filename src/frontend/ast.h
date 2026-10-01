@@ -154,7 +154,7 @@ struct StructDef {
 };
 
 // ===== Using Declaration =====
-// using T = typename CELL::FloatType;
+// using T = typename ProjectType::FloatType;
 struct UsingDecl {
   std::string aliasName;
   std::string underlyingType;

@@ -2,6 +2,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "token.h"
 
@@ -72,7 +73,7 @@ struct CSEConfig {
   //   - `vectorDim`: number of components.
   //   - `isVectorType`: classifies a declared type as vector-valued.
   //   - `isVectorProducingCall`: marks a call whose result is a vector (e.g. a
-  //     project vector accessor such as `ns::c<T>(k)`).
+  //     project vector accessor).
   bool lowerVectors = false;
   int vectorDim = 0;
   std::function<bool(const std::string&)> isVectorType = nullptr;
@@ -80,13 +81,40 @@ struct CSEConfig {
 
   // Name of the scalar variable holding component `idx` of a lowered vector
   // local, so later passes can fold `v[idx]` to that variable (e.g.
-  // `("unew", 1) -> "unew_1"`). Optional.
+  // `("v", 1) -> "v_1"`). Optional.
   std::function<std::string(const std::string&, long long)> vectorLocalName =
       nullptr;
 
-  // Values for non-type template parameters or other compile-time names, e.g.
-  // the `unsigned int d` of ScalarForcePopImpl. Folded to constants.
+  // Values for non-type template parameters or other compile-time names of a
+  // project type (e.g. a template size parameter). Folded to constants.
   std::unordered_map<std::string, double> constBindings;
+
+  // ---- Cost model hooks ---------------------------------------------------
+  // All optional. When a hook is null the model falls back to a conservative
+  // scalar interpretation.
+
+  // Number of scalar lanes for a declared type (0/1 = scalar). Used to tag
+  // vector-valued variables/dag nodes and to weight vector arithmetic.
+  std::function<int(const std::string& type)> vectorLanes = nullptr;
+
+  // Number of scalar lanes produced by a call (0/1 = scalar). Consulted by the
+  // cost model to classify compound expressions; falls back to
+  // isVectorProducingCall ? vectorDim : 0 when null.
+  std::function<int(const std::string& callee)> callResultLanes = nullptr;
+
+  // Scalar FLOP cost of a pure call given the callee name and the lane count
+  // of each argument. Return a negative value to mark the call unmodeled
+  // (charged 0 and counted in CostResult::unmodeledCalls).
+  std::function<long long(const std::string& callee,
+                          const std::vector<int>& argLanes)>
+      callCost = nullptr;
+
+  // Scalar FLOP cost + result lane count of a `+ - * /` binary op given the
+  // operand lane counts. Writes the FLOP cost to `flops` and returns the
+  // result lane count (0/1 = scalar). When null, a binary op costs 1 FLOP and
+  // is scalar.
+  std::function<int(char op, int aLanes, int bLanes, long long& flops)>
+      binaryOpCost = nullptr;
 };
 
 }  // namespace cse
