@@ -1,5 +1,4 @@
 #pragma once
-#include <cstdint>
 #include <string>
 
 // Token types produced by the Lexer and consumed by the Parser.

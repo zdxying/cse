@@ -1,9 +1,5 @@
 #include "algebraic_simplify.h"
 
-#include <algorithm>
-#include <iomanip>
-#include <sstream>
-#include <string>
 #include <vector>
 
 #include "../ir/ir_module.h"

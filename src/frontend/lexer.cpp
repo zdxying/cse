@@ -1,8 +1,6 @@
 #include "lexer.h"
 
 #include <cctype>
-#include <sstream>
-#include <stdexcept>
 
 #include "diagnostics.h"
 

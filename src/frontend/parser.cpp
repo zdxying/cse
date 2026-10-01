@@ -1,7 +1,6 @@
 #include "parser.h"
 
 #include <sstream>
-#include <stdexcept>
 
 #include "diagnostics.h"
 

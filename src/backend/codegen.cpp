@@ -1,7 +1,6 @@
 #include "codegen.h"
 
 #include <cmath>
-#include <algorithm>
 #include <unordered_set>
 
 #include "../frontend/ast.h"

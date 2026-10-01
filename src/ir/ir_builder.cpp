@@ -1,7 +1,5 @@
 #include "ir_builder.h"
 
-#include <sstream>
-#include <stdexcept>
 
 #include "../frontend/diagnostics.h"
 

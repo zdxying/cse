@@ -1,6 +1,5 @@
 #include "ur_emit.h"
 
-#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
