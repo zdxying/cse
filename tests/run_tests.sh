@@ -351,12 +351,20 @@ declare -A CSEGEN_EXPECT=(
 for base in equilibrium force moment; do
   h="$CSEGEN_DIR/$base.h"
   out="$WORK/$base.ur.h"
-  "$CSEGEN" "$h" "$out" >/dev/null
+  "$CSEGEN" "$h" "$out" >/dev/null 2>"$WORK/$base.gen.err"
   test -s "$out"
   if grep -q "${CSEGEN_EXPECT[$base]}" "$out"; then
     echo "ok    $base.h"
   else
     echo "FAIL  $base.h: missing '${CSEGEN_EXPECT[$base]}'" >&2
+    exit 1
+  fi
+  # Coverage guard: every marked struct must be specialized (0 skipped), and
+  # the summary line must be present. A struct silently turning "unsupported"
+  # would drop it from the .ur.h with no other test noticing.
+  if ! grep -q "coverage: .* 0 skipped" "$WORK/$base.gen.err"; then
+    echo "FAIL  $base.h: coverage report missing or shows skips:" >&2
+    sed 's/^/      /' "$WORK/$base.gen.err" >&2
     exit 1
   fi
 done

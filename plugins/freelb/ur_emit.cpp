@@ -12,6 +12,7 @@
 #include "config.h"
 #include "frontend/ast.h"
 #include "frontend/cse_config.h"
+#include "frontend/diagnostics.h"
 #include "frontend/lexer.h"
 #include "frontend/parser.h"
 #include "frontend/region_extractor.h"
@@ -189,6 +190,13 @@ bool generateUrHeader(const std::string& inputPath,
   out += "#endif\n\n";
 
   int structCount = 0;
+  // Coverage accounting: what was in the marked regions vs. what actually came
+  // out. A struct whose template parameter list this generator does not
+  // recognise is skipped; a free function inside a region is ignored entirely
+  // (only structs get specialized), which used to be silent.
+  int skippedStructs = 0;
+  int functionsInRegions = 0;
+  std::vector<std::string> skippedNames;
   const int latCount = static_cast<int>(sizeof(kLatsets) / sizeof(kLatsets[0]));
 
   for (const auto& region : regions) {
@@ -199,17 +207,31 @@ bool generateUrHeader(const std::string& inputPath,
       std::vector<Token> tokens = lexer.tokenize();
       Parser parser(tokens, parseCfg);
       parsed = parser.parseAll();
+    } catch (const CSEError& e) {
+      // A region the frontend cannot read fails the whole run (csegen does not
+      // pass a region through). Point at the line in the input file, not the
+      // offset inside the region, so the message is actionable.
+      const Diagnostic& d = e.diagnostic();
+      std::cerr << inputPath << ":" << (region.startLine + d.line) << ":" << d.col
+                << ": " << d.phase << " error: " << d.message << "\n";
+      return false;
     } catch (const std::exception& e) {
-      std::cerr << "csegen: parse error: " << e.what() << "\n";
+      std::cerr << "csegen: parse error in region at line " << region.startLine
+                << ": " << e.what() << "\n";
       return false;
     }
+
+    functionsInRegions += static_cast<int>(parsed.functions.size());
 
     for (const auto& sdPtr : parsed.structDefs) {
       const StructDef& sd = *sdPtr;
       std::string nonType;
       StructKind kind = classifyStruct(sd, nonType);
       if (kind == StructKind::Unsupported) {
-        std::cerr << "csegen: skipping unsupported struct " << sd.name << "\n";
+        std::cerr << "csegen: skipping unsupported struct " << sd.name
+                  << " (region at line " << region.startLine << ")\n";
+        skippedNames.push_back(sd.name);
+        skippedStructs++;
         continue;
       }
 
@@ -303,6 +325,20 @@ bool generateUrHeader(const std::string& inputPath,
   ofs << out;
   std::cout << "csegen: wrote " << outputPath << " (" << structCount
             << " structs x " << latCount << " lattice sets)\n";
+  std::cerr << "csegen: coverage: " << regions.size() << " regions, "
+            << (structCount + skippedStructs) << " structs (" << structCount
+            << " emitted, " << skippedStructs << " skipped), "
+            << (structCount * latCount) << " specializations\n";
+  if (functionsInRegions > 0) {
+    std::cerr << "csegen: note: " << functionsInRegions
+              << " free function(s) inside marked regions were ignored "
+                 "(only structs are specialized)\n";
+  }
+  if (skippedStructs > 0) {
+    std::cerr << "csegen: skipped:" ;
+    for (const auto& n : skippedNames) std::cerr << " " << n;
+    std::cerr << "\n";
+  }
   return true;
 }
 
