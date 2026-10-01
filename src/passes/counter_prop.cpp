@@ -103,30 +103,8 @@ DAGNode* rewriteIndexes(DAGNode* n, const Ctx& ctx) {
     if (!comp.empty() && ctx.names.count(comp)) return ctx.mod.getVar(comp);
   }
   if (!changed) return n;
-  switch (n->kind) {
-    case NodeKind::BinaryOp:
-      if (ops.size() == 2) return ctx.mod.createBinaryOp(n->op, ops[0], ops[1]);
-      break;
-    case NodeKind::UnaryOp:
-      if (ops.size() == 1) return rebuildWithOperands(ctx.mod, n, ops);
-      break;
-    case NodeKind::ArrayAccess:
-      if (ops.size() == 2) return ctx.mod.createArrayAccess(ops[0], ops[1], n->pure);
-      break;
-    case NodeKind::MemberAccess:
-      if (ops.size() == 1) return ctx.mod.createMemberAccess(ops[0], n->name, n->pure);
-      break;
-    case NodeKind::ArrowAccess:
-      if (ops.size() == 1) return ctx.mod.createArrowAccess(ops[0], n->name, n->pure);
-      break;
-    case NodeKind::Call: {
-      std::vector<DAGNode*> args(ops.begin() + 1, ops.end());
-      return ctx.mod.createCall(ops[0], args, n->pure);
-    }
-    default:
-      return n;
-  }
-  return n;
+  // Shared kind -> factory mapping (ir_utils.h); a private copy here had drifted.
+  return rebuildWithOperands(ctx.mod, n, ops);
 }
 
 void rewriteStmt(StmtIR* stmt, const Ctx& ctx) {

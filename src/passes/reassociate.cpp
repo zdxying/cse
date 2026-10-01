@@ -123,34 +123,10 @@ class ReassociateVisitor {
     }
     if (!changed) return node;
 
-    switch (node->kind) {
-      case NodeKind::BinaryOp:
-        if (newOps.size() == 2)
-          return module.createBinaryOp(node->op, newOps[0], newOps[1]);
-        break;
-      case NodeKind::UnaryOp:
-        if (newOps.size() == 1) return rebuildWithOperands(module, node, newOps);
-        break;
-      case NodeKind::ArrayAccess:
-        if (newOps.size() == 2)
-          return module.createArrayAccess(newOps[0], newOps[1], node->pure);
-        break;
-      case NodeKind::MemberAccess:
-        if (newOps.size() == 1)
-          return module.createMemberAccess(newOps[0], node->name, node->pure);
-        break;
-      case NodeKind::ArrowAccess:
-        if (newOps.size() == 1)
-          return module.createArrowAccess(newOps[0], node->name, node->pure);
-        break;
-      case NodeKind::Call: {
-        std::vector<DAGNode*> args(newOps.begin() + 1, newOps.end());
-        return module.createCall(newOps[0], args, node->pure);
-      }
-      default:
-        break;
-    }
-    return node;
+    // Rebuild through the one shared kind -> factory mapping (ir_utils.h). This
+    // private copy knew fewer kinds than the shared one, so a rewrite inside a
+    // cast or a conditional was silently dropped.
+    return rebuildWithOperands(module, node, newOps);
   }
 };
 
