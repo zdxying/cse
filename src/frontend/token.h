@@ -74,9 +74,7 @@ enum class TokenType {
   RBrace,
 
   // Special
-  CSEMarker,  // //@cse
   Eof,
-  Newline,
 };
 
 struct Token {
@@ -201,12 +199,8 @@ inline const char* tokenTypeName(TokenType t) {
       return "LBrace";
     case TokenType::RBrace:
       return "RBrace";
-    case TokenType::CSEMarker:
-      return "CSEMarker";
     case TokenType::Eof:
       return "Eof";
-    case TokenType::Newline:
-      return "Newline";
   }
   return "Unknown";
 }

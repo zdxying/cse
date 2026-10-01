@@ -11,7 +11,6 @@ class ConstantFoldVisitor {
  public:
   explicit ConstantFoldVisitor(IRModule& mod) : module(mod) {}
   IRModule& module;
-  int folds = 0;
 
   // Every expression slot the statement owns -- including the lvalue of an
   // element store, whose index is ordinary arithmetic and folds like any other
@@ -22,7 +21,6 @@ class ConstantFoldVisitor {
 
   DAGNode* fold(DAGNode* node) {
     DAGNode* result = foldConst(module, node);
-    if (result != node) folds++;
     return result;
   }
 };

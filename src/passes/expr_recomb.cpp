@@ -16,7 +16,6 @@ class ExprRecombineVisitor {
       : module(mod), commutative_(commutative) {}
 
   IRModule& module;
-  int rewrites = 0;
   // Whether `+` and `*` may be assumed to commute. Needed by the rewrites that
   // have to move an operand across the operator; off by default.
   bool commutative_;
@@ -42,7 +41,6 @@ class ExprRecombineVisitor {
     if (node->kind == NodeKind::BinaryOp && (node->op == '+' || node->op == '-')) {
       DAGNode* result = tryFactorAddSub(node);
       if (result && result != node) {
-        rewrites++;
         return result;
       }
     }

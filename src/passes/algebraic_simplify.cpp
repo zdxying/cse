@@ -26,7 +26,6 @@ class AlgebraicSimplifyVisitor {
         unsafeIdentities_(unsafeFpIdentities),
         fpReassoc_(fpReassoc) {}
   IRModule& module;
-  int simplifications = 0;
   // Numeric reordering rules require both commutativity and associativity; the
   // pass exposes the two flags separately for callers but applies them jointly.
   bool numeric_;
@@ -65,35 +64,35 @@ class AlgebraicSimplifyVisitor {
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = applyIdentities(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
       result = sortCommutative(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
     // UnaryOp identities (--a → a)
     if (numeric_ && node->kind == NodeKind::UnaryOp && !node->operands.empty()) {
       DAGNode* result = applyIdentities(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
 
     // Strength reduction
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = strengthReduce(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
 
     // Even-power canonicalization: (-a) * (-a) -> a * a
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = evenPower(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
 
     // Constant product normalization: fold constant factors, const first.
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = normalizeProduct(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
 
     // Sign canonicalization: factor negations out of products so that
@@ -101,7 +100,7 @@ class AlgebraicSimplifyVisitor {
     if (numeric_ && node->kind == NodeKind::BinaryOp &&
         node->operands.size() == 2) {
       DAGNode* result = normalizeSign(node);
-      if (result != node) { simplifications++; return result; }
+      if (result != node) { return result; }
     }
 
     return node;
@@ -238,7 +237,6 @@ class AlgebraicSimplifyVisitor {
         !node->operands.empty()) {
       DAGNode* inner = node->operands[0];
       if (inner->kind == NodeKind::UnaryOp && inner->op == '-') {
-        simplifications++;
         return inner->operands[0];
       }
       return node;
@@ -251,50 +249,44 @@ class AlgebraicSimplifyVisitor {
     DAGNode* rhs = node->operands[1];
 
     if (node->op == '*') {
-      if (isConst(lhs, 1)) { simplifications++; return rhs; }
-      if (isConst(rhs, 1)) { simplifications++; return lhs; }
+      if (isConst(lhs, 1)) { return rhs; }
+      if (isConst(rhs, 1)) { return lhs; }
       // x * 0 -> 0 is wrong for x = +-inf / NaN.
       if (unsafeIdentities_ && (isConst(lhs, 0) || isConst(rhs, 0))) {
-        simplifications++;
         return module.createConst(0, "0");
       }
     }
 
     if (node->op == '+') {
-      if (isConst(lhs, 0)) { simplifications++; return rhs; }
-      if (isConst(rhs, 0)) { simplifications++; return lhs; }
+      if (isConst(lhs, 0)) { return rhs; }
+      if (isConst(rhs, 0)) { return lhs; }
       // a + (-b) → a - b
       if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-' && !isIncDec(rhs)) {
-        simplifications++;
         return module.createBinaryOp('-', lhs, rhs->operands[0]);
       }
     }
 
     if (node->op == '-') {
-      if (isConst(rhs, 0)) { simplifications++; return lhs; }
-      if (isConst(lhs, 0)) { simplifications++; return module.createUnaryOp('-', rhs); }
+      if (isConst(rhs, 0)) { return lhs; }
+      if (isConst(lhs, 0)) { return module.createUnaryOp('-', rhs); }
       // a - a -> 0 is wrong for a = +-inf / NaN.
       if (unsafeIdentities_ && lhs->id == rhs->id) {
-        simplifications++;
         return module.createConst(0, "0");
       }
       // a - (-b) → a + b
       if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-' && !isIncDec(rhs)) {
-        simplifications++;
         return module.createBinaryOp('+', lhs, rhs->operands[0]);
       }
     }
 
     if (node->op == '/') {
-      if (isConst(rhs, 1)) { simplifications++; return lhs; }
+      if (isConst(rhs, 1)) { return lhs; }
       // 0 / a -> 0 and a / a -> 1 are both wrong at a = 0 (NaN), and a / a is
       // also wrong for a = +-inf / NaN.
       if (unsafeIdentities_ && isConst(lhs, 0)) {
-        simplifications++;
         return module.createConst(0, "0");
       }
       if (unsafeIdentities_ && lhs->id == rhs->id) {
-        simplifications++;
         return module.createConst(1, "1");
       }
     }
