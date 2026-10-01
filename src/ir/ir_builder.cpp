@@ -43,7 +43,14 @@ void IRBuilder::prescanFunction(const FunctionDef& func) {
 
   for (const auto& p : func.params) {
     _declared.insert(p.name);
+    // `*`, `[` and `&` alike: a reference parameter is just as aliasable as a
+    // pointer one. `const T&` promises only that the referent is not written
+    // *through this reference*; another reference to the same object may still
+    // write it (`f(x, x)` with `f(const V& v, V& w)`), so a load through it must
+    // not be shared across that write. Reading only `*`/`[` here left the
+    // reference case outside the rule.
     if (p.type.find('*') != std::string::npos ||
+        p.type.find('&') != std::string::npos ||
         p.type.find('[') != std::string::npos)
       _pointerParams.insert(p.name);
   }
@@ -63,6 +70,7 @@ void IRBuilder::prescanStmt(const Stmt& stmt) {
     case StmtKind::VarDecl:
       _declared.insert(stmt.varName);
       if (stmt.varType.find('*') != std::string::npos ||
+          stmt.varType.find('&') != std::string::npos ||
           stmt.varType.find('[') != std::string::npos)
         _pointerParams.insert(stmt.varName);
       if (stmt.init) prescanExpr(*stmt.init);
