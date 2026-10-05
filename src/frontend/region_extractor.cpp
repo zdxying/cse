@@ -89,7 +89,9 @@ std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const
   size_t cseStart = 0;
   int braceCount = 0;
   std::string cseCode;
-  ScanState st;
+  ScanState st;         // state inside the current region
+  ScanState fileState;  // comment state outside regions, so a `//@cse` that sits
+                        // inside a block comment is not taken for a marker
 
   while (std::getline(iss, line)) {
     lineNum++;
@@ -98,7 +100,8 @@ std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const
     if (first != std::string::npos) trimmed = trimmed.substr(first);
 
     if (!inCSE) {
-      if (trimmed == "//@cse" || trimmed.find("//@cse") == 0) {
+      if (!fileState.blockComment &&
+          (trimmed == "//@cse" || trimmed.find("//@cse") == 0)) {
         inCSE = true;
         cseStart = lineNum;
         braceCount = 0;
@@ -106,6 +109,9 @@ std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const
         st = ScanState{};  // each region is scanned as its own text
         continue;
       }
+      // Advance the outside comment state so a marker line inside `/* ... */`
+      // is skipped. The brace delta is irrelevant here.
+      braceDelta(line, fileState);
     } else {
       braceCount += braceDelta(line, st);
       cseCode += line + "\n";
@@ -115,6 +121,7 @@ std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const
           regions.push_back({cseStart, lineNum, cseCode});
           inCSE = false;
           cseCode.clear();
+          fileState = st;  // resume outside scanning from the region's end state
         }
       }
     }

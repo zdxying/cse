@@ -51,6 +51,9 @@ bool isPureAccess(DAGNode* node) {
 //     even when structurally equal, so compare with NodeEqual, not pointers.
 bool isSelfAssign(AssignIR* assign) {
   if (!assign || !assign->value) return false;
+  // `a[i] += a[i]` has equal target and value but doubles the element; it is not
+  // a no-op.
+  if (assign->compoundOp) return false;
 
   if (!assign->targetExpr) {
     return assign->value->kind == NodeKind::Variable &&
@@ -70,7 +73,9 @@ bool isZeroConstant(DAGNode* node) {
   return node && node->kind == NodeKind::Constant && node->constVal == 0;
 }
 
-// Try to extract addend from x + a or a + x where x is the target variable
+// Try to extract addend from x + a or a + x where x is the target variable.
+// The addend must not itself read the target: merging `x = 0; x = x + x*b;`
+// into `x = x*b` would read `x` before it is initialized.
 DAGNode* extractAddend(IRModule& /*mod*/, const std::string& varName, DAGNode* expr) {
   if (!isAddOp(expr)) return nullptr;
   
@@ -79,12 +84,18 @@ DAGNode* extractAddend(IRModule& /*mod*/, const std::string& varName, DAGNode* e
   
   // We're looking for: x + rhs where x is the target variable
   // (order could be either: x + a or a + x)
+  DAGNode* addend = nullptr;
   if (lhs->kind == NodeKind::Variable && lhs->name == varName) {
-    return rhs;
+    addend = rhs;
   } else if (rhs->kind == NodeKind::Variable && rhs->name == varName) {
-    return lhs;
+    addend = lhs;
+  } else {
+    return nullptr;
   }
-  return nullptr;
+  std::unordered_set<std::string> reads;
+  collectVarNames(addend, reads);
+  if (reads.count(varName)) return nullptr;
+  return addend;
 }
 
 // Try to combine chained VarDecl assignments:

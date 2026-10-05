@@ -1,6 +1,7 @@
 #include "lexer.h"
 
 #include <cctype>
+#include <cstdlib>
 
 #include "diagnostics.h"
 
@@ -245,6 +246,23 @@ Token Lexer::readNumber() {
   size_t start = _pos;
   size_t startCol = _col;
 
+  // Hexadecimal literal (`0x1F`). Consumed as a single token; the value is
+  // parsed base 16. Previously the `0` and `x1F` split into two tokens.
+  if (peek() == '0' && (peek2() == 'x' || peek2() == 'X')) {
+    advance();  // '0'
+    advance();  // 'x'
+    while (_pos < _src.size() && std::isxdigit(peek())) advance();
+    if (peek() == 'u' || peek() == 'U' || peek() == 'l' || peek() == 'L') advance();
+    std::string text = _src.substr(start, _pos - start);
+    Token tok;
+    tok.type = TokenType::Number;
+    tok.text = text;
+    tok.numVal = static_cast<double>(std::strtoull(text.c_str(), nullptr, 16));
+    tok.line = _line;
+    tok.col = startCol;
+    return tok;
+  }
+
   while (_pos < _src.size() && std::isdigit(peek())) advance();
   if (peek() == '.') {
     advance();
@@ -273,7 +291,16 @@ Token Lexer::readNumber() {
   if (peek() == 'f' || peek() == 'F' || peek() == 'l' || peek() == 'L') advance();
 
   std::string text = _src.substr(start, coreEnd - start);
-  double val = std::stod(text);
+  // An integer literal with a leading zero is octal (`010` is 8, not 10).
+  // Decimal float forms (`0.5`, `0e5`) contain '.'/'e' and are excluded.
+  double val;
+  bool isOctal = text.size() > 1 && text[0] == '0' &&
+                 text.find_first_of(".eE") == std::string::npos;
+  if (isOctal) {
+    val = static_cast<double>(std::strtoull(text.c_str(), nullptr, 8));
+  } else {
+    val = std::stod(text);
+  }
   Token tok;
   tok.type = TokenType::Number;
   tok.text = text;

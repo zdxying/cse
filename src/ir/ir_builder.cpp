@@ -232,7 +232,12 @@ void IRBuilder::popScope() {
 
 std::string IRBuilder::declare(const std::string& name) {
   if (_scopes.empty()) pushScope();
-  bool shadowed = false;
+  // Rename when the name is visible in an enclosing scope (shadowing) *or* has
+  // been declared earlier in the function (a popped sibling scope). The DAG
+  // interns variables by name, so two sibling `{ double t; }` blocks would
+  // otherwise share one node; ValueProp's flat defs map then keeps only the
+  // last `t` and applies it to both. `_seenNames` covers both cases.
+  bool shadowed = _seenNames.count(name) != 0;
   for (const auto& s : _scopes) {
     if (s.count(name)) {
       shadowed = true;
@@ -245,6 +250,8 @@ std::string IRBuilder::declare(const std::string& name) {
     internal = name + "__s" + std::to_string(++n);
   }
   _scopes.back()[name] = internal;
+  _seenNames.insert(name);
+  _seenNames.insert(internal);
   _module->getVar(internal);
   return internal;
 }
@@ -278,12 +285,14 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
 
   _scopes.clear();
   _shadowCounters.clear();
+  _seenNames.clear();
   _vectorVars.clear();
   _vecLocalComps.clear();
   _vecDim = _config.lowerVectors ? _config.vectorDim : 0;
   pushScope();  // parameter/base scope
   for (const auto& p : func.params) {
     _scopes.back()[p.name] = p.name;
+    _seenNames.insert(p.name);
     _module->getVar(p.name)->vecDim = typeLanes(p.type);
     if (_config.lowerVectors && _config.isVectorType &&
         _config.isVectorType(p.type)) {
@@ -419,11 +428,15 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       // such a store therefore stayed an opaque BinaryOp('=') inside an
       // ExprStmt, where every analysis that looks for writes failed to see it.
       if (stmt.expr && stmt.expr->kind == ExprKind::BinaryOp &&
-          stmt.expr->isAssignment && stmt.expr->op == '=' && stmt.expr->lhs &&
+          stmt.expr->isAssignment && stmt.expr->lhs &&
           stmt.expr->lhs->kind != ExprKind::Variable) {
         auto assign = std::make_unique<AssignIR>();
         assign->targetExpr = buildExpr(*stmt.expr->lhs);
         assign->value = buildExpr(*stmt.expr->rhs);
+        // `a[i] += x` keeps its operator rather than becoming
+        // `a[i] = a[i] + x`: the latter would evaluate a side-effecting lvalue
+        // (e.g. `a[i++] += x`) twice.
+        if (stmt.expr->op != '=') assign->compoundOp = stmt.expr->op;
         return assign;
       }
       auto exprStmt = std::make_unique<ExprStmtIR>();

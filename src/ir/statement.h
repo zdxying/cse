@@ -38,6 +38,11 @@ struct AssignIR : StmtIR {
   std::string target;          // simple variable target (if targetExpr is null)
   DAGNode* targetExpr = nullptr;  // complex lvalue (array/member element)
   DAGNode* value = nullptr;
+  // Non-zero for a compound store (`a[i] += x`, `p->f *= y`): `value` is the
+  // right-hand side and the operator is `compoundOp` + '='. Zero means a plain
+  // `=`. Storing the operator here (rather than lowering to `target = target op
+  // value`) keeps a side-effecting lvalue such as `a[i++] += x` evaluated once.
+  char compoundOp = 0;
 };
 
 struct VarDeclIR : StmtIR {

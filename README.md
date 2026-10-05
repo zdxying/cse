@@ -156,8 +156,8 @@ un-parenthesised form.
 Algebraic rules are opt-in per licence: commutativity/associativity via
 `assumeNumericCommutative` / `assumeNumericAssociative`, floating-point
 reassociation (additive and multiplicative regrouping) via `allowFpReassoc`, and
-the special-value identities (`x*0`, `x-x`, `0/x`, `x/x`) via
-`allowUnsafeFpIdentities`.
+the special-value / signed-zero identities (`x*0`, `x-x`, `0/x`, `x/x`, `x+0`,
+`0-x`) via `allowUnsafeFpIdentities`.
 
 ## Tests
 

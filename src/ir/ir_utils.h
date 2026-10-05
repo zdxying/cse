@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -82,9 +83,15 @@ inline std::string lvalueRoot(DAGNode* n) {
 // spelled as an expression (`a[i] = v` arrives as `BinaryOp(=)` whenever the
 // builder kept it unlowered). The whole subtree is walked, because a write can
 // sit anywhere inside one.
+//
+// An impure call contributes the wildcard name `"*"`: it may write any global
+// and anything reachable from an argument (`mutate(b)` can change `b`, `bump()`
+// can change a global). Consumers must treat `"*"` as "every name is written",
+// so no value is reused across such a call.
 inline void collectExprWrites(DAGNode* e,
                               std::unordered_set<std::string>& out) {
   if (!e) return;
+  if (e->kind == NodeKind::Call && !e->pure) out.insert("*");
   if (isIncDec(e) && !e->operands.empty()) {
     std::string root = lvalueRoot(e->operands[0]);
     if (!root.empty()) out.insert(root);
@@ -276,15 +283,25 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
         case '+': result = lhs->constVal + rhs->constVal; break;
         case '-': result = lhs->constVal - rhs->constVal; break;
         case '*': result = lhs->constVal * rhs->constVal; break;
-        case '/':
+        case '/': {
           // Not folded when the divisor is zero. Integer division by zero is
           // undefined behaviour and floating-point division by zero is infinity
           // or NaN; zero is the one answer that is wrong for both, and the IR
           // carries no type that could tell the two apart. Leave the expression
           // standing -- the compiler can diagnose or evaluate it correctly.
           if (rhs->constVal == 0) return node;
-          result = lhs->constVal / rhs->constVal;
+          double lv = lhs->constVal;
+          double rv = rhs->constVal;
+          double q = lv / rv;
+          // `7 / 2` cannot be told from `7.0 / 2.0` without a type. When both
+          // operands are integral-valued the source may be an integer division,
+          // which truncates, so only fold when the quotient is exact.
+          bool lint = std::floor(lv) == lv;
+          bool rint = std::floor(rv) == rv;
+          if (lint && rint && std::floor(q) != q) return node;
+          result = q;
           break;
+        }
         case 'e': result = (lhs->constVal == rhs->constVal) ? 1 : 0; break;
         case 'n': result = (lhs->constVal != rhs->constVal) ? 1 : 0; break;
         case '<': result = (lhs->constVal < rhs->constVal) ? 1 : 0; break;

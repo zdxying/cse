@@ -22,7 +22,11 @@ bool isTrivial(DAGNode* e) {
       return true;
     case NodeKind::MemberAccess:
     case NodeKind::ArrowAccess:
-      return e->operands.size() == 1 && e->operands[0]->kind == NodeKind::Variable;
+      // Only a load marked shareable (a read-only root) may be copied to a use
+      // site. A load through a pointer/reference that may alias a later store is
+      // not shareable, so inlining it would move the read past that store.
+      return e->pure && e->operands.size() == 1 &&
+             e->operands[0]->kind == NodeKind::Variable;
     default:
       return false;
   }
@@ -39,9 +43,14 @@ bool isTrivial(DAGNode* e) {
 bool initDepsStable(DAGNode* init,
                     const std::unordered_set<std::string>& reassigned) {
   if (!init) return true;
-  if (init->kind == NodeKind::Variable &&
-      reassigned.find(init->name) != reassigned.end())
-    return false;
+  if (init->kind == NodeKind::Variable) {
+    // `"*"` is the wildcard an impure call contributes: it may write any global
+    // and anything reachable from an argument, so no variable is stable across
+    // it.
+    if (reassigned.count("*")) return false;
+    if (reassigned.find(init->name) != reassigned.end()) return false;
+    return true;
+  }
   for (auto* op : init->operands) {
     if (!initDepsStable(op, reassigned)) return false;
   }

@@ -87,7 +87,7 @@ cost_stage "-r" "-r" r \
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
-  parens=19 store_aware=19 float_identities=4 mixed_ops=9 write_visibility=12 \
+  parens=19 store_aware=19 float_identities=6 mixed_ops=9 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 \
   dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1
 
@@ -108,6 +108,20 @@ for pat in "${!RECOMBINE_SHAPE[@]}"; do
   fi
 done
 (( shape_fail == 0 )) || exit 1
+
+# `-r` must keep working under `-s`. `-s` clears allowFpReassoc (recombination is
+# a floating-point regrouping), so the CLI's explicit `-r` has to carry that
+# licence back; otherwise the pass the user asked for is silently dropped.
+echo "=== recombination shape check (-s -r) ==="
+mkdir -p "$WORK/sr"
+cp "$FIXTURES/recombine.cpp" "$WORK/sr/recombine.cpp"
+"$CSE" "$WORK/sr/recombine.cpp" -s -r >/dev/null 2>&1
+if grep -qF "a * (x + y)" "$WORK/sr/recombine.cpp.cse"; then
+  echo "ok    -s -r still recombines"
+else
+  echo "FAIL  -s -r no longer recombines: the -r licence was dropped" >&2
+  exit 1
+fi
 
 # `x * 2 -> x + x` must still fire for an operand that may be repeated: the
 # guard added for impure operands must not have switched the rewrite off.
@@ -265,6 +279,18 @@ run_verifier() {
 }
 
 echo "=== numerical verifiers ==="
+# Differential regression for the semantic-safety fixes (logical operators,
+# codegen parentheses, compound stores, impure-call effects, integer division,
+# shadowing, chain merging, signed zero, fractional loop starts). Generated in
+# both profiles so the verifier can include each optimized text.
+cp "$FIXTURES/semantics_fixes.cpp" "$WORK/default/semantics_fixes.cpp"
+"$CSE" "$WORK/default/semantics_fixes.cpp" >/dev/null 2>&1 || true
+run_verifier "semantics_fixes" verify_semantics_fixes.cpp \
+  "ALL SEMANTICS-FIX CHECKS PASSED" "$WORK/default"
+cp "$FIXTURES/semantics_fixes.cpp" "$WORK/s/semantics_fixes.cpp"
+"$CSE" -s "$WORK/s/semantics_fixes.cpp" >/dev/null 2>&1 || true
+run_verifier "semantics_fixes_safe" verify_semantics_fixes.cpp \
+  "ALL SEMANTICS-FIX CHECKS PASSED" "$WORK/s"
 run_verifier "equilibrium" verify_equilibrium.cpp "max abs error" "$WORK/default"
 run_verifier "safety" verify_safety.cpp "ALL SAFETY CHECKS PASSED" "$WORK/default"
 run_verifier "parens" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/default"
@@ -393,8 +419,16 @@ if [[ -d "$FREELB/src/lbm" && -f "$FREELB/tools/cse/verify_moment.py" ]]; then
 
   echo "=== FreeLB verifiers ($FREELB) ==="
   for v in moment equilibrium force; do
+    ref="$FREELB/src/lbm/$v.ur.h"
+    # The verifier compares the freshly generated header against the pinned
+    # reference committed in FreeLB. Without that reference there is nothing to
+    # compare against, so skip it (visibly) rather than fail on a missing file.
+    if [[ ! -f "$ref" ]]; then
+      echo "skip  $v (no pinned reference at $ref)"
+      continue
+    fi
     "$CSEGEN" "$FREELB/src/lbm/$v.h" "$WORK/$v.ur.h" >/dev/null
-    if out="$(python3 "$FREELB/tools/cse/verify_$v.py" "$FREELB/src/lbm/$v.ur.h" "$WORK/$v.ur.h" 2>&1)"; then
+    if out="$(python3 "$FREELB/tools/cse/verify_$v.py" "$ref" "$WORK/$v.ur.h" 2>&1)"; then
       echo "ok    $v"
     else
       echo "FAIL  $v"

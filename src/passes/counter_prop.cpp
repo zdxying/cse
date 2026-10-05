@@ -150,6 +150,47 @@ bool isConst(DAGNode* n) {
   return n && n->kind == NodeKind::Constant && n->symbol.empty();
 }
 
+// Fold one statement's effect into the map of known constant counters.
+//
+// A statement whose writes are not tracked here (a loop, a branch, a nested
+// block, an element write, an impure call) must still invalidate the counters
+// it can write: leaving a stale value lets a later `tensor[i]` be specialized
+// to the wrong index.
+void updateKnown(StmtIR* stmt, ConstMap& known) {
+  if (!stmt) return;
+  if (stmt->kind == StmtIRKind::VarDecl) {
+    auto* d = static_cast<VarDeclIR*>(stmt);
+    if (isConst(d->init)) known[d->name] = d->init->constVal;
+    else known.erase(d->name);
+    return;
+  }
+  if (stmt->kind == StmtIRKind::Assign) {
+    auto* a = static_cast<AssignIR*>(stmt);
+    if (!a->targetExpr) {
+      if (isConst(a->value)) known[a->target] = a->value->constVal;
+      else known.erase(a->target);
+      return;
+    }
+    // Element/member write: fall through, it may alias a counter.
+  }
+  if (stmt->kind == StmtIRKind::ExprStmt) {
+    auto* e = static_cast<ExprStmtIR*>(stmt)->expr;
+    if (e && isIncDec(e) && !e->operands.empty() &&
+        e->operands[0]->kind == NodeKind::Variable) {
+      auto it = known.find(e->operands[0]->name);
+      if (it != known.end()) it->second += (e->name == "++") ? 1.0 : -1.0;
+      return;
+    }
+  }
+  std::unordered_set<std::string> w;
+  collectWrittenNames(stmt, w);
+  if (w.count("*")) {
+    known.clear();
+  } else {
+    for (const auto& n : w) known.erase(n);
+  }
+}
+
 // Process a block in order: rewrite indices, fold constant `if`s, and update
 // the map of known constant counters. Splices folded branches into the block.
 void processBlock(BlockIR* block, const Ctx& outer) {
@@ -170,15 +211,18 @@ void processBlock(BlockIR* block, const Ctx& outer) {
         std::unique_ptr<StmtIR> branch =
             takeThen ? std::move(ie->thenBranch) : std::move(ie->elseBranch);
         if (branch) {
+          // The spliced statements run unconditionally now, so their counter
+          // updates must be folded into `known` exactly like a top-level one.
+          auto splice = [&](std::unique_ptr<StmtIR> s) {
+            rewriteStmt(s.get(), ctx);
+            updateKnown(s.get(), known);
+            out.push_back(std::move(s));
+          };
           if (branch->kind == StmtIRKind::Block) {
             auto* bb = static_cast<BlockIR*>(branch.get());
-            for (auto& s : bb->stmts) {
-              rewriteStmt(s.get(), ctx);
-              out.push_back(std::move(s));
-            }
+            for (auto& s : bb->stmts) splice(std::move(s));
           } else {
-            rewriteStmt(branch.get(), ctx);
-            out.push_back(std::move(branch));
+            splice(std::move(branch));
           }
         }
         continue;
@@ -186,33 +230,7 @@ void processBlock(BlockIR* block, const Ctx& outer) {
     }
 
     rewriteStmt(stmt, ctx);
-
-    // Update known constants.
-    if (stmt->kind == StmtIRKind::VarDecl) {
-      auto* d = static_cast<VarDeclIR*>(stmt);
-      if (isConst(d->init)) {
-        known[d->name] = d->init->constVal;
-      } else {
-        known.erase(d->name);
-      }
-    } else if (stmt->kind == StmtIRKind::ExprStmt) {
-      auto* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      if (e && isIncDec(e) && !e->operands.empty() &&
-          e->operands[0]->kind == NodeKind::Variable) {
-        auto it = known.find(e->operands[0]->name);
-        if (it != known.end()) it->second += (e->name == "++") ? 1.0 : -1.0;
-      }
-    } else if (stmt->kind == StmtIRKind::Assign) {
-      auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) {
-        // no counter update for element writes
-      } else if (isConst(a->value)) {
-        known[a->target] = a->value->constVal;
-      } else {
-        known.erase(a->target);
-      }
-    }
-
+    updateKnown(stmt, known);
     out.push_back(std::move(stmtPtr));
   }
 

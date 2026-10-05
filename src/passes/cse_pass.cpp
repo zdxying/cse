@@ -115,7 +115,12 @@ static bool usesAreStable(DAGNode* node, const std::vector<size_t>& uses,
   if (deps.empty()) return true;
   for (size_t u : uses) {
     if (u <= insertPos) continue;
-    for (size_t k = insertPos; k < u && k < writes.size(); ++k) {
+    // The use statement itself is included: a write it performs can be
+    // sequenced before the read (`arr[a + i] = i++` evaluates the right-hand
+    // side first in C++17), so its own write set has to count. A wildcard from
+    // an impure call rejects the extraction outright.
+    for (size_t k = insertPos; k <= u && k < writes.size(); ++k) {
+      if (writes[k].count("*")) return false;
       for (const std::string& d : deps) {
         if (writes[k].count(d)) return false;
       }

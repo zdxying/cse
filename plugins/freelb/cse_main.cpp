@@ -255,6 +255,16 @@ int main(int argc, char* argv[]) {
     config = safe;
   }
 
+  // `-r` is an explicit request for expression recombination, which is itself a
+  // floating-point regrouping (`a*x + a*y -> a*(x+y)` rounds differently), so the
+  // request carries its own allowFpReassoc licence. Without this, `-s -r` would
+  // silently disable the very pass the user asked for, because `-s` clears
+  // allowFpReassoc. Only ExprRecombine is affected: the other allowFpReassoc
+  // consumers also require `assoc`/`numeric_`, which `-s` keeps off.
+  if (enableRecombine) {
+    config.allowFpReassoc = true;
+  }
+
   if (inputFile.empty()) {
     std::cerr << "Error: no input file specified\n";
     printUsage(argv[0]);

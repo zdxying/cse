@@ -228,11 +228,13 @@ class AlgebraicSimplifyVisitor {
   }
 
   DAGNode* applyIdentities(DAGNode* node) {
-    // UnaryOp: --a → a
+    // UnaryOp: --a → a. The inner operator must be a genuine unary minus, not a
+    // `--x` prefix decrement (also a UnaryOp with op '-'); peeling it off would
+    // delete the decrement (`-(- -x)` would lose one of the two).
     if (node->kind == NodeKind::UnaryOp && node->op == '-' && !isIncDec(node) &&
         !node->operands.empty()) {
       DAGNode* inner = node->operands[0];
-      if (inner->kind == NodeKind::UnaryOp && inner->op == '-') {
+      if (inner->kind == NodeKind::UnaryOp && inner->op == '-' && !isIncDec(inner)) {
         return inner->operands[0];
       }
       return node;
@@ -247,15 +249,26 @@ class AlgebraicSimplifyVisitor {
     if (node->op == '*') {
       if (isConst(lhs, 1)) { return rhs; }
       if (isConst(rhs, 1)) { return lhs; }
-      // x * 0 -> 0 is wrong for x = +-inf / NaN.
-      if (unsafeIdentities_ && (isConst(lhs, 0) || isConst(rhs, 0))) {
+      // x * 0 -> 0 is wrong for x = +-inf / NaN. It must also not discard an
+      // observable effect: `f() * 0` may not drop the call, `(++y) * 0` may not
+      // drop the increment.
+      if (unsafeIdentities_ && !hasSideEffect(node) &&
+          (isConst(lhs, 0) || isConst(rhs, 0))) {
         return module.createConst(0, "0");
       }
     }
 
     if (node->op == '+') {
-      if (isConst(lhs, 0)) { return rhs; }
-      if (isConst(rhs, 0)) { return lhs; }
+      // `x + 0 -> x` / `0 + x -> x` hold for every finite x except x = -0.0,
+      // where the sum is +0.0 rather than -0.0. That is the same signed-zero
+      // licence the four special-value identities below carry, so they share
+      // the `allowUnsafeFpIdentities` opt-in rather than being dropped: the
+      // algebraic form is far too valuable to lose wholesale. The operand is
+      // retained, so neither rewrite can drop a side effect.
+      if (unsafeIdentities_) {
+        if (isConst(lhs, 0)) { return rhs; }
+        if (isConst(rhs, 0)) { return lhs; }
+      }
       // a + (-b) → a - b
       if (rhs->kind == NodeKind::UnaryOp && rhs->op == '-' && !isIncDec(rhs)) {
         return module.createBinaryOp('-', lhs, rhs->operands[0]);
@@ -263,10 +276,17 @@ class AlgebraicSimplifyVisitor {
     }
 
     if (node->op == '-') {
+      // `x - 0 -> x` is exact for every x (including both signed zeros), so it
+      // needs no opt-in.
       if (isConst(rhs, 0)) { return lhs; }
-      if (isConst(lhs, 0)) { return module.createUnaryOp('-', rhs); }
-      // a - a -> 0 is wrong for a = +-inf / NaN.
-      if (unsafeIdentities_ && lhs->id == rhs->id) {
+      // `0 - x -> -x` holds except for x = +0.0, where the difference is +0.0
+      // while -x is -0.0 -- the same signed-zero licence as `x + 0`. The
+      // operand is kept (negated), so no effect is dropped.
+      if (unsafeIdentities_ && isConst(lhs, 0)) {
+        return module.createUnaryOp('-', rhs);
+      }
+      // a - a -> 0 is wrong for a = +-inf / NaN, and must not drop effects.
+      if (unsafeIdentities_ && !hasSideEffect(node) && lhs->id == rhs->id) {
         return module.createConst(0, "0");
       }
       // a - (-b) → a + b
@@ -278,11 +298,11 @@ class AlgebraicSimplifyVisitor {
     if (node->op == '/') {
       if (isConst(rhs, 1)) { return lhs; }
       // 0 / a -> 0 and a / a -> 1 are both wrong at a = 0 (NaN), and a / a is
-      // also wrong for a = +-inf / NaN.
-      if (unsafeIdentities_ && isConst(lhs, 0)) {
+      // also wrong for a = +-inf / NaN; neither may drop a side effect.
+      if (unsafeIdentities_ && !hasSideEffect(node) && isConst(lhs, 0)) {
         return module.createConst(0, "0");
       }
-      if (unsafeIdentities_ && lhs->id == rhs->id) {
+      if (unsafeIdentities_ && !hasSideEffect(node) && lhs->id == rhs->id) {
         return module.createConst(1, "1");
       }
     }

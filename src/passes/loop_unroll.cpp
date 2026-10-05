@@ -309,7 +309,12 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   auto* d = static_cast<VarDeclIR*>(f->init.get());
   if (d->name.empty()) return false;
   if (d->init && d->init->kind != NodeKind::Constant) return false;
-  int begin = d->init ? static_cast<int>(d->init->constVal) : 0;
+  // The start must be integral too: `for (double i = 0.5; i < 3; ++i)` is not
+  // the same loop as `for (i = 0; ...)`, and truncating the start silently
+  // changes the result.
+  double beginVal = d->init ? d->init->constVal : 0.0;
+  if (beginVal != std::floor(beginVal)) return false;
+  int begin = static_cast<int>(beginVal);
 
   if (!f->cond || f->cond->kind != NodeKind::BinaryOp || f->cond->op != '<')
     return false;

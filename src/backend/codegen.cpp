@@ -22,18 +22,62 @@ void CodeGen::emitTemplateParams(const std::vector<TemplateParam>& params) {
   _out << ">\n";
 }
 
+// Binary-operator precedence. Higher binds tighter. `O`/`A` are logical
+// `||`/`&&` (their own op codes, so they can never be printed as the bitwise
+// `|`/`&`). `=` is lowest. Unknown codes are treated as the loosest so their
+// children are parenthesized rather than silently regrouped.
 static int getPrecedence(char op) {
   switch (op) {
+    case '=':
+      return 1;
+    case 'O':
+      return 3;  // ||
+    case 'A':
+      return 4;  // &&
+    case 'e':
+    case 'n':
+      return 5;  // == !=
+    case '<':
+    case '>':
+    case 'l':
+    case 'g':
+      return 6;  // < > <= >=
+    case '+':
+    case '-':
+      return 7;
     case '*':
     case '/':
     case '%':
-      return 2;
-    case '+':
-    case '-':
-      return 1;
+      return 8;
     default:
       return 0;
   }
+}
+
+// Precedence of a whole expression node when it appears as an operand. Unary
+// operators and casts bind tighter than any binary operator; primary
+// expressions (variables, calls, subscripts, members) bind tightest.
+static int exprPrecedence(const DAGNode* n) {
+  switch (n->kind) {
+    case NodeKind::BinaryOp:
+      return getPrecedence(n->op);
+    case NodeKind::Ternary:
+      return 2;
+    case NodeKind::Cast:
+    case NodeKind::UnaryOp:
+      return 9;
+    default:
+      return 100;
+  }
+}
+
+// The base of a postfix operation (subscript / member / arrow) must be a primary
+// expression; anything looser is parenthesized so `(a + b)[i]`, `(*p)[i]` and
+// `(c ? x : y).f` keep their meaning.
+static std::string parenthesizePostfixBase(const DAGNode* base,
+                                           std::string text) {
+  if (base && exprPrecedence(base) < 100) return "(" + text + ")";
+  return text;
 }
 
 // Map the internal operator encoding back to C++ spelling.
@@ -43,36 +87,26 @@ static std::string opText(char op) {
     case 'n': return "!=";
     case 'l': return "<=";
     case 'g': return ">=";
+    case 'O': return "||";
+    case 'A': return "&&";
     default: return std::string(1, op);
   }
 }
 
-// Whether a child of `parentOp` must be wrapped in parentheses.
+// Whether `child` must be wrapped in parentheses as an operand of a binary
+// operator with precedence `parentPrec`.
 //
-// Precedence settles the different-precedence cases. At equal precedence the
-// left child never needs them -- the emitted text is parsed left-associatively,
-// so `(a + b) + c` and `a + b + c` are the same tree. The right child always
-// does, because dropping them changes the meaning:
-//
-//   a - (b - c) -> a - b - c        a / (b * c) -> a / b * c
-//   a - (b + c) -> a - b + c        a / (b / c) -> a / b / c
-//   a * (b / c) -> a * b / c        a % (b % c) -> a % b % c
-//
-// (`a * (b / c)` also loses exactness for integers: 2 * (3 / 2) is 2, while
-// 2 * 3 / 2 is 3.)
-//
-// Even `a * (b * c)` is not interchangeable with `(a * b) * c`: under IEEE-754
-// the regrouping changes the rounding. A code generator has to print the tree
-// it was given, so the right child keeps its parentheses unconditionally.
-//
-// (This used to test the parent's *left*-associativity, which holds for every
-// binary operator in this IR -- so the condition never fired and a right child
-// silently lost its parentheses.)
-static bool childNeedsParens(char parentOp, char childOp, bool isRightChild) {
-  int pp = getPrecedence(parentOp);
-  int cp = getPrecedence(childOp);
-  if (cp < pp) return true;
-  if (cp > pp) return false;
+// Precedence settles the different-precedence cases. At equal precedence:
+// every binary operator in this IR except `=` is left-associative, so a left
+// child never needs parens while a right child does (`a - (b - c)` must not
+// become `a - b - c`); `=` is right-associative, so the reverse holds. This
+// also keeps `a * (b * c)` parenthesized, which matters under IEEE-754.
+static bool childNeedsParens(const DAGNode* child, int parentPrec,
+                             bool isRightChild, char parentOp) {
+  int cp = exprPrecedence(child);
+  if (cp < parentPrec) return true;
+  if (cp > parentPrec) return false;
+  if (parentOp == '=') return !isRightChild;
   return isRightChild;
 }
 
@@ -252,7 +286,12 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
       } else {
         _out << assign->target;
       }
-      _out << " = " << emitExpr(assign->value) << ";\n";
+      if (assign->compoundOp) {
+        _out << " " << opText(assign->compoundOp) << "= "
+             << emitExpr(assign->value) << ";\n";
+      } else {
+        _out << " = " << emitExpr(assign->value) << ";\n";
+      }
       break;
     }
     case StmtIRKind::ExprStmt: {
@@ -287,13 +326,9 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       std::string lhs = emitExpr(node->operands[0]);
       std::string rhs = emitExpr(node->operands[1]);
 
-      char lOp =
-        (node->operands[0]->kind == NodeKind::BinaryOp) ? node->operands[0]->op : 0;
-      char rOp =
-        (node->operands[1]->kind == NodeKind::BinaryOp) ? node->operands[1]->op : 0;
-
-      bool parenL = lOp && childNeedsParens(node->op, lOp, false);
-      bool parenR = rOp && childNeedsParens(node->op, rOp, true);
+      int pp = getPrecedence(node->op);
+      bool parenL = childNeedsParens(node->operands[0], pp, false, node->op);
+      bool parenR = childNeedsParens(node->operands[1], pp, true, node->op);
 
       std::string result;
       if (parenL)
@@ -322,8 +357,11 @@ std::string CodeGen::emitExpr(DAGNode* node) {
         return node->postfix ? operand + node->name : node->name + operand;
       }
       // Prefix unary: parenthesize compound operands to preserve precedence.
+      // A nested unary is parenthesized too, so `+(+x)` does not print as the
+      // prefix increment `++x` (and `-(-x)` does not print as `--x`).
       if (node->operands[0]->kind == NodeKind::BinaryOp ||
-          node->operands[0]->kind == NodeKind::Ternary) {
+          node->operands[0]->kind == NodeKind::Ternary ||
+          node->operands[0]->kind == NodeKind::UnaryOp) {
         operand = "(" + operand + ")";
       }
       return std::string(1, node->op) + operand;
@@ -346,17 +384,23 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       } else {
         index = emitExpr(idx);
       }
-      return emitExpr(node->operands[0]) + "[" + index + "]";
+      return parenthesizePostfixBase(node->operands[0],
+                                     emitExpr(node->operands[0])) +
+             "[" + index + "]";
     }
 
     case NodeKind::MemberAccess: {
       if (node->operands.empty()) return "";
-      return emitExpr(node->operands[0]) + "." + node->name;
+      return parenthesizePostfixBase(node->operands[0],
+                                     emitExpr(node->operands[0])) +
+             "." + node->name;
     }
 
     case NodeKind::ArrowAccess: {
       if (node->operands.empty()) return "";
-      return emitExpr(node->operands[0]) + "->" + node->name;
+      return parenthesizePostfixBase(node->operands[0],
+                                     emitExpr(node->operands[0])) +
+             "->" + node->name;
     }
 
     case NodeKind::Call: {
@@ -372,13 +416,27 @@ std::string CodeGen::emitExpr(DAGNode* node) {
 
     case NodeKind::Ternary: {
       if (node->operands.size() != 3) return "";
-      return emitExpr(node->operands[0]) + " ? " + emitExpr(node->operands[1]) + " : " +
-             emitExpr(node->operands[2]);
+      std::string cond = emitExpr(node->operands[0]);
+      std::string thenE = emitExpr(node->operands[1]);
+      std::string elseE = emitExpr(node->operands[2]);
+      // The condition and the middle operand are full expressions; a nested
+      // conditional or assignment there must be parenthesized. The third
+      // operand may be another conditional (right-associative) but not an
+      // assignment.
+      if (exprPrecedence(node->operands[0]) <= 2) cond = "(" + cond + ")";
+      if (exprPrecedence(node->operands[1]) <= 2) thenE = "(" + thenE + ")";
+      if (exprPrecedence(node->operands[2]) < 2) elseE = "(" + elseE + ")";
+      return cond + " ? " + thenE + " : " + elseE;
     }
 
     case NodeKind::Cast: {
       if (node->operands.empty()) return "";
-      return "(" + node->name + ")" + emitExpr(node->operands[0]);
+      std::string operand = emitExpr(node->operands[0]);
+      // A cast applies to a unary-expression; a binary or conditional operand
+      // has to be parenthesized or the cast binds to its first subterm
+      // (`(double)(a + b)` must not print as `(double)a + b`).
+      if (exprPrecedence(node->operands[0]) < 9) operand = "(" + operand + ")";
+      return "(" + node->name + ")" + operand;
     }
   }
   return "";

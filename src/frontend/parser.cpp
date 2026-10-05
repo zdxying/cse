@@ -259,7 +259,9 @@ std::unique_ptr<Expr> Parser::parseOr() {
   while (match(TokenType::Or)) {
     auto rhs = parseAnd();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
-    expr->op = '|';
+    // Logical OR gets its own op code: it must not be confused with a bitwise
+    // `|` when the tree is printed back out.
+    expr->op = 'O';
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     lhs = std::move(expr);
@@ -272,7 +274,8 @@ std::unique_ptr<Expr> Parser::parseAnd() {
   while (match(TokenType::And)) {
     auto rhs = parseEquality();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
-    expr->op = '&';
+    // Logical AND gets its own op code (see parseOr).
+    expr->op = 'A';
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     lhs = std::move(expr);

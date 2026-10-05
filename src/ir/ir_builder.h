@@ -88,6 +88,10 @@ class IRBuilder {
   // Scope stack: original name → internal (unique) name
   std::vector<std::unordered_map<std::string, std::string>> _scopes;
   std::unordered_map<std::string, int> _shadowCounters;
+  // Every source name declared so far in the current function (plus the internal
+  // names handed out). Used to alpha-rename sibling-scope shadowing too, not
+  // just names that are still visible in an enclosing scope.
+  std::unordered_set<std::string> _seenNames;
 
   // Vector lowering state (only used when config.lowerVectors is set).
   int _vecDim = 0;

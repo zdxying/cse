@@ -76,7 +76,8 @@ struct CSEConfig {
   bool assumeNumericCommutative = false;          // 允许 +/* 交换律重排
   bool assumeNumericAssociative = false;          // 允许结合律/重结合
   bool allowFpReassoc = false;                    // 允许浮点重结合（含乘法链重排）
-  bool allowUnsafeFpIdentities = false;           // 允许 x*0→0 / x-x→0 / 0/x→0 / x/x→1
+  bool allowUnsafeFpIdentities = false;           // 允许 x*0→0 / x-x→0 / 0/x→0 / x/x→1 /
+                                                  //   x+0→x / 0-x→-x（0/±inf/NaN/符号零）
   bool noAlias = false;                           // 假设不同指针/引用参数互不别名
   std::function<bool(const std::string&)> isPureFunction;  // 纯函数判定
 
@@ -159,7 +160,7 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 |------|------|
 | `assumeNumericCommutative` / `assumeNumericAssociative`（联合生效） | 交换/结合律重排、恒等消除 |
 | `allowFpReassoc` | 浮点加法重排（`Reassociate`）、乘法链重排（`normalizeProduct`） |
-| `allowUnsafeFpIdentities` | `x*0→0`、`x-x→0`、`0/x→0`、`x/x→1`（在 `0`/`±inf`/`NaN` 处改变结果） |
+| `allowUnsafeFpIdentities` | `x*0→0`、`x-x→0`、`0/x→0`、`x/x→1`、`x+0→x`、`0-x→-x`（在 `0`/`±inf`/`NaN`/符号零处改变结果） |
 
 `-s`（保守档）全部关闭；默认档（FreeLB profile）全部打开。`-s` 与 `-r` 互不影响。
 
@@ -274,18 +275,21 @@ ForLoopIR
 ### 5. 代数简化 (AlgebraicSimplifyPass)
 
 恒等消除 + 强度削减 + 叶子交换。整组规则受 `numeric_`（= 交换律 ∧ 结合律）门控；
-其中 `a*0→0`、`a-a→0`、`0/a→0`、`a/a→1` 四条另需 `allowUnsafeFpIdentities`，
-乘法链重排需 `allowFpReassoc`：
+其中 `a*0→0`、`a-a→0`、`0/a→0`、`a/a→1`、`a+0→a`、`0-a→-a` 六条另需
+`allowUnsafeFpIdentities`，乘法链重排需 `allowFpReassoc`：
 
-**恒等消除：**
+**恒等消除（`numeric_` 门控）：**
 - `a * 1 → a`，`1 * a → a`
-- `a + 0 → a`，`0 + a → a`
-- `a * 0 → 0`，`0 * a → 0`
-- `a - 0 → a`，`a / 1 → a`
-- `0 / a → 0`
-- `a - a → 0`，`a / a → 1`
+- `a - 0 → a`（精确），`a / 1 → a`
 - `--a → a`（双重否定消除）
 - `a + (-b) → a - b`，`a - (-b) → a + b`
+
+**另需 `allowUnsafeFpIdentities`（在 `0`/`±inf`/`NaN`/符号零处改变结果）：**
+- `a + 0 → a`，`0 + a → a`（`a = -0.0` 时和为 `+0.0`）
+- `0 - a → -a`（`a = +0.0` 时差为 `+0.0`，而 `-a` 是 `-0.0`）
+- `a * 0 → 0`，`0 * a → 0`
+- `0 / a → 0`
+- `a - a → 0`，`a / a → 1`
 
 **强度削减：**
 - `x * 2 → x + x`

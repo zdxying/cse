@@ -96,6 +96,8 @@ int main() {
   const std::string selfSub = "double f(double x) { return x - x; }";
   const std::string timesZero = "double f(double x) { return x * 0.0; }";
   const std::string zeroOver = "double f(double x) { return 0.0 / x; }";
+  const std::string addZero = "double f(double x) { return x + 0.0; }";
+  const std::string zeroMinus = "double f(double x) { return 0.0 - x; }";
   const std::string mulChain = "double f(double a, double b, double c) {"
                                " return a * (b * c); }";
 
@@ -105,6 +107,10 @@ int main() {
          optimize(selfDiv, bare));
   expect("bare CSEConfig: x * 0 kept", !collapsed(optimize(timesZero, bare)),
          optimize(timesZero, bare));
+  expect("bare CSEConfig: x + 0 kept", has(optimize(addZero, bare), "0.0"),
+         optimize(addZero, bare));
+  expect("bare CSEConfig: 0 - x kept", has(optimize(zeroMinus, bare), "0.0"),
+         optimize(zeroMinus, bare));
 
   // 2. Commutativity/associativity alone must NOT collapse them either: these
   //    identities need the operands to avoid 0 / inf / NaN as well.
@@ -117,8 +123,14 @@ int main() {
          optimize(timesZero, n));
   expect("comm+assoc only: 0 / x kept", !collapsed(optimize(zeroOver, n)),
          optimize(zeroOver, n));
+  expect("comm+assoc only: x + 0 kept", has(optimize(addZero, n), "0.0"),
+         optimize(addZero, n));
+  expect("comm+assoc only: 0 - x kept", has(optimize(zeroMinus, n), "0.0"),
+         optimize(zeroMinus, n));
 
-  // 3. allowUnsafeFpIdentities turns exactly those four on.
+  // 3. allowUnsafeFpIdentities turns exactly those six on. The additive forms
+  //    collapse to the operand itself (or its negation), not to a constant, so
+  //    they are checked by shape rather than by returnsValue.
   cse::CSEConfig u = numericOnly();
   u.allowUnsafeFpIdentities = true;
   expect("unsafe identities: x / x -> 1", returnsValue(optimize(selfDiv, u), 1.0),
@@ -129,6 +141,10 @@ int main() {
          returnsValue(optimize(timesZero, u), 0.0), optimize(timesZero, u));
   expect("unsafe identities: 0 / x -> 0", returnsValue(optimize(zeroOver, u), 0.0),
          optimize(zeroOver, u));
+  expect("unsafe identities: x + 0 -> x",
+         has(optimize(addZero, u), "return x;"), optimize(addZero, u));
+  expect("unsafe identities: 0 - x -> -x",
+         has(optimize(zeroMinus, u), "return -x;"), optimize(zeroMinus, u));
 
   // 4. Regrouping a multiplication chain changes FP rounding, so it needs
   //    allowFpReassoc -- commutativity/associativity alone must not do it.

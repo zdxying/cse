@@ -56,7 +56,10 @@ PassManager PassManager::createDefault(const CSEConfig& config,
     pm.addPass(createReassociatePass());
   }
   pm.addPass(createCSEPass());
-  if (enableRecombine) {
+  // Factoring a common multiplicand out of a sum is a floating-point regrouping
+  // (`a*x + a*y -> a*(x+y)` rounds differently), so like Reassociate it requires
+  // allowFpReassoc. Division is excluded separately inside the pass.
+  if (enableRecombine && config.allowFpReassoc) {
     pm.addPass(createExprRecombinePass(comm));
     pm.addPass(createAlgebraicSimplifyPass(comm, assoc, unsafeIdent,
                                            config.allowFpReassoc));

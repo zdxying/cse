@@ -125,7 +125,7 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 
 代数规则按授权类型分开：交换律/结合律用 `assumeNumericCommutative` /
 `assumeNumericAssociative`，浮点重排（加法重结合、乘法链重排）用 `allowFpReassoc`，
-特殊值恒等（`x*0`、`x-x`、`0/x`、`x/x`）用 `allowUnsafeFpIdentities`。
+特殊值/符号零恒等（`x*0`、`x-x`、`0/x`、`x/x`、`x+0`、`0-x`）用 `allowUnsafeFpIdentities`。
 
 ## 测试
 
