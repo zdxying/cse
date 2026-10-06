@@ -140,9 +140,19 @@ void applyProp(StmtIR* stmt, IRModule& mod,
 }
 
 // Remove inlined VarDecls from a block.
+//
+// A declaration is dropped only once its name has no surviving use. The
+// substitution resolves one link per call, so when trivial definitions chain
+// (`double u = t;` with `double t = a;`) `u` becomes `t` while `t` is still
+// referenced -- erasing `t` here would emit a use of an undeclared variable
+// (or, if an outer/global of the same name exists, silently bind to it). The
+// name is re-checked against the already-rewritten body, so a declaration is
+// kept until its last reference is gone; the outer iteration then removes it.
 void removeInlined(StmtIR* stmt, const std::vector<std::string>& toRemove) {
   if (!stmt) return;
   if (stmt->kind != StmtIRKind::Block) return;
+  std::unordered_set<std::string> referenced;
+  forEachExprDeep(stmt, [&](DAGNode*& e) { collectVarNames(e, referenced); });
   auto* b = static_cast<BlockIR*>(stmt);
   auto it = b->stmts.begin();
   while (it != b->stmts.end()) {
@@ -152,7 +162,10 @@ void removeInlined(StmtIR* stmt, const std::vector<std::string>& toRemove) {
       for (auto& name : toRemove) {
         if (decl->name == name) { inlined = true; break; }
       }
-      if (inlined) { it = b->stmts.erase(it); continue; }
+      if (inlined && !referenced.count(decl->name)) {
+        it = b->stmts.erase(it);
+        continue;
+      }
     }
     ++it;
   }

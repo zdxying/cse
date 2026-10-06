@@ -552,6 +552,8 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/verify/verify_void_param.cpp` | `(void)` 三种形态的数值校验 |
 | `tests/fixtures/loop_unroll_semantics.cpp` | 循环展开：复合存（`out[i] += x` / `p[i].v += x`）保留 `compoundOp`；含不可共享 load 的循环体局部不得内联越过 store（12 flops，默认档 + `-s` 档） |
 | `tests/verify/verify_loop_unroll_semantics.cpp` | 展开循环内复合存与「先读后写」的差分执行校验（返回值与被改写缓冲区同时比较） |
+| `tests/fixtures/value_prop_chain.cpp` | 值传播：平凡局部变量的链式定义（`u = t` 且 `t = a`）不得在被引用时删掉声明；含局部遮蔽同名全局的静默错绑定变体（6 flops，默认档 + `-s` 档） |
+| `tests/verify/verify_value_prop_chain.cpp` | 链式局部变量（二/三链、成员 load 起链、多次使用、遮蔽全局）的差分执行校验 |
 | `tests/verify/verify_builder_guards.cpp` | 库层：空语句槽位必须被拒绝为 `CSEError` 而不是解引用空指针 |
 | `tests/verify/check_lattice.py` | 引擎 latset 表 vs FreeLB `lattice_set.h` 防漂移 |
 | `tests/csegen/{equilibrium,force,moment}.h` | `csegen` `.ur.h` 生成冒烟（Cell/TLatSet/TLatSetD/CellType 各形态） |
@@ -559,7 +561,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、ref_alias、
 > float_identities、mixed_ops、write_visibility、effect_duplication、frontend_forms、
-> comment_braces、dead_store_effects、constant_edges、void_param、loop_unroll_semantics），而非 golden-diff。
+> comment_braces、dead_store_effects、constant_edges、void_param、loop_unroll_semantics、value_prop_chain），而非 golden-diff。
 > 注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变 flops，`a*x ± a` 的提取是 FLOP 中性的，
 > 跨成员写的错误共享也恰好省下同样的 flops（store_aware 修复前后是同一个数），
 > `y++` 与 `-0.0` 更是完全不进 flops——这几类只能靠数值验证器或生成文本的形状检查，
