@@ -33,6 +33,10 @@ std::unique_ptr<StmtIR> cloneStmt(const StmtIR* stmt) {
       out->target = a->target;
       out->targetExpr = a->targetExpr;
       out->value = a->value;
+      // A compound store (`a[i] += x`) must keep its operator: dropping it turns
+      // the store into a plain `a[i] = x`, silently discarding the read of the
+      // old value. This is the one field a clone cannot afford to lose.
+      out->compoundOp = a->compoundOp;
       return out;
     }
     case StmtIRKind::VarDecl: {
@@ -237,10 +241,37 @@ void collectDeclInits(StmtIR* stmt,
   }
 }
 
+// Is every node in `e` referentially transparent?
+//
+// A node is not if it carries `pure == false`: a non-shareable load (an
+// `ArrayAccess`/`MemberAccess`/`ArrowAccess` whose root may be written), an
+// impure call, or a `++`/`--`. Such a node denotes a different value at a
+// different point in the program, so it may neither be repeated nor moved.
+//
+// `pure` is a per-node flag, not propagated to the parent, so the walk has to
+// reach every descendant: `a[i] * b` is a BinaryOp with `pure == true` even
+// though `a[i]` is a non-shareable load.
+bool isPureExpr(DAGNode* e) {
+  if (!e) return true;
+  if (!e->pure) return false;
+  for (auto* op : e->operands)
+    if (!isPureExpr(op)) return false;
+  return true;
+}
+
 // A body-local declaration can be unrolled only if its initializer can be
 // inlined at every use and the variable is never reassigned.
+//
+// "Inlined at every use" means the initializer is evaluated at each use site,
+// which may sit *after* a store the original declaration preceded. It must
+// therefore be referentially transparent (`isPureExpr`), and it must not itself
+// write (`hasSideEffect`, which also catches an assignment spelled as an
+// expression -- that node has `pure == true`). The earlier test asked only
+// `!hasImpureCall`, which missed non-shareable loads entirely: `double t = a[i];
+// a[i] = 0; use(t);` was rewritten to read `a[i]` after the store.
 bool declInlinable(DAGNode* init) {
-  return init && init->kind != NodeKind::Variable && !hasImpureCall(init);
+  return init && init->kind != NodeKind::Variable && !hasSideEffect(init) &&
+         isPureExpr(init);
 }
 
 // Inline confined local declarations (name -> init) and drop the declarations.

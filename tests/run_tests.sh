@@ -81,7 +81,7 @@ cost_stage "default" "" default \
   basic_cse=10 features=49 namespace_case=4 equilibrium_d3q19=84 \
   safety_cases=19 parens=19 mixed_ops=8 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 dead_store_effects=3 constant_edges=6 void_param=4 incdec_safety=12 loop_bound=8 \
-  cost_nested=355 cost_descending=35
+  loop_unroll_semantics=12 cost_nested=355 cost_descending=35
 cost_stage "-r" "-r" r \
   recombine=24
 # Several defects only appear once the aggressive passes are off, so the
@@ -89,7 +89,8 @@ cost_stage "-r" "-r" r \
 cost_stage "-s" "-s" s \
   parens=19 store_aware=19 float_identities=6 mixed_ops=9 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 \
-  dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1
+  dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1 \
+  loop_unroll_semantics=12
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -291,6 +292,12 @@ cp "$FIXTURES/semantics_fixes.cpp" "$WORK/s/semantics_fixes.cpp"
 "$CSE" -s "$WORK/s/semantics_fixes.cpp" >/dev/null 2>&1 || true
 run_verifier "semantics_fixes_safe" verify_semantics_fixes.cpp \
   "ALL SEMANTICS-FIX CHECKS PASSED" "$WORK/s"
+# Loop-unroller regressions: a dropped compound operator and a load moved past
+# a store. Both keep the FLOP count identical, so only the values catch them.
+run_verifier "loop_unroll_semantics" verify_loop_unroll_semantics.cpp \
+  "ALL LOOP-UNROLL CHECKS PASSED" "$WORK/default"
+run_verifier "loop_unroll_semantics_safe" verify_loop_unroll_semantics.cpp \
+  "ALL LOOP-UNROLL CHECKS PASSED" "$WORK/s"
 run_verifier "equilibrium" verify_equilibrium.cpp "max abs error" "$WORK/default"
 run_verifier "safety" verify_safety.cpp "ALL SAFETY CHECKS PASSED" "$WORK/default"
 run_verifier "parens" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/default"
