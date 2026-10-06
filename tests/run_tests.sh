@@ -81,7 +81,7 @@ cost_stage "default" "" default \
   basic_cse=10 features=49 namespace_case=4 equilibrium_d3q19=84 \
   safety_cases=19 parens=19 mixed_ops=8 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 dead_store_effects=3 constant_edges=6 void_param=4 incdec_safety=12 loop_bound=8 \
-  loop_unroll_semantics=12 value_prop_chain=6 cost_nested=355 cost_descending=35
+  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 cost_nested=355 cost_descending=35
 cost_stage "-r" "-r" r \
   recombine=24
 # Several defects only appear once the aggressive passes are off, so the
@@ -90,7 +90,7 @@ cost_stage "-s" "-s" s \
   parens=19 store_aware=19 float_identities=6 mixed_ops=9 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 \
   dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1 \
-  loop_unroll_semantics=12 value_prop_chain=6
+  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -305,6 +305,13 @@ run_verifier "value_prop_chain" verify_value_prop_chain.cpp \
   "ALL VALUE-PROP-CHAIN CHECKS PASSED" "$WORK/default"
 run_verifier "value_prop_chain_safe" verify_value_prop_chain.cpp \
   "ALL VALUE-PROP-CHAIN CHECKS PASSED" "$WORK/s"
+# CleanupPass regressions: a local read only as a store index used to have its
+# declaration deleted. The plain cases fail to compile; the shadow case compiles
+# and writes the wrong slot, so only the values catch it.
+run_verifier "cleanup_store_index" verify_cleanup_store_index.cpp \
+  "ALL CLEANUP-STORE-INDEX CHECKS PASSED" "$WORK/default"
+run_verifier "cleanup_store_index_safe" verify_cleanup_store_index.cpp \
+  "ALL CLEANUP-STORE-INDEX CHECKS PASSED" "$WORK/s"
 run_verifier "equilibrium" verify_equilibrium.cpp "max abs error" "$WORK/default"
 run_verifier "safety" verify_safety.cpp "ALL SAFETY CHECKS PASSED" "$WORK/default"
 run_verifier "parens" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/default"

@@ -196,53 +196,6 @@ bool combineChainedAssignAssignments(BlockIR* block, IRModule& mod) {
   return changed;
 }
 
-// Count variable uses in a DAG subtree
-void countExprUses(DAGNode* e, std::unordered_map<std::string, int>& counts) {
-  if (!e) return;
-  if (e->kind == NodeKind::Variable) counts[e->name]++;
-  for (auto* op : e->operands) countExprUses(op, counts);
-}
-
-// Count uses across a statement tree
-void countStmtUses(StmtIR* stmt, std::unordered_map<std::string, int>& counts) {
-  if (!stmt) return;
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) countStmtUses(s.get(), counts);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      countStmtUses(f->init.get(), counts);
-      countExprUses(f->cond, counts);
-      countExprUses(f->update, counts);
-      countExprUses(f->updateRhs, counts);
-      countStmtUses(f->body.get(), counts);
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      countExprUses(ie->cond, counts);
-      countStmtUses(ie->thenBranch.get(), counts);
-      countStmtUses(ie->elseBranch.get(), counts);
-      break;
-    }
-    case StmtIRKind::ExprStmt:
-      countExprUses(static_cast<ExprStmtIR*>(stmt)->expr, counts);
-      break;
-    case StmtIRKind::Assign:
-      countExprUses(static_cast<AssignIR*>(stmt)->value, counts);
-      break;
-    case StmtIRKind::VarDecl:
-      countExprUses(static_cast<VarDeclIR*>(stmt)->init, counts);
-      break;
-    case StmtIRKind::Return:
-      countExprUses(static_cast<ReturnIR*>(stmt)->value, counts);
-      break;
-  }
-}
-
 // Check if a DAG node is a constant (or unary plus of a constant)
 bool isEffectivelyConstant(DAGNode* node) {
   if (!node) return false;
@@ -302,10 +255,14 @@ bool pruneBlock(BlockIR* block, IRModule& mod) {
   }
   
   // Second pass: remove zero-init vars and unused const vars
-  // Count remaining uses
-  std::unordered_map<std::string, int> uses;
-  countStmtUses(block, uses);
-  // `countStmtUses` counts *reads* only. A declaration that is still written --
+  // Count remaining uses. The shared `countUses` (ir_utils.h) walks every
+  // expression slot through forEachExprDeep, so a variable read only in a store
+  // lvalue -- `a[x] = v;`, whose index is ordinary arithmetic -- is seen here.
+  // The private kind-by-kind counter this replaces listed only the *value* of an
+  // Assign, so such a declaration looked unused and was deleted, leaving the
+  // store referring to a name that no longer existed.
+  std::unordered_map<std::string, int> uses = countUses(block);
+  // `countUses` counts *reads* only. A declaration that is still written --
   // `double unused = 0.0; unused = y++;` -- has zero reads but must be kept:
   // dropping it leaves the store referring to a variable that no longer exists,
   // and the emitted code does not compile. DCE applies the same rule, so the two
