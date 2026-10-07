@@ -274,6 +274,24 @@ bool declInlinable(DAGNode* init) {
          isPureExpr(init);
 }
 
+// Does `init` read a variable that is written somewhere in the loop body?
+//
+// Purity is not enough. `double t = a + 1.0; a = a + 2.0; s += t;` has a pure
+// initializer, but inlining it moves the read of `a` to the use site, *after*
+// the write -- so the use sees the new `a`. `"*"` is the wildcard an impure call
+// contributes (it may write anything), so a variable read across one is not
+// stable either.
+bool readsWrittenVar(DAGNode* init,
+                     const std::unordered_set<std::string>& written) {
+  std::unordered_set<std::string> deps;
+  collectVarNames(init, deps);
+  if (deps.empty()) return false;
+  if (written.count("*")) return true;
+  for (const auto& d : deps)
+    if (written.count(d)) return true;
+  return false;
+}
+
 // Inline confined local declarations (name -> init) and drop the declarations.
 // `inlinable` holds names whose uses are fully contained in the loop body.
 // Recurses into nested statements so declarations in nested blocks are removed
@@ -430,6 +448,10 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
     auto bodyUses = countUses(f->body.get());
     std::set<std::string> inlinable;
     std::set<std::string> renames;
+    // Names written anywhere in the body. A body-local whose initializer reads
+    // one of these cannot be inlined: the read would move past the write.
+    std::unordered_set<std::string> bodyWritten;
+    collectWrittenNames(f->body.get(), bodyWritten);
     for (auto& name : decls) {
       auto g = globalUses.find(name);
       auto b = bodyUses.find(name);
@@ -438,7 +460,8 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
       if (gv != bv) return stmt;  // used outside the body: cannot unroll
       auto di = declInits.find(name);
       DAGNode* init = (di == declInits.end()) ? nullptr : di->second;
-      if (declInlinable(init) && !reassignedIn(f->body.get(), name)) {
+      if (declInlinable(init) && !reassignedIn(f->body.get(), name) &&
+          !readsWrittenVar(init, bodyWritten)) {
         inlinable.insert(name);
       } else {
         renames.insert(name);

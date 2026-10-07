@@ -81,7 +81,8 @@ cost_stage "default" "" default \
   basic_cse=10 features=49 namespace_case=4 equilibrium_d3q19=84 \
   safety_cases=19 parens=19 mixed_ops=8 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 dead_store_effects=3 constant_edges=6 void_param=4 incdec_safety=12 loop_bound=8 \
-  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 cost_nested=355 cost_descending=35
+  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 cost_nested=355 cost_descending=35 \
+  ref_param_store=9 loop_unroll_inline=21 struct_region=2 region_toplevel=3
 cost_stage "-r" "-r" r \
   recombine=24
 # Several defects only appear once the aggressive passes are off, so the
@@ -90,7 +91,8 @@ cost_stage "-s" "-s" s \
   parens=19 store_aware=19 float_identities=6 mixed_ops=9 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 \
   dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1 \
-  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5
+  loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 \
+  ref_param_store=9 loop_unroll_inline=23 struct_region=2 region_toplevel=3
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -203,6 +205,43 @@ else
   exit 1
 fi
 
+# A store to a *reference* must survive DCE (it writes the caller's object), but
+# a store to a pointer parameter's own value must still be dropped (the pointer
+# is a local copy). Neither shows up in the FLOP count, so check the text.
+echo "=== reference-store shape checks ==="
+rs_fail=0
+# Pull each optimized function's body out (signature line .. the first column-0
+# `}`) so the unmarked `ref_` twin on the following line cannot satisfy a grep.
+body() { sed -n "/$1/,/^}/p" "$2"; }
+if ! body "double sf_ref_param(" "$WORK/default/ref_param_store.cpp.cse" | grep -q "v = "; then
+  echo "FAIL  a store to a reference parameter was deleted" >&2
+  rs_fail=1
+fi
+if ! body "double sf_ref_local(" "$WORK/default/ref_param_store.cpp.cse" | grep -q "r = "; then
+  echo "FAIL  a store through a reference local was deleted" >&2
+  rs_fail=1
+fi
+if ! body "int sf_ref_int(" "$WORK/default/ref_param_store.cpp.cse" | grep -q "v = "; then
+  echo "FAIL  a store to an integer reference parameter was deleted" >&2
+  rs_fail=1
+fi
+if body "double sf_ptr_self(" "$WORK/default/ref_param_store.cpp.cse" | grep -q "p = 0"; then
+  echo "FAIL  a pointer parameter's own store was kept: DCE became too conservative" >&2
+  rs_fail=1
+fi
+(( rs_fail == 0 )) || exit 1
+echo "ok    a reference store survives; a pointer self-store is still dead"
+
+# The unroller must rename a body-local whose initializer reads a variable the
+# body writes, not inline it (which would move the read past the write).
+echo "=== loop-unroll inline shape check ==="
+if grep -q "t__u0" "$WORK/default/loop_unroll_inline.cpp.cse"; then
+  echo "ok    the written-dependency local is renamed, not inlined"
+else
+  echo "FAIL  the unroller inlined a local past a write to a variable it reads" >&2
+  exit 1
+fi
+
 # A region the frontend cannot read must not cost the user the rest of the file.
 # Before this, the first parse error ran into std::terminate, and because the
 # output file is written at the very end, *no* file was produced at all.
@@ -312,6 +351,29 @@ run_verifier "cleanup_store_index" verify_cleanup_store_index.cpp \
   "ALL CLEANUP-STORE-INDEX CHECKS PASSED" "$WORK/default"
 run_verifier "cleanup_store_index_safe" verify_cleanup_store_index.cpp \
   "ALL CLEANUP-STORE-INDEX CHECKS PASSED" "$WORK/s"
+# DCE used to delete a store to a reference (a parameter or a reference local),
+# because every parameter and declaration counted as private storage. The plain
+# cases fail to compile only when the whole function is empty; the rest are
+# caught by comparing the mutated referent.
+run_verifier "ref_param_store" verify_ref_param_store.cpp \
+  "ALL REF-PARAM-STORE CHECKS PASSED" "$WORK/default"
+run_verifier "ref_param_store_safe" verify_ref_param_store.cpp \
+  "ALL REF-PARAM-STORE CHECKS PASSED" "$WORK/s"
+# The unroller used to inline a body-local initializer past a write to a variable
+# it reads. FLOP-neutral, so only the values catch it.
+run_verifier "loop_unroll_inline" verify_loop_unroll_inline.cpp \
+  "ALL LOOP-UNROLL-INLINE CHECKS PASSED" "$WORK/default"
+run_verifier "loop_unroll_inline_safe" verify_loop_unroll_inline.cpp \
+  "ALL LOOP-UNROLL-INLINE CHECKS PASSED" "$WORK/s"
+# A region that marks a pure data struct (or a namespace holding only one) used
+# to emit nothing; the verifier uses each type, so a dropped definition fails to
+# compile.
+run_verifier "struct_region" verify_struct_region.cpp \
+  "ALL STRUCT-REGION CHECKS PASSED" "$WORK/default"
+# A top-level declaration marked with `//@cse` used to be swallowed into the next
+# function's region and dropped; the verifier reads each declaration.
+run_verifier "region_toplevel" verify_region_toplevel.cpp \
+  "ALL REGION-TOPLEVEL CHECKS PASSED" "$WORK/default"
 run_verifier "equilibrium" verify_equilibrium.cpp "max abs error" "$WORK/default"
 run_verifier "safety" verify_safety.cpp "ALL SAFETY CHECKS PASSED" "$WORK/default"
 run_verifier "parens" verify_parens.cpp "ALL PARENS CHECKS PASSED" "$WORK/default"

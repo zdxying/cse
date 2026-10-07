@@ -15,7 +15,8 @@ namespace {
 // (The side-effect test and the use count both come from ir_utils.h; they used
 // to be private copies here and in loop_unroll, which is how they drifted.)
 
-// Every name the function introduces itself: parameters plus local declarations.
+// Every name the function introduces itself *as private storage*: value
+// parameters plus local declarations.
 //
 // Dropping a store to one of these can only throw away work nothing can observe.
 // A store to any *other* name cannot be judged that way -- the region never
@@ -29,12 +30,25 @@ namespace {
 //
 // "nothing in this function reads it back" is not the same as "nothing can see
 // it".
+//
+// A *reference* is not private storage, whether it arrives as a parameter or as
+// a local declaration: `void setv(double& v) { v = 1.0; }` writes the caller's
+// object and `double& r = v; r = 1.0;` writes whatever `r` binds. Both were
+// treated as owned, so the store looked dead and was deleted. A pointer is
+// different -- reassigning the pointer itself only changes the local copy, so
+// it stays owned.
+bool isPrivateStorage(const std::string& type) {
+  return type.find('&') == std::string::npos;
+}
+
 void collectDeclared(const StmtIR* stmt, std::unordered_set<std::string>& out) {
   if (!stmt) return;
   switch (stmt->kind) {
-    case StmtIRKind::VarDecl:
-      out.insert(static_cast<const VarDeclIR*>(stmt)->name);
+    case StmtIRKind::VarDecl: {
+      const auto* d = static_cast<const VarDeclIR*>(stmt);
+      if (isPrivateStorage(d->type)) out.insert(d->name);
       return;
+    }
     case StmtIRKind::Block:
       for (const auto& s : static_cast<const BlockIR*>(stmt)->stmts)
         collectDeclared(s.get(), out);
@@ -58,7 +72,12 @@ void collectDeclared(const StmtIR* stmt, std::unordered_set<std::string>& out) {
 
 std::unordered_set<std::string> ownedLocals(const IRModule& module) {
   std::unordered_set<std::string> owned;
-  for (const auto& p : module.funcSig.params) owned.insert(p.name);
+  for (const auto& p : module.funcSig.params) {
+    // A reference parameter names the caller's object, not a local copy: a
+    // store through it is observable after the call returns. A pointer
+    // parameter is a value parameter for this purpose.
+    if (isPrivateStorage(p.type)) owned.insert(p.name);
+  }
   collectDeclared(module.body.get(), owned);
   return owned;
 }

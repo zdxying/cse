@@ -134,8 +134,12 @@ static void optimizeFunctionsAndStructs(
     }
   }
 
-  // If no functions but have structs, emit structs only
-  if (funcs.empty() && !optStructs.empty()) {
+  // If no functions, emit the structs on their own. This has to include the
+  // pure data structs (`structPtrs`): they are otherwise only emitted on the
+  // first function iteration below, so a region that marks a data struct and
+  // nothing else used to be dropped from the output entirely -- leaving the
+  // file referencing a type that no longer exists.
+  if (funcs.empty() && (!structPtrs.empty() || !optStructs.empty())) {
     cse::IRModule emptyModule;
     cse::CodeGen codegen;
     optResult.code += codegen.generate(emptyModule, structPtrs, optStructs);

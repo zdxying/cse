@@ -16,6 +16,7 @@ namespace {
 struct ScanState {
   bool blockComment = false;  // inside a /* ... */ comment
   bool sawBrace = false;      // a real opening brace has been seen
+  bool topLevelSemi = false;  // a `;` at brace depth 0, before any `{`
 };
 
 // Net `{` minus `}` contributed by one line of code, ignoring quoted text and
@@ -72,6 +73,13 @@ int braceDelta(const std::string& line, ScanState& st) {
       st.sawBrace = true;
     } else if (c == '}') {
       --delta;
+    } else if (c == ';' && !st.sawBrace) {
+      // A top-level statement terminator before any brace: the region is a
+      // declaration, not a `{ ... }` body. Without this a marker in front of a
+      // declaration (`//@cse` + `double g = 5.0;`) kept accumulating until the
+      // next function's body, so the declaration was swallowed into that
+      // region and then dropped -- the output no longer declared `g`.
+      st.topLevelSemi = true;
     }
     ++i;
   }
@@ -117,7 +125,7 @@ std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const
       cseCode += line + "\n";
 
       if (braceCount <= 0 && !cseCode.empty()) {
-        if (st.sawBrace) {
+        if (st.sawBrace || st.topLevelSemi) {
           regions.push_back({cseStart, lineNum, cseCode});
           inCSE = false;
           cseCode.clear();
