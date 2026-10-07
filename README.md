@@ -146,7 +146,10 @@ preserves behavior through six mechanisms:
 5. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
    with the same name are never merged.
 6. **Loop unrolling precondition** — a loop is only unrolled when every local it
-   declares can be inlined away; otherwise the loop stays.
+   declares can be inlined or safely renamed, its induction variable is not
+   written by `++`/`--` inside the body, and the body contains no `break` /
+   `continue` of its own; otherwise the loop stays. The induction variable must
+   also be declared in the `for` init (an assignment init keeps the loop).
 
 The code generator also always prints the tree it was given: a right child at
 equal precedence keeps its parentheses, because under IEEE-754 not only
@@ -166,7 +169,7 @@ the special-value / signed-zero identities (`x*0`, `x-x`, `0/x`, `x/x`, `x+0`,
 | Stage | What it checks |
 |-------|----------------|
 | Cost regression | FLOP counts for the fixtures in `tests/fixtures/`, run under three configurations (default, `-r`, `-s`) |
-| Numerical | `verify_*` compile and run generated output (equilibrium, safety, recombine, parens, store_aware, float_identities, ref_alias, …) |
+| Numerical | `verify_*` compile and run generated output (semantics_fixes, equilibrium, safety, recombine, parens, store_aware, float_identities, ref_alias, …) |
 | Config contract | `verify_config.cpp` links `libcse.a` and pins the `CSEConfig` switch behaviour the CLI cannot isolate |
 | `csegen` smoke | representative specializations appear in generated headers |
 | Lattice drift guard | engine tables vs FreeLB `lattice_set.h` (skipped without a FreeLB checkout) |

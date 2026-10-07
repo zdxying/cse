@@ -10,6 +10,7 @@ namespace cse {
 class IRModule;
 class StmtIR;
 class DAGNode;
+struct AssignIR;
 struct StructDef;
 struct TemplateParam;
 
@@ -33,6 +34,11 @@ class CodeGen {
 
  private:
   void emitStmt(StmtIR* stmt, int indentLevel);
+  // A `for` init clause is a statement printed mid-line, without indentation or
+  // a terminator: a declaration (`int i = 0`) or an expression (`i = 0`).
+  void emitForInit(StmtIR* stmt);
+  // Print an assignment's `target (=|op=) value` with no indent or `;`.
+  void emitAssignBody(const AssignIR* assign);
   std::string emitExpr(DAGNode* node);
   std::string makeIndent(int level) const;
   void emitTemplateParams(const std::vector<TemplateParam>& params);

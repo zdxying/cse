@@ -147,12 +147,19 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
    避免把条件执行的计算提升为无条件计算。
 5. **作用域**：IRBuilder 维护作用域栈并对遮蔽变量 alpha-rename（如 `y__s1`），
    保证同名变量不跨作用域误合并。
-6. **循环展开前提**：仅当循环体内每个局部声明都能被内联消除（初始化表达式为纯、
-   非变量且该局部不被重新赋值）才展开；否则保留循环。这避免把同一局部变量
-   跨迭代共享、进而被误当作循环不变量（例如 `uc` 的初始化含不纯调用时）。
+6. **循环展开前提**：仅当下列条件全部满足才展开，否则保留循环：
+   - 循环体内每个局部声明都能被内联消除（初始化表达式为纯、非变量、不被重新赋值）
+     或安全改名；这避免把同一局部变量跨迭代共享、进而被误当作循环不变量
+     （例如 `uc` 的初始化含不纯调用时）。
+   - 循环变量未被循环体改写（`i++`），否则常量替换会得到 `0++`。
+   - 循环体不含属于本循环的 `break`/`continue`，否则展开会把它们移出所命名的循环。
+   「被改写」的判据是 `collectWrittenNames`，覆盖 `++`/`--` 与以表达式形式书写的赋值。
 
 另外，CSE 工具**总是原样打印 IR 的树**：同优先级的右子节点一律保留括号，因为浮点下
 `a - (b - c)`、`a / (b * c)` 甚至 `a * (b * c)` 与去掉括号后的形式都不等价。
+发射还要避免相邻 token 粘连：前缀 `-`/`+` 的操作数若自身以同号开头（如折叠出的常量
+`-5`）必须加括号，否则 `-(-5)` 会打成 `--5`；`for` 的初始化子句无论是声明还是赋值都要
+发射，否则 `for (i = 0; …)` 会退化成 `for (; …)`，循环变量未初始化。
 
 代数规则默认关闭，按**授权类型**分成四档（`CSEConfig`）：
 
@@ -400,6 +407,7 @@ DCE 之后还跑一个 **CleanupPass** 做末段清扫：删除没被读**也没
 | `f(void)` 空形参列表 | 已支持（`void` 是类型关键字，需在 `)` 前特判） |
 | 字符串 / 字符字面量 | **不支持**（`"..."` 仍是 parse error；区域会被跳过并原样输出） |
 | 模板函数调用 `latset::c<LatSet>(k)` | 已支持（作为不透明调用） |
+| 模板实参与 `<` 比较的区分 | 已支持（`ident<…>` 仅在实参列表合法、且 `>` 后紧跟 `(`/`::`/`.`/`->`/`[` 时才算模板 id，否则按 `<` 比较解析） |
 
 ### 10. IR 工具函数 (ir_utils.h / stmt_walk.h)
 
@@ -450,6 +458,20 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 - 展开后的语句直接拼接进父 Block，保证跨语句 CSE 可见
 - 循环体内声明的局部变量若仅在该循环体内使用，则内联并删除声明
 
+展开前还要确认展开本身是安全的，否则整个循环保持原样（不展开）：
+
+- **循环变量不得被循环体改写**：`for (i=0; i<4; ++i) { s += a; i++; }` 里的 `i++`
+  会随常量替换变成 `0++`。判据由 `collectWrittenNames` 提供，覆盖 `++`/`--`、以
+  表达式形式书写的赋值，以及结构化 store 的根。
+- **循环体局部若被改写**（`t++;`）则改名（`t__u0` …）而非内联，否则内联会把 `t`
+  代进它自己的 `++`（`(a + 1.0)++`）。
+- **循环体内出现属于本循环的 `break`/`continue`** 时拒绝展开：展开会把语句拼进父
+  Block，从而把它们移出所命名的循环。嵌套循环自身的 `break`/`continue` 不算
+  （遍历不进入嵌套 `ForLoop` 的循环体）。前端没有这两个关键字，`break;` 以「名为
+  `break` 的裸变量表达式语句」形式到达 IR。
+- `for` 的初始化子句若为赋值（`for (i = 0; …)` 而非声明）必须原样发射；codegen 只
+  认声明形式时会把它丢掉，得到 `for (; …)`，循环变量因此未初始化。
+
 ### 13. 加法重结合 (ReassociatePass)
 
 将 `+`/`-` 链展平为带符号项，按每个带符号项在函数中的出现频率降序重建。
@@ -483,6 +505,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | ~~引用型形参未纳入别名判据~~ | **已修**：`&` 与 `*`/`[` 一起进 `_pointerParams`（形参与引用型局部） | `f(const V& v, V& w)` 以 `f(x, x)` 调用时不再跨写复用 `v` 的 load（`ref_alias` 夹具钉住）；`noAlias` 仍是恢复共享的唯一出口 |
 | **写集合只看 lvalue 的根** | `collectWrittenNames` 对元素/成员写只记根变量名 | 若两个不同根实际别名同一对象，检查会认为"没写"；`noAlias` 与"根名不同即不别名"是当前的全部依据 |
 | **写集合不含声明** | `VarDecl` 不计入写集合 | 名字遮蔽已做 alpha-rename，故不会与旧绑定混淆；新增读写分析时注意这一点 |
+| **break/continue 阻断展开** | 循环体内出现属于本循环的 `break`/`continue` 时不展开该循环 | 该循环体不参与跨语句 CSE（正确性优先）；`break;`/`continue;` 以「名为 `break`/`continue` 的裸变量表达式语句」形式到达 IR，因为前端没有这两个关键字 |
 | **FLOP 口径是「每条语句一次」** | `cost_model` 按**提及该节点的语句数**计数，而不是 DAG 节点数 | 它要近似的是**生成代码**的开销：DAG 已哈希去重，而 codegen 在每个使用点重印该节点。改成整函数去重会把 `for (i<4) a+=b;` 展开出的四条 `a = a + b;` 报成 1 flop（实为 4），所以不是缺陷；真正未解决的是同一条语句内重复的子表达式只计一次 |
 | **常量文本不进身份** | `numText` / `symbol` 不是节点身份的一部分 | 同一个常量节点只有一份拼写，可能被算术位置与下标位置共用；下标由 codegen 保证整型 |
 
@@ -556,6 +579,16 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/verify/verify_value_prop_chain.cpp` | 链式局部变量（二/三链、成员 load 起链、多次使用、遮蔽全局）的差分执行校验 |
 | `tests/fixtures/cleanup_store_index.cpp` | Cleanup：只在 store 左值（`a[x] = v` / `p[i].v = v`）中读取的局部变量不得删声明；含遮蔽同名全局的静默错槽变体（5 flops，默认档 + `-s` 档） |
 | `tests/verify/verify_cleanup_store_index.cpp` | store 索引局部变量（纯左值 / 左值内表达式 / 成员元素 / 遮蔽全局）的差分执行校验（返回值与被改写缓冲区同时比较） |
+| `tests/fixtures/semantics_fixes.cpp` | 语义安全修复回归（两批）：逻辑运算符、codegen 括号、复合存、跨调用写、不纯调用被 `*0.0` 丢弃、整数除法、遮蔽、链式合并、分数起点循环；第二批的 `for` 初始化赋值、循环变量/局部被 `++` 改写、`break`/`continue` 阻断展开、负常量前导 `-`、`<` 后接 `>` 的区域解析（默认档 76 / `-r` 档 76 / `-s` 档 77 flops + 一条 `<`/`>` 形状检查） |
+| `tests/verify/verify_semantics_fixes.cpp` | 上述用例的差分执行校验（`sf_*` 对未标记的 `ref_*` 孪生），默认档 + `-s` 档各跑一次 |
+| `tests/fixtures/ref_param_store.cpp` | DCE 不得删除对引用的存储（引用形参或引用型局部）；指针形参自身的存储仍应删除（9 flops） |
+| `tests/verify/verify_ref_param_store.cpp` | 引用存储存活、指针自存仍死的差分执行校验 |
+| `tests/fixtures/loop_unroll_inline.cpp` | 展开：循环体局部若其初值读取了循环体写入的变量，必须改名而非内联（默认档 21 / `-s` 档 23 flops） |
+| `tests/verify/verify_loop_unroll_inline.cpp` | 展开内联越过写入的差分执行校验 |
+| `tests/fixtures/struct_region.cpp` | `//@cse` 标记的纯数据 struct 必须输出（2 flops） |
+| `tests/verify/verify_struct_region.cpp` | 纯数据 struct 输出的编译校验 |
+| `tests/fixtures/region_toplevel.cpp` | `//@cse` 标记的顶层声明不得被并进下一个函数的区域（3 flops） |
+| `tests/verify/verify_region_toplevel.cpp` | 顶层声明输出的编译校验 |
 | `tests/verify/verify_builder_guards.cpp` | 库层：空语句槽位必须被拒绝为 `CSEError` 而不是解引用空指针 |
 | `tests/verify/check_lattice.py` | 引擎 latset 表 vs FreeLB `lattice_set.h` 防漂移 |
 | `tests/csegen/{equilibrium,force,moment}.h` | `csegen` `.ur.h` 生成冒烟（Cell/TLatSet/TLatSetD/CellType 各形态） |
@@ -563,12 +596,13 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 > 所有工具产物（`*.cse`、`*.ur.h`、验证器可执行文件）写入临时目录，源码树不被修改。
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、ref_alias、
 > float_identities、mixed_ops、write_visibility、effect_duplication、frontend_forms、
-> comment_braces、dead_store_effects、constant_edges、void_param、loop_unroll_semantics、value_prop_chain、cleanup_store_index），而非 golden-diff。
+> comment_braces、dead_store_effects、constant_edges、void_param、loop_unroll_semantics、value_prop_chain、cleanup_store_index、
+> semantics_fixes、ref_param_store、loop_unroll_inline、struct_region、region_toplevel），而非 golden-diff。
 > 注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变 flops，`a*x ± a` 的提取是 FLOP 中性的，
 > 跨成员写的错误共享也恰好省下同样的 flops（store_aware 修复前后是同一个数），
 > `y++` 与 `-0.0` 更是完全不进 flops——这几类只能靠数值验证器或生成文本的形状检查，
 > 因此 `run_tests.sh` 里另有一组 grep 形状检查（重组形态、强度削减、死存储、常量发射、
-> store 索引）。
+> store 索引、`<`/`>` 区域解析）。
 > FreeLB 侧 `verify_*.py` 是**数值**校验：解析两个文件、按公式求值再逐个比较，
 > 不做文本比对（所以重命名 `_cse_*` 这类内部标识符它发现不了，字面量拼写变化也不影响它）。
 > 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归（默认档 + `-r` 档 + `-s` 档）→

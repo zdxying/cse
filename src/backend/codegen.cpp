@@ -206,13 +206,7 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
     case StmtIRKind::ForLoop: {
       auto* forLoop = static_cast<ForLoopIR*>(stmt);
       _out << ind << "for (";
-      if (forLoop->init) {
-        if (forLoop->init->kind == StmtIRKind::VarDecl) {
-          auto* decl = static_cast<VarDeclIR*>(forLoop->init.get());
-          _out << decl->type << " " << decl->name;
-          if (decl->init) _out << " = " << emitExpr(decl->init);
-        }
-      }
+      emitForInit(forLoop->init.get());
       _out << "; ";
       if (forLoop->cond) _out << emitExpr(forLoop->cond);
       _out << "; ";
@@ -279,19 +273,9 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
       break;
     }
     case StmtIRKind::Assign: {
-      auto* assign = static_cast<AssignIR*>(stmt);
       _out << ind;
-      if (assign->targetExpr) {
-        _out << emitExpr(assign->targetExpr);
-      } else {
-        _out << assign->target;
-      }
-      if (assign->compoundOp) {
-        _out << " " << opText(assign->compoundOp) << "= "
-             << emitExpr(assign->value) << ";\n";
-      } else {
-        _out << " = " << emitExpr(assign->value) << ";\n";
-      }
+      emitAssignBody(static_cast<AssignIR*>(stmt));
+      _out << ";\n";
       break;
     }
     case StmtIRKind::ExprStmt: {
@@ -308,6 +292,53 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
       _out << ";\n";
       break;
     }
+  }
+}
+
+// Print the `for` init clause. It is a single statement -- a declaration
+// (`int i = 0`) or an expression (`i = 0`, `reset()`) -- printed mid-line, with
+// no indentation and no terminator (the caller has already written `for (`).
+//
+// The previous version knew only the declaration form and silently dropped any
+// other, so `for (i = 0; i < n; ++i)` came out as `for (; i < n; ++i)`: the
+// induction variable was never initialized and the loop read an uninitialized
+// value.
+void CodeGen::emitForInit(StmtIR* stmt) {
+  if (!stmt) return;
+  switch (stmt->kind) {
+    case StmtIRKind::VarDecl: {
+      auto* decl = static_cast<VarDeclIR*>(stmt);
+      _out << decl->type << " " << decl->name;
+      if (decl->init) _out << " = " << emitExpr(decl->init);
+      break;
+    }
+    case StmtIRKind::Assign:
+      emitAssignBody(static_cast<AssignIR*>(stmt));
+      break;
+    case StmtIRKind::ExprStmt: {
+      auto* es = static_cast<ExprStmtIR*>(stmt);
+      if (es->expr) _out << emitExpr(es->expr);
+      break;
+    }
+    default:
+      // No other shape is valid in a `for` init; emit nothing rather than
+      // something malformed.
+      break;
+  }
+}
+
+// Print an assignment's `target (=|op=) value` with no indent and no `;`, so a
+// statement and a `for` init clause can share it.
+void CodeGen::emitAssignBody(const AssignIR* assign) {
+  if (assign->targetExpr) {
+    _out << emitExpr(assign->targetExpr);
+  } else {
+    _out << assign->target;
+  }
+  if (assign->compoundOp) {
+    _out << " " << opText(assign->compoundOp) << "= " << emitExpr(assign->value);
+  } else {
+    _out << " = " << emitExpr(assign->value);
   }
 }
 
@@ -359,11 +390,18 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       // Prefix unary: parenthesize compound operands to preserve precedence.
       // A nested unary is parenthesized too, so `+(+x)` does not print as the
       // prefix increment `++x` (and `-(-x)` does not print as `--x`).
-      if (node->operands[0]->kind == NodeKind::BinaryOp ||
-          node->operands[0]->kind == NodeKind::Ternary ||
-          node->operands[0]->kind == NodeKind::UnaryOp) {
-        operand = "(" + operand + ")";
-      }
+      //
+      // A constant that carries its own sign needs the same treatment: `-` over
+      // the constant `-5` would otherwise print as `--5`, a decrement of a
+      // literal, which does not compile. The reassociator builds exactly this
+      // shape when it pulls a folded negative constant to the front of a sum.
+      DAGNode* sub = node->operands[0];
+      bool paren = sub->kind == NodeKind::BinaryOp ||
+                   sub->kind == NodeKind::Ternary ||
+                   sub->kind == NodeKind::UnaryOp ||
+                   ((node->op == '-' || node->op == '+') && !operand.empty() &&
+                    operand[0] == node->op);
+      if (paren) operand = "(" + operand + ")";
       return std::string(1, node->op) + operand;
     }
 

@@ -49,6 +49,28 @@ int main() {
   checki("octal", sf_octal(), ref_octal());
   check("frac_for", sf_frac_for(), ref_frac_for());
 
+  // Second batch (cases 19-25). Case 25 (`sf_lt_gt`) is compared here too, but
+  // a passed-through region is still correct, so its real regression guard is
+  // the shape check in run_tests.sh; the rest are caught by these values or by
+  // failing to compile.
+  {
+    // A `for` init that is an assignment must set the induction variable: the
+    // incoming `start` is deliberately not 0, so a dropped init is visible.
+    const int starts[] = {0, 1, 5, 7};
+    for (int st : starts)
+      check("for_init", sf_for_init(2.5, st), ref_for_init(2.5, st));
+  }
+  for (double x : xs) {
+    check("body_inc", sf_body_inc(x), ref_body_inc(x));
+    check("local_inc", sf_local_inc(x), ref_local_inc(x));
+    check("break", sf_break(x), ref_break(x));
+    check("continue", sf_continue(x), ref_continue(x));
+  }
+  for (double x : xs) {
+    check("neg_const", sf_neg_const(x, x + 1.5), ref_neg_const(x, x + 1.5));
+    check("lt_gt", sf_lt_gt(x, x + 1.5), ref_lt_gt(x, x + 1.5));
+  }
+
   // The base of a subscript must be parenthesized: `(p + 1)[i]`.
   {
     double buf[4] = {10.0, 11.0, 12.0, 13.0};

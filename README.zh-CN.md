@@ -117,7 +117,7 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
    这是保守答案。
 4. **支配**：位于 `if`/`else`/循环内的表达式标记为 nested，绝不外提。
 5. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
-6. **展开前提**：只有当循环体声明的每个局部变量都能被内联消除时才展开，否则保留循环。
+6. **展开前提**：只有当循环体声明的每个局部变量都能被内联或安全改名、循环变量未被循环体内的 `++`/`--` 改写、且循环体不含属于本循环的 `break`/`continue` 时才展开，否则保留循环。循环变量还须在 `for` 初始化子句中声明（初始化子句为赋值时也不展开）。
 
 代码生成还会**原样打印它拿到的树**：同优先级的右子节点一律保留括号——IEEE-754 下不仅
 `a - (b - c)`、`a / (b * c)` 不等于去括号的形式，连 `a * (b * c)` 与 `(a * b) * c`
@@ -134,7 +134,7 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 | 阶段 | 检查内容 |
 |------|----------|
 | 代价回归 | `tests/fixtures/` 下各夹具的 FLOP 计数，分三档执行（默认 / `-r` / `-s`） |
-| 数值校验 | `verify_*` 编译并运行生成代码（equilibrium、safety、recombine、parens、store_aware、float_identities、ref_alias） |
+| 数值校验 | `verify_*` 编译并运行生成代码（semantics_fixes、equilibrium、safety、recombine、parens、store_aware、float_identities、ref_alias） |
 | 配置契约 | `verify_config.cpp` 链接 `libcse.a`，钉住 CLI 无法隔离的 `CSEConfig` 开关行为 |
 | `csegen` 冒烟 | 生成头中出现预期的代表性特化 |
 | latset 表防漂移 | 引擎表 vs FreeLB `lattice_set.h`（无 FreeLB checkout 时跳过） |

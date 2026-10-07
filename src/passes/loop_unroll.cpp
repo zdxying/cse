@@ -154,28 +154,59 @@ void renameLocal(StmtIR* stmt, const std::string& from, const std::string& to) {
   }
 }
 
-// Does the statement tree assign to `name`?
+// Does the statement tree write to `name`?
+//
+// This has to see *every* kind of write, not just an `AssignIR` target. The
+// kind-by-kind version it replaces listed only `AssignIR`, so a `++`/`--`
+// (`i++` in the loop body, `t--` on a body-local) or an assignment spelled as
+// an expression was invisible. The unroller then substituted a constant into an
+// increment (`0.0++`) or inlined a local into its own `++` (`(a + 1.0)++`),
+// neither of which compiles.
+//
+// `collectWrittenNames` (ir_utils.h) owns the complete set of written names --
+// inc/dec, expression-assignments, structured store roots and a `for` update
+// normalized out of the expression tree -- so this test cannot go stale again
+// when a write shape is added.
 bool reassignedIn(StmtIR* stmt, const std::string& name) {
+  if (!stmt) return false;
+  std::unordered_set<std::string> written;
+  collectWrittenNames(stmt, written);
+  return written.count(name) != 0;
+}
+
+// Does the statement tree contain a `break`/`continue` that belongs to the
+// enclosing loop?
+//
+// The frontend has no keyword for these: `break;` arrives as an expression
+// statement whose expression is a bare variable named "break". A `break` or
+// `continue` nested inside a *further* loop belongs to that loop, so the walk
+// does not descend into a nested ForLoop's body.
+//
+// Unrolling splices each iteration's body into the parent block, which would
+// move such a statement out of the loop it names: a top-level `break;` does not
+// compile, and even where it did the control flow would be wrong.
+bool containsLoopBreakOrContinue(StmtIR* stmt) {
   if (!stmt) return false;
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
       for (auto& s : b->stmts)
-        if (reassignedIn(s.get(), name)) return true;
+        if (containsLoopBreakOrContinue(s.get())) return true;
       return false;
-    }
-    case StmtIRKind::Assign:
-      return static_cast<AssignIR*>(stmt)->target == name;
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      return reassignedIn(f->init.get(), name) || reassignedIn(f->body.get(), name);
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      return reassignedIn(ie->thenBranch.get(), name) ||
-             reassignedIn(ie->elseBranch.get(), name);
+      return containsLoopBreakOrContinue(ie->thenBranch.get()) ||
+             containsLoopBreakOrContinue(ie->elseBranch.get());
+    }
+    case StmtIRKind::ExprStmt: {
+      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
+      return e && e->kind == NodeKind::Variable &&
+             (e->name == "break" || e->name == "continue");
     }
     default:
+      // A nested ForLoop owns its own break/continue; no other statement has a
+      // slot that can hold one.
       return false;
   }
 }
@@ -395,6 +426,10 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
                 f->updateRhs->constVal == 1);
   }
   if (!updateOk) return false;
+
+  // A `break`/`continue` in the body belongs to this loop; unrolling would
+  // splice it out of the loop it names.
+  if (containsLoopBreakOrContinue(f->body.get())) return false;
 
   if (reassignedIn(f->body.get(), d->name)) return false;
 

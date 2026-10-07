@@ -463,6 +463,40 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
   return expr;
 }
 
+// A token that cannot occur inside a template-argument list. Encountering one
+// before the list closes proves the `<` was the less-than operator.
+static bool cannotStartTemplateArg(TokenType t) {
+  switch (t) {
+    case TokenType::Semicolon:
+    case TokenType::LBrace:
+    case TokenType::RBrace:
+    case TokenType::RParen:
+    case TokenType::LBrack:
+    case TokenType::RBrack:
+    case TokenType::Assign:
+    case TokenType::PlusAssign:
+    case TokenType::MinusAssign:
+    case TokenType::StarAssign:
+    case TokenType::SlashAssign:
+    case TokenType::For:
+    case TokenType::If:
+    case TokenType::Else:
+    case TokenType::Return:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// A token that can follow a template-id in an expression: `f<T>(x)`,
+// `A<T>::m`, `obj.f<T>()`, `p->f<T>()`, `a<T>[i]`. A bare identifier or number
+// after the `>` means the `>` was a comparison operator.
+static bool canFollowTemplateId(TokenType t) {
+  return t == TokenType::LParen || t == TokenType::DoubleColon ||
+         t == TokenType::Dot || t == TokenType::Arrow ||
+         t == TokenType::LBrack;
+}
+
 std::unique_ptr<Expr> Parser::parsePrimary() {
   if (check(TokenType::Number)) {
     auto tok = advance();
@@ -503,26 +537,44 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         break;
       }
     }
-    // Handle template arguments in expressions: ns::f<T>(k)
+    // Handle template arguments in expressions: ns::f<T>(k).
+    //
+    // The `<` is ambiguous with the less-than operator: `i < 3` and `f<T>(x)`
+    // both begin `ident <`. Treating every `<` as a template-id and scanning to
+    // the first `>` swallowed unrelated comparisons -- in
+    //   for (int i = 0; i < 3; ++i) { if (a > 1.0) ... }
+    // the scan consumed `i < 3; ++i) { if (a >` as one "template", leaving the
+    // `1.0` where a `;` was expected, so the whole region was dropped. A real
+    // template-id has a well-formed argument list and is followed by `(`, `::`,
+    // `.`, `->` or `[`; anything else is a comparison.
     if (check(TokenType::Less)) {
       size_t saved = _pos;
       advance();  // consume <
-      expr->name += "<";
+      std::string args = "<";
       int depth = 1;
+      bool wellFormed = true;
       while (!check(TokenType::Eof) && depth > 0) {
+        if (cannotStartTemplateArg(peek().type)) {
+          wellFormed = false;
+          break;
+        }
         if (check(TokenType::Less)) depth++;
         if (check(TokenType::Greater)) depth--;
         if (depth > 0) {
-          expr->name += advance().text;
-          if (!check(TokenType::Eof) && depth > 0) expr->name += " ";
+          args += advance().text;
+          if (!check(TokenType::Eof) && depth > 0) args += " ";
         }
       }
-      if (depth == 0) {
+      bool isTemplateId = wellFormed && depth == 0;
+      if (isTemplateId) {
         advance();  // consume >
-        expr->name += ">";
+        args += ">";
+        isTemplateId = canFollowTemplateId(peek().type);
+      }
+      if (isTemplateId) {
+        expr->name += args;
       } else {
         _pos = saved;
-        expr->name = expr->name.substr(0, expr->name.find('<'));
       }
     }
     return expr;

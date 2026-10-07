@@ -82,9 +82,9 @@ cost_stage "default" "" default \
   safety_cases=19 parens=19 mixed_ops=8 write_visibility=12 \
   effect_duplication=8 frontend_forms=13 comment_braces=4 dead_store_effects=3 constant_edges=6 void_param=4 incdec_safety=12 loop_bound=8 \
   loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 cost_nested=355 cost_descending=35 \
-  ref_param_store=9 loop_unroll_inline=21 struct_region=2 region_toplevel=3
+  ref_param_store=9 loop_unroll_inline=21 struct_region=2 region_toplevel=3 semantics_fixes=76
 cost_stage "-r" "-r" r \
-  recombine=24
+  recombine=24 semantics_fixes=76
 # Several defects only appear once the aggressive passes are off, so the
 # conservative profile needs its own stage.
 cost_stage "-s" "-s" s \
@@ -92,7 +92,7 @@ cost_stage "-s" "-s" s \
   effect_duplication=8 frontend_forms=13 comment_braces=4 \
   dead_store_effects=3 constant_edges=7 void_param=4 incdec_safety=12 loop_bound=8 ref_alias=1 \
   loop_unroll_semantics=12 value_prop_chain=6 cleanup_store_index=5 \
-  ref_param_store=9 loop_unroll_inline=23 struct_region=2 region_toplevel=3
+  ref_param_store=9 loop_unroll_inline=23 struct_region=2 region_toplevel=3 semantics_fixes=77
 
 # The `a*x +/- a` rewrites do not change the FLOP count, so the pinned totals
 # above cannot detect their loss; check the generated shape directly.
@@ -331,6 +331,17 @@ cp "$FIXTURES/semantics_fixes.cpp" "$WORK/s/semantics_fixes.cpp"
 "$CSE" -s "$WORK/s/semantics_fixes.cpp" >/dev/null 2>&1 || true
 run_verifier "semantics_fixes_safe" verify_semantics_fixes.cpp \
   "ALL SEMANTICS-FIX CHECKS PASSED" "$WORK/s"
+# Case 25 of semantics_fixes is a `<` comparison followed by a `>`: when the
+# template scanner mis-read the `<`, the region failed to parse and was passed
+# through unchanged -- still correct, so the value checks above cannot see it.
+# Assert the region was actually optimized (CSE extracted the shared `a * b`).
+echo "=== comparison-parse shape check ==="
+if body "double sf_lt_gt(" "$WORK/default/semantics_fixes.cpp.cse" | grep -q "_cse_"; then
+  echo "ok    a region with '<' then '>' is still optimized"
+else
+  echo "FAIL  a region with '<' then '>' was passed through: the parser dropped it" >&2
+  exit 1
+fi
 # Loop-unroller regressions: a dropped compound operator and a load moved past
 # a store. Both keep the FLOP count identical, so only the values catch them.
 run_verifier "loop_unroll_semantics" verify_loop_unroll_semantics.cpp \
