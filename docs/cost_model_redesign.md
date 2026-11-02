@@ -38,13 +38,14 @@ that is a poor approximation; several constructs were mis-evaluated:
 |-------|----------|
 | FLOP unit | **Scalar FLOPs, vector-weighted**: a vector op costs its lane count; a vector·vector product is a dot = `2d-1`. |
 | Helper/intrinsic calls | **Known-weight hook**: the FreeLB plugin supplies per-callee costs; unknown calls are flagged unmodeled. |
-| Shared subexpressions | **Unique DAG nodes**: each distinct computation is charged once, matching CSE temporaries. |
+| Shared subexpressions | **Per reference (use site)**: each reference to a node is charged, so a shared, unmaterialized node costs once per use site (codegen re-prints it); a CSE-materialized temporary costs only its definition. `totalNodes` stays the distinct-node count. |
 | Memory | **Separate `memOps`** metric: unique loads (`array`/`member`/`arrow` accesses) plus one per complex-lvalue store. |
 
-Loop multiplicity is *dynamic*: a unique computation inside a loop is charged
-once per execution, i.e. `cost × (number of enclosing loop iterations)`. This
-reconciles the unique-node rule (a CSE temp computed once outside a loop is
-charged once) with runtime work (a body computation is charged per iteration).
+Loop multiplicity is *dynamic*: a reference inside a loop is charged once per
+execution, i.e. `cost × (number of enclosing loop iterations)`. Combined with
+the per-reference rule, a CSE temp computed once outside a loop is charged once
+(its single definition), while a reference in a loop body is charged per
+iteration.
 
 ## Model
 
@@ -54,8 +55,8 @@ charged once) with runtime work (a body computation is charged per iteration).
 struct CostResult {
   long long flops = 0;          // scalar, vector-weighted
   long long vectorOps = 0;      // ops with at least one vector operand
-  long long memOps = 0;         // unique loads + stores
-  long long totalNodes = 0;     // unique DAG nodes
+  long long memOps = 0;         // loads (per use site) + stores
+  long long totalNodes = 0;     // unique DAG nodes (not reference-weighted)
   long long stmts = 0;          // executed statements (loop-scaled)
   long long vars = 0;           // executed declarations (loop-scaled)
   long long unknownLoops = 0;   // trip count could not be resolved
@@ -65,15 +66,21 @@ struct CostResult {
 
 ### Counting rules
 
-* Traverse statements in program order with a **single global `visited` set**
-  over `DAGNode*`. The first time a node is seen it is charged
-  `perExecCost(node) × execCount`, where `execCount` is the number of
-  executions of the current loop context.
+* Traverse statements in program order, recording every expression slot as a
+  *reference* to its node scaled by `execCount` (the number of executions of
+  the current loop context). A node's total multiplicity is the sum of the
+  references to it; references propagate multiplicatively down the DAG
+  (`mult[operand] += mult[parent]`), so a shared subgraph is expanded
+  arithmetically rather than re-walked. Each distinct node is then charged
+  `perExecCost(node) × mult[node]` in a parents-first topological pass
+  (O(V+E)). `totalNodes` counts the distinct nodes, not the references.
 * `perExecCost`:
   * `BinaryOp` with `+ - * /`: lanes come from operand lanes; the FreeLB
     `binaryOpCost` hook returns `{flops, resultLanes}`. Default (no hook):
     1 FLOP, scalar result.
-  * `UnaryOp +/-`: lane-count FLOPs (vector) or 1.
+  * `UnaryOp +/-` and `++`/`--`: lane-count FLOPs (vector) or 1. (An
+    increment/decrement is one add/sub of the constant 1; `!`/`~` are not
+    charged.)
   * `ArrayAccess`/`MemberAccess`/`ArrowAccess`: `memOps += 1` (unique loads).
   * `Assign` with a complex lvalue (`targetExpr`): `memOps += 1` per execution
     (stores); its base/index operands are traversed as usual.
@@ -118,10 +125,17 @@ executions of the current context:
     return count
   ```
 
-  Enumeration is bounded by `kMaxEnum` (1e6); a larger dependent nest falls back
-  to the max-product estimate, which may **over-count**.
+  Enumeration is bounded by `kMaxEnum` (1e6). A larger nest stops multiplying
+  at the overflow point and falls back to that *partial* product, so the result
+  is a **lower bound**, never an over-count -- and the loop is counted in
+  `unknownLoops` so the approximation is visible. (`for (i < 2e6)` used to
+  report 2 FLOPs with `unknownLoops = 0`: neither the real cost nor labelled.
+  The counter is incremented once per loop nest, not once per statement slot.)
 * Loops whose bounds/steps cannot be resolved, or whose sign/direction
   disagree, are charged once and increment `unknownLoops`.
+
+Because `unknownLoops > 0` marks a truncation, both are a **lower bound** on
+the real cost -- the contract `CostResult` documents and the CLI prints.
 
 This is cheap for the FreeLB dim (`d<=3`) and lattice (`q<=27`) loops.
 
@@ -132,7 +146,7 @@ std::function<int(const std::string& type)> vectorLanes;               // declar
 std::function<int(const std::string& callee)> callResultLanes;         // callee -> result lanes
 std::function<long long(const std::string& callee,
                         const std::vector<int>& argLanes)> callCost;   // -1 = unmodeled
-std::function<int(char op, int aLanes, int bLanes, long long& flops)> binaryOpCost;
+std::function<int(OpCode op, int aLanes, int bLanes, long long& flops)> binaryOpCost;
 ```
 
 `plugins/freelb/config.h` wires these from the active `LatticeConfig`:
@@ -179,8 +193,10 @@ appear. Measuring inside the generator keeps a single source of truth.
 
 ## Tests
 
-`tests/run_tests.sh` pins post-pass FLOP counts, so the unique-node and
-call/vector accounting changes re-baseline those numbers. New fixtures cover
+`tests/run_tests.sh` pins post-pass FLOP counts, so the per-reference and
+call/vector accounting changes re-baseline those numbers; `tests/verify/verify_cost.cpp`
+pins the counting rule itself on shapes where it differs from unique-node
+counting. New fixtures cover
 vector arithmetic, nested `dim` loops, descending loops, helper calls,
 unknown-bound loops and memory ops. A `csegen --cost` smoke check verifies the
 generator's cost path.

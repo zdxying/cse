@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make
+      - name: Test
+        run: make test
+
+  # Separate lane: rebuild everything with ASan/UBSan and run the full suite.
+  # Catches the memory/UB defects the plain build cannot (dangling IR nodes,
+  # out-of-bounds operand access, etc.).
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + test under ASan/UBSan
+        run: make sanitize

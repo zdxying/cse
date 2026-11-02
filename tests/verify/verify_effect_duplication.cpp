@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "effect_duplication.cpp.cse"
+#include "harness.h"
 
 int g_calls = 0;
 
@@ -12,25 +13,20 @@ double count_call(double x) {
   return x;
 }
 
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-22s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
-
-static void checkCalls(const char* name, int got, int want) {
-  bool ok = got == want;
-  if (!ok) failures++;
-  std::printf("%-22s calls=%d want=%d  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
-
 int main() {
   // 1. `2 * count_call(x)` must call it once.
   g_calls = 0;
   check("double_call(3)", double_call(3.0), 6.0);
-  checkCalls("double_call", g_calls, 1);
+  checkInt("double_call", g_calls, 1);
+
+  // 1b. The call hidden one level down must not be duplicated either:
+  //     `count_call(x) + 1.0` is a BinaryOp with its own `pure == true`, so a
+  //     shallow check missed it. 2*(3+1) = 8, one call.
+  g_calls = 0;
+  check("double_call_compound(3)", double_call_compound(3.0), 8.0);
+  checkInt("double_call_compound", g_calls, 1);
+  //     Control: a pure compound operand may still be doubled.
+  check("double_pure_compound(3)", double_pure_compound(3.0), 8.0);
 
   // 2. `2 * ++y`: y is incremented once, so the result is
   //    z + 100y = 2(y+1) + 100(y+1) = 102(y+1).
@@ -42,8 +38,5 @@ int main() {
   check("double_plain(-1.5)", double_plain(-1.5), -3.0);
   check("double_subexpr(2,3)", double_shared_subexpr(2.0, 3.0), 12.0);
 
-  std::printf(failures == 0 ? "\nALL EFFECT-DUPLICATION CHECKS PASSED\n"
-                            : "\n%d EFFECT-DUPLICATION CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("EFFECT-DUPLICATION");
 }

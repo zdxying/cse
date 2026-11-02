@@ -5,8 +5,7 @@
 #include <cstdio>
 
 #include "loop_bound.cpp.cse"
-
-static int failures = 0;
+#include "harness.h"
 
 int main() {
   const double got = float_bound();
@@ -15,8 +14,5 @@ int main() {
   if (!ok) failures++;
   std::printf("float_bound got=%.6f want=%.6f  %s\n", got, want, ok ? "OK" : "FAIL");
 
-  std::printf(failures == 0 ? "\nALL LOOP-BOUND CHECKS PASSED\n"
-                            : "\n%d LOOP-BOUND CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("LOOP-BOUND");
 }

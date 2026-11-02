@@ -4,8 +4,11 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../analysis/effects.h"
+#include "../analysis/purity.h"
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
+#include "../ir/location.h"
 #include "../ir/statement.h"
 #include "../ir/stmt_walk.h"
 
@@ -13,24 +16,9 @@ namespace cse {
 
 namespace {
 
-// Check if an expression is trivial to inline (no computation cost to duplicate).
-bool isTrivial(DAGNode* e) {
-  if (!e) return false;
-  switch (e->kind) {
-    case NodeKind::Constant:
-    case NodeKind::Variable:
-      return true;
-    case NodeKind::MemberAccess:
-    case NodeKind::ArrowAccess:
-      // Only a load marked shareable (a read-only root) may be copied to a use
-      // site. A load through a pointer/reference that may alias a later store is
-      // not shareable, so inlining it would move the read past that store.
-      return e->pure && e->operands.size() == 1 &&
-             e->operands[0]->kind == NodeKind::Variable;
-    default:
-      return false;
-  }
-}
+// `isCheapShareableValue` (analysis/purity.h) owns the "cheap enough to inline
+// at a use site" test. It used to be a private copy here -- and a *differently
+// defined* copy of the same name in algebraic_simplify.cpp.
 
 // Does `init` read only variables that are never reassigned in this function?
 //
@@ -40,19 +28,19 @@ bool isTrivial(DAGNode* e) {
 // enough: `double t = a; a = b; return t;` would otherwise become
 // `a = b; return a;`. Requires that no variable read by `init` is written
 // anywhere in the function.
-bool initDepsStable(DAGNode* init,
-                    const std::unordered_set<std::string>& reassigned) {
+bool initDepsStable(DAGNode* init, const LocationSet& reassigned,
+                    const AliasInfo& aliases) {
   if (!init) return true;
   if (init->kind == NodeKind::Variable) {
-    // `"*"` is the wildcard an impure call contributes: it may write any global
-    // and anything reachable from an argument, so no variable is stable across
-    // it.
-    if (reassigned.count("*")) return false;
-    if (reassigned.find(init->name) != reassigned.end()) return false;
+    // `writeAffectsRead` is wildcard-aware and reference-aware: the wildcard an
+    // impure call contributes says any global, and anything reachable from an
+    // argument, may have been written, so no variable is stable across it; and a
+    // read through a reference local is changed by a write to its referent.
+    if (aliases.writeAffectsRead(reassigned, init->name)) return false;
     return true;
   }
   for (auto* op : init->operands) {
-    if (!initDepsStable(op, reassigned)) return false;
+    if (!initDepsStable(op, reassigned, aliases)) return false;
   }
   return true;
 }
@@ -93,9 +81,14 @@ DAGNode* propExpr(DAGNode* e, IRModule& mod,
 // leave the assignment behind while its uses were rewritten anyway -- and the
 // assignment target is by definition a written name, so it can never satisfy
 // `initDepsStable` either.
+//
+// A name that is the referent of a reference declaration (`T& r = name;`) is
+// also left out: substituting its value into the binding would produce an
+// ill-formed or semantically different reference (see
+// AliasInfo::isAliasedReferent).
 void walkStmt(StmtIR* stmt,
               const std::unordered_set<std::string>& blocked,
-              const std::unordered_set<std::string>& written,
+              const LocationSet& written, const AliasInfo& aliases,
               std::unordered_map<std::string, DAGNode*>& defs,
               std::vector<std::string>& toRemove) {
   if (!stmt) return;
@@ -105,30 +98,36 @@ void walkStmt(StmtIR* stmt,
       for (auto& s : b->stmts) {
         if (s->kind == StmtIRKind::VarDecl) {
           auto* decl = static_cast<VarDeclIR*>(s.get());
-          if (decl->init && isTrivial(decl->init) &&
+          if (decl->init && isCheapShareableValue(decl->init) &&
               blocked.find(decl->name) == blocked.end() &&
-              initDepsStable(decl->init, written)) {
+              !aliases.isAliasedReferent(decl->name) &&
+              initDepsStable(decl->init, written, aliases)) {
             defs[decl->name] = decl->init;
             toRemove.push_back(decl->name);
           }
         }
-        walkStmt(s.get(), blocked, written, defs, toRemove);
+        walkStmt(s.get(), blocked, written, aliases, defs, toRemove);
       }
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      walkStmt(f->init.get(), blocked, written, defs, toRemove);
-      walkStmt(f->body.get(), blocked, written, defs, toRemove);
+      walkStmt(f->init.get(), blocked, written, aliases, defs, toRemove);
+      walkStmt(f->body.get(), blocked, written, aliases, defs, toRemove);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      walkStmt(ie->thenBranch.get(), blocked, written, defs, toRemove);
-      walkStmt(ie->elseBranch.get(), blocked, written, defs, toRemove);
+      walkStmt(ie->thenBranch.get(), blocked, written, aliases, defs, toRemove);
+      walkStmt(ie->elseBranch.get(), blocked, written, aliases, defs, toRemove);
       break;
     }
-    default:
+    // A declaration is only ever visited from the Block branch above, where its
+    // sibling scope is known; these kinds own no nested statements.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::VarDecl:
+    case StmtIRKind::Return:
       break;
   }
 }
@@ -137,6 +136,38 @@ void walkStmt(StmtIR* stmt,
 void applyProp(StmtIR* stmt, IRModule& mod,
                const std::unordered_map<std::string, DAGNode*>& defs) {
   forEachExprDeep(stmt, [&](DAGNode*& e) { e = propExpr(e, mod, defs); });
+}
+
+// How many VarDecls does this statement tree contain? Used as the structural
+// bound on ValueProp's fixpoint: each round either inlines something (removing
+// at least one declaration) or exits, so the number of declarations bounds the
+// number of productive rounds.
+int countVarDecls(const StmtIR* stmt) {
+  if (!stmt) return 0;
+  int n = 0;
+  switch (stmt->kind) {
+    case StmtIRKind::VarDecl:
+      return 1;
+    case StmtIRKind::Block:
+      for (const auto& s : static_cast<const BlockIR*>(stmt)->stmts)
+        n += countVarDecls(s.get());
+      return n;
+    case StmtIRKind::ForLoop: {
+      const auto* f = static_cast<const ForLoopIR*>(stmt);
+      return countVarDecls(f->init.get()) + countVarDecls(f->body.get());
+    }
+    case StmtIRKind::IfElse: {
+      const auto* ie = static_cast<const IfElseIR*>(stmt);
+      return countVarDecls(ie->thenBranch.get()) +
+             countVarDecls(ie->elseBranch.get());
+    }
+    // These kinds declare nothing.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::Return:
+      return 0;
+  }
+  return 0;
 }
 
 // Remove inlined VarDecls from a block.
@@ -152,7 +183,7 @@ void removeInlined(StmtIR* stmt, const std::vector<std::string>& toRemove) {
   if (!stmt) return;
   if (stmt->kind != StmtIRKind::Block) return;
   std::unordered_set<std::string> referenced;
-  forEachExprDeep(stmt, [&](DAGNode*& e) { collectVarNames(e, referenced); });
+  forEachExprDeep(stmt, [&](DAGNode*& e) { collectReadNames(e, referenced); });
   auto* b = static_cast<BlockIR*>(stmt);
   auto it = b->stmts.begin();
   while (it != b->stmts.end()) {
@@ -178,22 +209,39 @@ void ValuePropPass::run(IRModule& module) {
   std::unordered_set<std::string> params;
   for (auto& p : module.funcSig.params) params.insert(p.name);
 
-  // Pre-compute: every variable written anywhere in the function (see
-  // ir_utils.h:collectWrittenNames). Used both to protect a variable from being
-  // inlined itself and, via initDepsStable, to reject initializers that read a
-  // variable which is written somewhere.
-  std::unordered_set<std::string> reassigned;
-  collectWrittenNames(module.body.get(), reassigned);
+  // Pre-compute: every location written anywhere in the function, closed over
+  // reference aliases (see ir/location.h) so a write through a reference local
+  // also counts as a write of its referent. Used both to protect a variable
+  // from being inlined itself and, via initDepsStable, to reject initializers
+  // that read a variable which is written somewhere.
+  AliasInfo aliases = AliasInfo::build(module.body.get());
+  LocationSet reassigned = aliases.writtenBy(module.body.get());
 
-  for (int iter = 0; iter < 5; ++iter) {
+  // The written *names*, for the by-name "must not inline" test. A wildcard
+  // (an impure call) names no particular root; it is handled by
+  // initDepsStable's `anything()` check instead.
+  std::unordered_set<std::string> reassignedNames;
+  for (const auto& l : reassigned.items()) reassignedNames.insert(l.root);
+
+  // Iterate to a fixpoint. Each round resolves one link of a definition chain,
+  // and `defs`/`toRemove` are recomputed every round from the already-shrunk
+  // body, so the number of remaining inlinable declarations strictly decreases
+  // whenever the loop does not exit. The round bound is therefore *structural*
+  // -- the number of VarDecls in the function -- rather than a hand-picked
+  // constant. The old cap of 5 silently stopped mid-chain: a 60-link chain kept
+  // four declarations and a 120-link chain kept 63, so the output depended on
+  // how many times the pipeline ran (a second `bin/cse` invocation finished the
+  // job).
+  const int maxRounds = 1 + countVarDecls(module.body.get());
+  for (int iter = 0; iter < maxRounds; ++iter) {
     // Don't inline params or reassigned vars
-    std::unordered_set<std::string> skip = reassigned;
+    std::unordered_set<std::string> skip = reassignedNames;
     for (auto& p : params) skip.insert(p);
 
     // Collect trivial definitions
     std::unordered_map<std::string, DAGNode*> defs;
     std::vector<std::string> toRemove;
-    walkStmt(module.body.get(), skip, reassigned, defs, toRemove);
+    walkStmt(module.body.get(), skip, reassigned, aliases, defs, toRemove);
     if (defs.empty()) break;
 
     applyProp(module.body.get(), module, defs);

@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../analysis/purity.h"
 #include "dag_node.h"
 #include "ir_module.h"
 #include "statement.h"
@@ -11,176 +12,10 @@
 
 namespace cse {
 
-// Does the expression contain an impure (side-effecting) call?
-inline bool hasImpureCall(DAGNode* e) {
-  if (!e) return false;
-  if (e->kind == NodeKind::Call && !e->pure) return true;
-  for (auto* op : e->operands)
-    if (hasImpureCall(op)) return true;
-  return false;
-}
-
-// Does the expression do something that has to survive even when its value is
-// thrown away? An impure call writes or observes mutable state; `++`/`--` writes
-// its operand; and an assignment spelled as an expression (the `a[i] = v` shape
-// the builder did not lower into an AssignIR) writes its target.
-//
-// This is `hasImpureCall` widened by the writes. Arithmetic has no effect, so
-// discarding its result is free -- but the increment sitting in the same
-// expression is not, and DCE asked only about calls. `unused = y++;` was
-// therefore deleted whole and the increment of `y` disappeared with it.
-inline bool hasSideEffect(const DAGNode* e) {
-  if (!e) return false;
-  if (e->kind == NodeKind::Call && !e->pure) return true;
-  if (isIncDec(e)) return true;
-  if (e->kind == NodeKind::BinaryOp && e->op == '=') return true;
-  for (const auto* op : e->operands)
-    if (hasSideEffect(op)) return true;
-  return false;
-}
-
-// Add every variable occurrence in an expression to `counts`.
-inline void countVarUses(DAGNode* e,
-                         std::unordered_map<std::string, int>& counts) {
-  if (!e) return;
-  if (e->kind == NodeKind::Variable) counts[e->name]++;
-  for (auto* op : e->operands) countVarUses(op, counts);
-}
-
-// Add every variable name read by an expression to `out` (deduplicated). Shared
-// by the passes that ask "which variables does this node depend on?" -- CSE's
-// stability check and the counter propagator each used to carry a private copy.
-inline void collectVarNames(DAGNode* n, std::unordered_set<std::string>& out) {
-  if (!n) return;
-  if (n->kind == NodeKind::Variable && !n->name.empty()) out.insert(n->name);
-  for (auto* op : n->operands) collectVarNames(op, out);
-}
-
-// Count how many times each variable name is used across a StmtIR tree.
-//
-// An element store counts its lvalue as a use of the root (and of its index
-// operands), which is what keeps a declaration that is only ever stored into
-// from looking unused.
-inline std::unordered_map<std::string, int> countUses(StmtIR* root) {
-  std::unordered_map<std::string, int> counts;
-  forEachExprDeep(root, [&](DAGNode*& e) { countVarUses(e, counts); });
-  return counts;
-}
-
-// Root variable of an lvalue expression: `a[i].m` -> "a"; no variable at all
-// (e.g. a call result) -> "". Used to reason about stores through a computed
-// lvalue.
-inline std::string lvalueRoot(DAGNode* n) {
-  while (n) {
-    if (n->kind == NodeKind::Variable) return n->name;
-    if (n->operands.empty()) return "";
-    n = n->operands[0];
-  }
-  return "";
-}
-
-// Every variable name an expression writes: `++x` / `x--`, and an assignment
-// spelled as an expression (`a[i] = v` arrives as `BinaryOp(=)` whenever the
-// builder kept it unlowered). The whole subtree is walked, because a write can
-// sit anywhere inside one.
-//
-// An impure call contributes the wildcard name `"*"`: it may write any global
-// and anything reachable from an argument (`mutate(b)` can change `b`, `bump()`
-// can change a global). Consumers must treat `"*"` as "every name is written",
-// so no value is reused across such a call.
-inline void collectExprWrites(DAGNode* e,
-                              std::unordered_set<std::string>& out) {
-  if (!e) return;
-  if (e->kind == NodeKind::Call && !e->pure) out.insert("*");
-  if (isIncDec(e) && !e->operands.empty()) {
-    std::string root = lvalueRoot(e->operands[0]);
-    if (!root.empty()) out.insert(root);
-  } else if (e->kind == NodeKind::BinaryOp && e->op == '=' &&
-             e->operands.size() == 2) {
-    std::string root = lvalueRoot(e->operands[0]);
-    if (!root.empty()) out.insert(root);
-  }
-  for (auto* op : e->operands) collectExprWrites(op, out);
-}
-
-// Collect every variable name a statement writes, nested statements included.
-// Conditional writes count: callers use this to answer "may this have been
-// written between A and B", and the conservative answer needs no dominator
-// analysis.
-//
-// This is a *completeness* question, so it is answered by scanning the
-// expression slots rather than by enumerating statement kinds. A write can sit
-// in any slot, and the kind-by-kind version -- which listed the kinds it knew
-// about and recursed into Block / ForLoop / IfElse -- never looked inside a
-// declaration's initializer. In `double z = ++y;` the increment of `y` was
-// therefore invisible, `y` counted as never written, and ValueProp inlined
-// `double y = a;` at every use, including one that reads it *after* the
-// increment:
-//
-//   double y = a; double z = ++y; return a * 100.0 + z;  // source: 100a + a + 1
-//   -> double z = ++a; return z + 100 * a;               // emitted: 101a + 101
-//
-// `forEachExprDeep` (stmt_walk.h) owns the slot list, so this scan cannot go
-// stale again when a statement kind or a slot is added.
-//
-// Two writes are not expression slots and are added explicitly:
-//   * the lvalue root of a structured store (`a[i] = v;` / `p->f = v;` build an
-//     AssignIR whose lvalue is not evaluated as an expression). Only the *root*
-//     is recorded: some other pointer may alias the same object, so naming the
-//     root is the conservative choice;
-//   * a `for` update the builder normalized out of the expression tree into
-//     "variable op= rhs" (`i = i + 1`), which is not visible as an expression
-//     at all.
-//
-// A `VarDecl` is deliberately *not* recorded: it introduces a fresh
-// (alpha-renamed) name rather than overwriting an existing value, and no
-// consumer of this set wants declarations in it.
-inline void collectWrittenNames(StmtIR* stmt,
-                               std::unordered_set<std::string>& out) {
-  if (!stmt) return;
-
-  // The slots this statement owns, then its nested statements. Scanning the
-  // slots with forEachExpr (stmt_walk.h) rather than by statement kind is what
-  // makes the initializer case visible above; the recursion stays because the
-  // two writes below are not expression slots at all.
-  forEachExpr(stmt, [&](DAGNode*& e) { collectExprWrites(e, out); });
-
-  switch (stmt->kind) {
-    case StmtIRKind::Block: {
-      auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) collectWrittenNames(s.get(), out);
-      break;
-    }
-    case StmtIRKind::ForLoop: {
-      auto* f = static_cast<ForLoopIR*>(stmt);
-      collectWrittenNames(f->init.get(), out);
-      collectWrittenNames(f->body.get(), out);
-      if (f->updateOp != 0 && f->update &&
-          f->update->kind == NodeKind::Variable) {
-        out.insert(f->update->name);
-      }
-      break;
-    }
-    case StmtIRKind::IfElse: {
-      auto* ie = static_cast<IfElseIR*>(stmt);
-      collectWrittenNames(ie->thenBranch.get(), out);
-      collectWrittenNames(ie->elseBranch.get(), out);
-      break;
-    }
-    case StmtIRKind::Assign: {
-      auto* a = static_cast<AssignIR*>(stmt);
-      if (a->targetExpr) {
-        std::string root = lvalueRoot(a->targetExpr);
-        if (!root.empty()) out.insert(root);
-      } else if (!a->target.empty()) {
-        out.insert(a->target);
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
+// The purity questions (`hasObservableEffect`, `isReferentiallyTransparent`,
+// `isEffectFreeLvalue`, `isLeafValue`, `isCheapShareableValue`) live in
+// analysis/purity.h -- the single owner, so a pass cannot reach for a
+// differently-named copy. This header is only about rebuilding subtrees.
 
 // Rebuild `node` with a new operand list, through IRModule's factories -- so the
 // result is hashed and interned exactly like a node the frontend built.
@@ -279,42 +114,55 @@ inline DAGNode* foldConst(IRModule& mod, DAGNode* node) {
     if (lhs->kind == NodeKind::Constant && lhs->symbol.empty() &&
         rhs->kind == NodeKind::Constant && rhs->symbol.empty()) {
       double result = 0;
+      // The result of an arithmetic fold is floating when either operand is;
+      // a comparison yields an integer (0/1).
+      bool resultFloat = lhs->isFloat || rhs->isFloat;
       switch (node->op) {
-        case '+': result = lhs->constVal + rhs->constVal; break;
-        case '-': result = lhs->constVal - rhs->constVal; break;
-        case '*': result = lhs->constVal * rhs->constVal; break;
-        case '/': {
+        case OpCode::Add: result = lhs->constVal + rhs->constVal; break;
+        case OpCode::Sub: result = lhs->constVal - rhs->constVal; break;
+        case OpCode::Mul: result = lhs->constVal * rhs->constVal; break;
+        case OpCode::Div: {
           // Not folded when the divisor is zero. Integer division by zero is
           // undefined behaviour and floating-point division by zero is infinity
-          // or NaN; zero is the one answer that is wrong for both, and the IR
-          // carries no type that could tell the two apart. Leave the expression
-          // standing -- the compiler can diagnose or evaluate it correctly.
+          // or NaN; zero is the one answer that is wrong for both, so leave the
+          // expression standing.
           if (rhs->constVal == 0) return node;
           double lv = lhs->constVal;
           double rv = rhs->constVal;
           double q = lv / rv;
-          // `7 / 2` cannot be told from `7.0 / 2.0` without a type. When both
-          // operands are integral-valued the source may be an integer division,
-          // which truncates, so only fold when the quotient is exact.
-          bool lint = std::floor(lv) == lv;
-          bool rint = std::floor(rv) == rv;
-          if (lint && rint && std::floor(q) != q) return node;
+          // When both operands are *integer* constants the source may be an
+          // integer division, which truncates, so only fold when the quotient is
+          // exact. If either operand is floating it is a floating division and
+          // the double quotient is exact. The int/float kind now survives on the
+          // node (see dag_node.h::isFloat), so this no longer has to guess from
+          // the value.
+          bool bothInt = !lhs->isFloat && !rhs->isFloat;
+          if (bothInt && std::floor(q) != q) return node;
           result = q;
           break;
         }
-        case 'e': result = (lhs->constVal == rhs->constVal) ? 1 : 0; break;
-        case 'n': result = (lhs->constVal != rhs->constVal) ? 1 : 0; break;
-        case '<': result = (lhs->constVal < rhs->constVal) ? 1 : 0; break;
-        case '>': result = (lhs->constVal > rhs->constVal) ? 1 : 0; break;
-        case 'l': result = (lhs->constVal <= rhs->constVal) ? 1 : 0; break;
-        case 'g': result = (lhs->constVal >= rhs->constVal) ? 1 : 0; break;
+        case OpCode::Eq: result = (lhs->constVal == rhs->constVal) ? 1 : 0; resultFloat = false; break;
+        case OpCode::Ne: result = (lhs->constVal != rhs->constVal) ? 1 : 0; resultFloat = false; break;
+        case OpCode::Lt: result = (lhs->constVal < rhs->constVal) ? 1 : 0; resultFloat = false; break;
+        case OpCode::Gt: result = (lhs->constVal > rhs->constVal) ? 1 : 0; resultFloat = false; break;
+        case OpCode::Le: result = (lhs->constVal <= rhs->constVal) ? 1 : 0; resultFloat = false; break;
+        case OpCode::Ge: result = (lhs->constVal >= rhs->constVal) ? 1 : 0; resultFloat = false; break;
         default: return node;
       }
-      // Spelling is createConst()'s job: an empty text makes it re-derive the
-      // literal from the value through formatConst(), which keeps `-0.0` from
-      // collapsing to the integer `0` (i.e. +0.0). This local copy used to do
-      // its own formatting and dropped the sign.
-      return mod.createConst(result, "");
+      // Spelling is createConstTyped()'s job: an empty text makes it re-derive
+      // the literal from the value through formatConst(), which keeps `-0.0`
+      // from collapsing to the integer `0` (i.e. +0.0) and keeps a floating
+      // whole value's decimal point. This local copy used to do its own
+      // formatting and dropped both.
+      //
+      // Non-finite results are *not* folded. There is no C++ literal spelling
+      // for inf or NaN: formatConst() would emit "inf", and the generated file
+      // then fails to compile ('inf' was not declared in this scope). Folding is
+      // an optimization, so leaving `1e308 * 10.0` standing is correct and keeps
+      // the output compilable. (`1e308 * 10.0` in the source still evaluates to
+      // inf at run time, which is what the unoptimized program does too.)
+      if (!std::isfinite(result)) return node;
+      return mod.createConstTyped(result, resultFloat, "");
     }
   }
   return node;

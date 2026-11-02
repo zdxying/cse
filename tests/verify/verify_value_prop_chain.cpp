@@ -14,33 +14,23 @@
 #include <cstdio>
 
 #include "value_prop_chain.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-9;
-  if (!ok) failures++;
-  std::printf("%-24s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // Includes 7.0 so the shadow case is exercised at the value that equals the
   // global it would wrongly bind to (both then agree by accident) and off it.
   const double xs[] = {-3.25, -0.0, 0.0, 1.0, 2.5, 7.0, 11.5};
   for (double x : xs) {
-    check("chain2", sf_chain2(x), ref_chain2(x));
-    check("chain3", sf_chain3(x), ref_chain3(x));
+    checkNear("chain2", sf_chain2(x), ref_chain2(x));
+    checkNear("chain3", sf_chain3(x), ref_chain3(x));
 
     VPCBox q;
     q.v = x + 0.25;
-    check("chain_member", sf_chain_member(q), ref_chain_member(q));
+    checkNear("chain_member", sf_chain_member(q), ref_chain_member(q));
 
-    check("chain_expr", sf_chain_expr(x), ref_chain_expr(x));
-    check("chain_shadow", sf_chain_shadow(x), ref_chain_shadow(x));
+    checkNear("chain_expr", sf_chain_expr(x), ref_chain_expr(x));
+    checkNear("chain_shadow", sf_chain_shadow(x), ref_chain_shadow(x));
   }
 
-  std::printf(failures == 0 ? "\nALL VALUE-PROP-CHAIN CHECKS PASSED\n"
-                            : "\n%d VALUE-PROP-CHAIN CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("VALUE-PROP-CHAIN");
 }

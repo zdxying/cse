@@ -11,20 +11,7 @@
 #else
 #include "parens.cpp.cse"
 #endif
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-16s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
-
-static void checkInt(const char* name, int got, int want) {
-  bool ok = (got == want);
-  if (!ok) failures++;
-  std::printf("%-16s got=%d want=%d  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   check("a-(b-c)", sub_sub(10, 3, 1), 10.0 - (3.0 - 1.0));
@@ -41,8 +28,5 @@ int main() {
   check("a-b-c", left_chain(10, 3, 1), 10.0 - 3.0 - 1.0);
   check("(a-b)-c", grouped_left(10, 3, 1), (10.0 - 3.0) - 1.0);
 
-  std::printf(failures == 0 ? "\nALL PARENS CHECKS PASSED\n"
-                            : "\n%d PARENS CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("PARENS");
 }

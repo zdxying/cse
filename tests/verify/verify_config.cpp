@@ -15,6 +15,8 @@
 #include "frontend/parser.h"
 #include "ir/ir_builder.h"
 #include "ir/ir_module.h"
+#include "ir/statement.h"
+#include "passes/algebraic_simplify.h"
 #include "passes/pass_manager.h"
 
 namespace {
@@ -100,8 +102,18 @@ int main() {
   const std::string zeroMinus = "double f(double x) { return 0.0 - x; }";
   const std::string mulChain = "double f(double a, double b, double c) {"
                                " return a * (b * c); }";
+  // Exact-tier shapes (bit-identical rewrites; always on).
+  const std::string subZero = "double f(double x) { return x - 0.0; }";
+  const std::string divOne = "double f(double x) { return x / 1.0; }";
+  const std::string mulOne = "double f(double x) { return x * 1.0; }";
+  const std::string doubleNeg = "double f(double x) { return -(-x); }";
+  const std::string addNeg = "double f(double a, double b) { return a + (-b); }";
+  const std::string twice = "double f(double x) { return x * 2.0; }";
 
-  // 1. The conservative default (a bare CSEConfig) collapses nothing.
+  // 1. A bare CSEConfig keeps the *licensed* identities: those that need an
+  //    operand to avoid 0 / +-inf / NaN, or that flip a signed zero. (The
+  //    exact tier, checked in 1b, does fire -- "collapses nothing" is no longer
+  //    true of a bare config.)
   cse::CSEConfig bare;
   expect("bare CSEConfig: x / x kept", !collapsed(optimize(selfDiv, bare)),
          optimize(selfDiv, bare));
@@ -111,6 +123,22 @@ int main() {
          optimize(addZero, bare));
   expect("bare CSEConfig: 0 - x kept", has(optimize(zeroMinus, bare), "0.0"),
          optimize(zeroMinus, bare));
+
+  // 1b. The exact tier is always on: a bare CSEConfig still applies the
+  //     bit-exact rewrites, which need no commutativity/associativity premise
+  //     and change no special value (so `-s` keeps them too).
+  expect("bare CSEConfig: x - 0 -> x",
+         has(optimize(subZero, bare), "return x;"), optimize(subZero, bare));
+  expect("bare CSEConfig: x / 1 -> x",
+         has(optimize(divOne, bare), "return x;"), optimize(divOne, bare));
+  expect("bare CSEConfig: x * 1 -> x",
+         has(optimize(mulOne, bare), "return x;"), optimize(mulOne, bare));
+  expect("bare CSEConfig: -(-x) -> x",
+         has(optimize(doubleNeg, bare), "return x;"), optimize(doubleNeg, bare));
+  expect("bare CSEConfig: a + (-b) -> a - b",
+         has(optimize(addNeg, bare), "return a - b;"), optimize(addNeg, bare));
+  expect("bare CSEConfig: x * 2 -> x + x",
+         has(optimize(twice, bare), "return x + x;"), optimize(twice, bare));
 
   // 2. Commutativity/associativity alone must NOT collapse them either: these
   //    identities need the operands to avoid 0 / inf / NaN as well.
@@ -164,6 +192,42 @@ int main() {
     cse::DAGNode* neg = m.createConst(-0.0, "-0.0");
     cse::DAGNode* pos = m.createConst(0.0, "0.0");
     expect("sameContentAs: -0.0 and +0.0 differ", !neg->sameContentAs(*pos), "");
+  }
+
+  // 6. The CleanupPass chained-additive merge drops the accumulator's leading
+  //    zero (`y = 0.0; y = y + a; y = y + a` -> `y = a + a`), so it is a
+  //    signed-zero identity and must fire only when allowUnsafeFpIdentities is
+  //    on. Off, the chain (and its `0.0`) must survive.
+  const std::string chain = "double f(double a) {"
+                            " double y = 0.0; y = y + a; y = y + a; return y; }";
+  expect("bare CSEConfig: cleanup chain kept", has(optimize(chain, bare), "0.0"),
+         optimize(chain, bare));
+  expect("comm+assoc only: cleanup chain kept", has(optimize(chain, n), "0.0"),
+         optimize(chain, n));
+  expect("unsafe identities: cleanup chain merged",
+         !has(optimize(chain, u), "0.0"), optimize(chain, u));
+
+  // 7. A *symbolic* constant (a declared accessor kept verbatim for emission,
+  //    e.g. `ns::w<T>(1)`) carries a real numeric value but is not a numeric
+  //    literal: `x * sym1` must NOT fold to `x`, or the symbol would vanish from
+  //    the emitted code. `isConst` guards on `symbol.empty()`, mirroring
+  //    normalizeProduct's own constant-fold guard.
+  {
+    cse::IRModule m;
+    cse::DAGNode* x = m.getVar("x");
+    cse::DAGNode* symOne = m.createSymbolicConst(1.0, "sym_one");
+    auto ret = std::make_unique<cse::ReturnIR>();
+    ret->value = m.createBinaryOp(cse::OpCode::Mul, x, symOne);
+    auto body = std::make_unique<cse::BlockIR>();
+    body->stmts.push_back(std::move(ret));
+    m.body = std::move(body);
+
+    // Bare config: the exact tier runs, but must not match the symbolic 1.
+    cse::AlgebraicSimplifyPass pass(false, false, false, false);
+    pass.run(m);
+    cse::CodeGen cg;
+    const std::string out = cg.generateBody(m);
+    expect("symbolic 1 is not folded away", has(out, "sym_one"), out);
   }
 
   std::printf(failures == 0 ? "\nALL CONFIG CHECKS PASSED\n"

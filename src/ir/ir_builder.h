@@ -61,7 +61,11 @@ class IRBuilder {
   void prescanExpr(const Expr& expr);
   void prescanFunction(const FunctionDef& func);
 
-  bool isPureCallee(const std::string& callee) const;
+  // Is a call to `callee` referentially transparent? `isMemberCall` distinguishes
+  // `obj.m(...)` from `m(...)`: the builtin math whitelist matches on the bare
+  // name, so it may only be consulted for a *free* call -- otherwise a user
+  // method named `sin`/`max` would be treated as pure.
+  bool isPureCallee(const std::string& callee, bool isMemberCall) const;
   bool isReadOnlyRoot(const std::string& name) const;
   std::string rootName(const Expr& expr) const;
 
@@ -70,6 +74,7 @@ class IRBuilder {
   void popScope();
   std::string declare(const std::string& name);
   std::string resolve(const std::string& name) const;
+  bool isBound(const std::string& name) const;
   DAGNode* varRef(const std::string& name);
 
   // Lane count (0/1 = scalar) for a declared type, via
@@ -87,11 +92,17 @@ class IRBuilder {
 
   // Scope stack: original name → internal (unique) name
   std::vector<std::unordered_map<std::string, std::string>> _scopes;
-  std::unordered_map<std::string, int> _shadowCounters;
   // Every source name declared so far in the current function (plus the internal
   // names handed out). Used to alpha-rename sibling-scope shadowing too, not
-  // just names that are still visible in an enclosing scope.
+  // just names that are still visible in an enclosing scope. The names
+  // themselves are made unique by IRModule::freshName.
   std::unordered_set<std::string> _seenNames;
+  // Names this region references but never declares -- storage that lives
+  // outside the region (a global, or an enclosing function's local), whether
+  // the reference is a read (varRef) or a write (an assignment target). A later
+  // declaration of one of them is alpha-renamed, because variables are interned
+  // by name and the two would otherwise be the same node.
+  std::unordered_set<std::string> _externallyReferenced;
 
   // Vector lowering state (only used when config.lowerVectors is set).
   int _vecDim = 0;

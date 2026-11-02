@@ -32,3 +32,16 @@ double double_shared_subexpr(double a, double b) {
     return 2.0 * p;
 }
 //@cse
+// A *compound* operand hides the call one level down: `count_call(x) + 1.0` is a
+// BinaryOp whose own `pure` flag is true even though the call inside is impure.
+// A shallow check on the operand's flag duplicated the call; the deep
+// `isReferentiallyTransparent` does not.
+double double_call_compound(double x) {
+    return 2.0 * (count_call(x) + 1.0);
+}
+//@cse
+// Control: a pure compound operand may still be doubled.
+double double_pure_compound(double x) {
+    return 2.0 * (x + 1.0);
+}
+//@cse

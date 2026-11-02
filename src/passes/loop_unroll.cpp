@@ -7,8 +7,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../analysis/effects.h"
+#include "../analysis/purity.h"
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
+#include "../ir/location.h"
 #include "../ir/stmt_walk.h"
 #include "../ir/statement.h"
 
@@ -44,6 +47,11 @@ std::unique_ptr<StmtIR> cloneStmt(const StmtIR* stmt) {
       auto out = std::make_unique<VarDeclIR>();
       out->type = d->type;
       out->name = d->name;
+      // The array-declarator bounds are part of the declaration: dropping them
+      // turns `double arr[7]` into `double [7] arr` (the codegen splits the
+      // bounds out of the type text only when arrayBounds is present), which is
+      // where a cloned in-loop array declaration failed to compile.
+      out->arrayBounds = d->arrayBounds;
       out->init = d->init;
       return out;
     }
@@ -87,10 +95,17 @@ std::unique_ptr<StmtIR> cloneStmt(const StmtIR* stmt) {
 //
 // The expression slots -- an element store contributes its lvalue as well as its
 // value -- come from stmt_walk.h, so a new slot cannot be missed here.
-void substituteStmt(IRModule& mod, StmtIR* stmt, const std::string& name,
+bool substituteStmt(IRModule& mod, StmtIR* stmt, const std::string& name,
                     DAGNode* replacement) {
-  forEachExprDeep(
-      stmt, [&](DAGNode*& e) { e = substitute(mod, e, name, replacement); });
+  bool changed = false;
+  forEachExprDeep(stmt, [&](DAGNode*& e) {
+    DAGNode* r = substitute(mod, e, name, replacement);
+    if (r != e) {
+      e = r;
+      changed = true;
+    }
+  });
+  return changed;
 }
 
 // Clone-with-freshening: rebuilt non-pure nodes (memory loads, impure calls)
@@ -119,29 +134,43 @@ void freshenStmt(IRModule& mod, StmtIR* stmt) {
 
 // Rename a local variable's declaration and assignment targets in a statement
 // tree (uses are handled separately via substituteStmt).
-void renameLocal(StmtIR* stmt, const std::string& from, const std::string& to) {
+//
+// The renamed variable must inherit the original's numeric kind. `numKind` is
+// derived metadata (dag_node.h) that the builder sets when it sees the
+// declaration, so a fresh name it has never seen stays `Unknown` -- and a
+// rewrite that needs the kind (folding `v / v` to `1`, dropping a floating
+// `1.0` factor) then refuses to fire. Renaming a `double` local to `v__u0`
+// used to leave that iteration's copy untyped while the original was `Float`,
+// so the same source optimized differently depending on whether its loop was
+// unrolled.
+void renameLocal(IRModule& mod, StmtIR* stmt, const std::string& from,
+                 const std::string& to) {
   if (!stmt) return;
   switch (stmt->kind) {
     case StmtIRKind::Block: {
       auto* b = static_cast<BlockIR*>(stmt);
-      for (auto& s : b->stmts) renameLocal(s.get(), from, to);
+      for (auto& s : b->stmts) renameLocal(mod, s.get(), from, to);
       break;
     }
     case StmtIRKind::ForLoop: {
       auto* f = static_cast<ForLoopIR*>(stmt);
-      renameLocal(f->init.get(), from, to);
-      renameLocal(f->body.get(), from, to);
+      renameLocal(mod, f->init.get(), from, to);
+      renameLocal(mod, f->body.get(), from, to);
       break;
     }
     case StmtIRKind::IfElse: {
       auto* ie = static_cast<IfElseIR*>(stmt);
-      renameLocal(ie->thenBranch.get(), from, to);
-      renameLocal(ie->elseBranch.get(), from, to);
+      renameLocal(mod, ie->thenBranch.get(), from, to);
+      renameLocal(mod, ie->elseBranch.get(), from, to);
       break;
     }
     case StmtIRKind::VarDecl: {
       auto* d = static_cast<VarDeclIR*>(stmt);
-      if (d->name == from) d->name = to;
+      if (d->name == from) {
+        d->name = to;
+        // Carry the declared kind across the rename (see the function comment).
+        mod.setVarKind(to, numericKindOfType(d->type));
+      }
       break;
     }
     case StmtIRKind::Assign: {
@@ -149,7 +178,10 @@ void renameLocal(StmtIR* stmt, const std::string& from, const std::string& to) {
       if (!a->targetExpr && a->target == from) a->target = to;
       break;
     }
-    default:
+    // A rename touches declarations and assignment targets only; these kinds
+    // own neither. Listed so a new kind is a compile error here.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Return:
       break;
   }
 }
@@ -163,24 +195,22 @@ void renameLocal(StmtIR* stmt, const std::string& from, const std::string& to) {
 // increment (`0.0++`) or inlined a local into its own `++` (`(a + 1.0)++`),
 // neither of which compiles.
 //
-// `collectWrittenNames` (ir_utils.h) owns the complete set of written names --
+// `collectWriteLocations` (ir/location.h) owns the complete set of written
+// locations --
 // inc/dec, expression-assignments, structured store roots and a `for` update
 // normalized out of the expression tree -- so this test cannot go stale again
 // when a write shape is added.
-bool reassignedIn(StmtIR* stmt, const std::string& name) {
+bool reassignedIn(StmtIR* stmt, const std::string& name,
+                  const AliasInfo& aliases) {
   if (!stmt) return false;
-  std::unordered_set<std::string> written;
-  collectWrittenNames(stmt, written);
-  return written.count(name) != 0;
+  return aliases.writtenBy(stmt).containsRoot(name);
 }
 
 // Does the statement tree contain a `break`/`continue` that belongs to the
 // enclosing loop?
 //
-// The frontend has no keyword for these: `break;` arrives as an expression
-// statement whose expression is a bare variable named "break". A `break` or
-// `continue` nested inside a *further* loop belongs to that loop, so the walk
-// does not descend into a nested ForLoop's body.
+// A `break` or `continue` nested inside a *further* loop belongs to that loop,
+// so the walk does not descend into a nested ForLoop's body.
 //
 // Unrolling splices each iteration's body into the parent block, which would
 // move such a statement out of the loop it names: a top-level `break;` does not
@@ -199,16 +229,22 @@ bool containsLoopBreakOrContinue(StmtIR* stmt) {
       return containsLoopBreakOrContinue(ie->thenBranch.get()) ||
              containsLoopBreakOrContinue(ie->elseBranch.get());
     }
-    case StmtIRKind::ExprStmt: {
-      DAGNode* e = static_cast<ExprStmtIR*>(stmt)->expr;
-      return e && e->kind == NodeKind::Variable &&
-             (e->name == "break" || e->name == "continue");
-    }
-    default:
-      // A nested ForLoop owns its own break/continue; no other statement has a
-      // slot that can hold one.
+    case StmtIRKind::ExprStmt:
+      // The only shape that can *be* a `break;`/`continue;`: the frontend has no
+      // keyword for them, so they arrive as a bare-variable expression. The
+      // encoding lives in one place (isLoopControl, ir/stmt_walk.h).
+      return isLoopControl(stmt);
+    case StmtIRKind::ForLoop:
+      // A further nested loop owns its own break/continue; this walk must not
+      // claim them for the loop being unrolled.
+      return false;
+    // These kinds have no slot that can hold a break or continue.
+    case StmtIRKind::Assign:
+    case StmtIRKind::VarDecl:
+    case StmtIRKind::Return:
       return false;
   }
+  return false;
 }
 
 void collectDeclNames(StmtIR* stmt, std::set<std::string>& out) {
@@ -234,7 +270,10 @@ void collectDeclNames(StmtIR* stmt, std::set<std::string>& out) {
       collectDeclNames(ie->elseBranch.get(), out);
       break;
     }
-    default:
+    // These kinds declare nothing.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::Return:
       break;
   }
 }
@@ -267,59 +306,50 @@ void collectDeclInits(StmtIR* stmt,
       collectDeclInits(ie->elseBranch.get(), out);
       break;
     }
-    default:
+    // These kinds declare nothing.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::Return:
       break;
   }
 }
 
-// Is every node in `e` referentially transparent?
+// Is every node in `e` referentially transparent? See
+// `isReferentiallyTransparent` in analysis/purity.h -- a node carrying
+// `pure == false` (a non-shareable load, an impure call, a `++`/`--`) denotes a
+// different value at a different point, so it may neither be repeated nor moved.
 //
-// A node is not if it carries `pure == false`: a non-shareable load (an
-// `ArrayAccess`/`MemberAccess`/`ArrowAccess` whose root may be written), an
-// impure call, or a `++`/`--`. Such a node denotes a different value at a
-// different point in the program, so it may neither be repeated nor moved.
-//
-// `pure` is a per-node flag, not propagated to the parent, so the walk has to
-// reach every descendant: `a[i] * b` is a BinaryOp with `pure == true` even
-// though `a[i]` is a non-shareable load.
-bool isPureExpr(DAGNode* e) {
-  if (!e) return true;
-  if (!e->pure) return false;
-  for (auto* op : e->operands)
-    if (!isPureExpr(op)) return false;
-  return true;
-}
-
 // A body-local declaration can be unrolled only if its initializer can be
 // inlined at every use and the variable is never reassigned.
 //
 // "Inlined at every use" means the initializer is evaluated at each use site,
 // which may sit *after* a store the original declaration preceded. It must
-// therefore be referentially transparent (`isPureExpr`), and it must not itself
-// write (`hasSideEffect`, which also catches an assignment spelled as an
-// expression -- that node has `pure == true`). The earlier test asked only
-// `!hasImpureCall`, which missed non-shareable loads entirely: `double t = a[i];
-// a[i] = 0; use(t);` was rewritten to read `a[i]` after the store.
+// therefore be referentially transparent (`isReferentiallyTransparent`), and it
+// must not itself write (`hasObservableEffect`, which also catches an assignment
+// spelled as an expression -- that node has `pure == true`). The earlier test
+// asked only "contains an impure call", which missed non-shareable loads
+// entirely: `double t = a[i]; a[i] = 0; use(t);` was rewritten to read `a[i]`
+// after the store.
 bool declInlinable(DAGNode* init) {
-  return init && init->kind != NodeKind::Variable && !hasSideEffect(init) &&
-         isPureExpr(init);
+  return init && init->kind != NodeKind::Variable &&
+         !hasObservableEffect(init) && isReferentiallyTransparent(init);
 }
 
 // Does `init` read a variable that is written somewhere in the loop body?
 //
 // Purity is not enough. `double t = a + 1.0; a = a + 2.0; s += t;` has a pure
 // initializer, but inlining it moves the read of `a` to the use site, *after*
-// the write -- so the use sees the new `a`. `"*"` is the wildcard an impure call
-// contributes (it may write anything), so a variable read across one is not
-// stable either.
-bool readsWrittenVar(DAGNode* init,
-                     const std::unordered_set<std::string>& written) {
+// the write -- so the use sees the new `a`. `writeAffectsRead` resolves the read
+// through reference edges (a read of `s3`, a reference to `b`, is changed by a
+// write to `b`) and is wildcard-aware (`"*"`, the wildcard an impure call
+// contributes, means a read across it is not stable either).
+bool readsWrittenVar(DAGNode* init, const LocationSet& written,
+                     const AliasInfo& aliases) {
   std::unordered_set<std::string> deps;
-  collectVarNames(init, deps);
+  collectReadNames(init, deps);
   if (deps.empty()) return false;
-  if (written.count("*")) return true;
   for (const auto& d : deps)
-    if (written.count(d)) return true;
+    if (aliases.writeAffectsRead(written, d)) return true;
   return false;
 }
 
@@ -345,7 +375,15 @@ void inlineLocalDecls(IRModule& mod, StmtIR* stmt,
         inlineLocalDecls(mod, ie->elseBranch.get(), inlinable);
         break;
       }
-      default:
+      // These kinds own no nested statements.
+      case StmtIRKind::ExprStmt:
+      case StmtIRKind::Assign:
+      case StmtIRKind::VarDecl:
+      case StmtIRKind::Return:
+        break;
+      case StmtIRKind::Block:
+        // Unreachable: the early return above handles every Block. Listed so
+        // the switch stays exhaustive over StmtIRKind.
         break;
     }
     return;
@@ -375,16 +413,40 @@ void inlineLocalDecls(IRModule& mod, StmtIR* stmt,
 
   if (defs.empty()) return;
 
-  for (int iter = 0; iter < 4 && !defs.empty(); ++iter) {
+  // Substitute to a fixpoint. The old bound of four rounds was a hard cap, not
+  // a convergence test: every declaration had already been erased, so a chain
+  // longer than four links kept references to names that no longer existed and
+  // the emitted code did not compile (`... + a8;` with no `a8`). Each round
+  // also rewrites the stored definitions, so a chain resolves regardless of the
+  // unordered_map's iteration order. The round bound is defs.size() + 1: a
+  // well-formed chain cannot need more, and a cycle (which the frontend cannot
+  // produce) terminates instead of hanging.
+  for (size_t round = 0; round <= defs.size(); ++round) {
+    bool changed = false;
     for (auto& [name, val] : defs) {
-      substituteStmt(mod, b, name, val);
+      if (substituteStmt(mod, b, name, val)) changed = true;
+      for (auto& [otherName, otherVal] : defs) {
+        if (otherName == name) continue;
+        DAGNode* r = substitute(mod, otherVal, name, val);
+        if (r != otherVal) {
+          otherVal = r;
+          changed = true;
+        }
+      }
     }
+    if (!changed) break;
   }
 }
 
 // Match `for (i = 0; i < N; ++i)` / `for (i = 0; i < N; i += 1)`.
+//
+// `outsideUses`, when non-null, maps a name to how many times it is read
+// *outside this loop statement* in the enclosing function. Unrolling deletes the
+// loop and the counter it declares, so a read outside becomes a reference to a
+// name that no longer exists (see the check at the end of this function).
 bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
-                      int& start, int& count) {
+                      int& start, int& count, const AliasInfo& aliases,
+                      const std::unordered_map<std::string, int>* outsideUses) {
   if (!f->init || f->init->kind != StmtIRKind::VarDecl) return false;
   auto* d = static_cast<VarDeclIR*>(f->init.get());
   if (d->name.empty()) return false;
@@ -396,7 +458,8 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   if (beginVal != std::floor(beginVal)) return false;
   int begin = static_cast<int>(beginVal);
 
-  if (!f->cond || f->cond->kind != NodeKind::BinaryOp || f->cond->op != '<')
+  if (!f->cond || f->cond->kind != NodeKind::BinaryOp ||
+      f->cond->op != OpCode::Lt)
     return false;
   if (f->cond->operands.size() != 2) return false;
   DAGNode* lhs = f->cond->operands[0];
@@ -412,15 +475,18 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   int n = static_cast<int>(bound);
   if (begin < 0 || n <= begin || (n - begin) > maxUnroll) return false;
 
-  // update: ++var, var++, or var = var + 1
+  // update: prefix ++var, postfix var++, or var += 1. A postfix `var++` is
+  // normalized by the builder to `update = var` with updateOp Inc; a compound
+  // `var += 1` is `update = var` with updateOp Add and updateRhs 1.
   bool updateOk = false;
   if (isIncDec(f->update) && f->update->name == "++" &&
-      f->update->op == '+' && !f->update->operands.empty() &&
+      f->update->op == OpCode::Inc && !f->update->operands.empty() &&
       f->update->operands[0]->kind == NodeKind::Variable &&
       f->update->operands[0]->name == d->name) {
     updateOk = true;
   } else if (f->update && f->update->kind == NodeKind::Variable &&
-             f->update->name == d->name && f->updateOp == '+') {
+             f->update->name == d->name &&
+             (f->updateOp == OpCode::Inc || f->updateOp == OpCode::Add)) {
     updateOk = !f->updateRhs ||
                (f->updateRhs->kind == NodeKind::Constant &&
                 f->updateRhs->constVal == 1);
@@ -431,7 +497,22 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   // splice it out of the loop it names.
   if (containsLoopBreakOrContinue(f->body.get())) return false;
 
-  if (reassignedIn(f->body.get(), d->name)) return false;
+  if (reassignedIn(f->body.get(), d->name, aliases)) return false;
+
+  // The counter must not be read outside the loop *statement*. Unrolling
+  // splices the body into the parent block and drops the `for`, taking the
+  // counter's declaration with it; a read of `i` after the loop then names
+  // nothing. (Its own condition and update do not count -- they are part of the
+  // statement being replaced.)
+  //
+  // This is not a miscompile of a valid program: `return s + i;` after a
+  // `for (int i = ...)` does not compile in the first place. Refusing still
+  // matters, because turning one compile error into a different one -- or, when
+  // an outer `i` exists, silently rebinding to it -- is the wrong answer.
+  if (outsideUses) {
+    auto it = outsideUses->find(d->name);
+    if (it != outsideUses->end() && it->second > 0) return false;
+  }
 
   var = d->name;
   start = begin;
@@ -439,15 +520,21 @@ bool matchCountedLoop(ForLoopIR* f, int maxUnroll, std::string& var,
   return true;
 }
 
-std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
-                                   int maxUnroll) {
+// `modUses` is the read-count of the *whole function*, captured once before the
+// walk. It is what "is this name read outside the loop?" is measured against:
+// `countReadNames` on the loop statement alone cannot see the code that follows
+// it. Nested loops pass the same map down -- their "outside" is the function,
+// not the enclosing loop.
+std::unique_ptr<StmtIR> unrollStmt(
+    IRModule& mod, std::unique_ptr<StmtIR> stmt, int maxUnroll,
+    const std::unordered_map<std::string, int>& modUses) {
   if (!stmt) return stmt;
 
   if (stmt->kind == StmtIRKind::Block) {
     auto* b = static_cast<BlockIR*>(stmt.get());
     std::vector<std::unique_ptr<StmtIR>> flat;
     for (auto& s : b->stmts) {
-      auto u = unrollStmt(mod, std::move(s), maxUnroll);
+      auto u = unrollStmt(mod, std::move(s), maxUnroll, modUses);
       if (u && u->kind == StmtIRKind::Block) {
         // Splice unrolled loop bodies into the parent so cross-statement CSE
         // sees each iteration as a top-level statement.
@@ -463,15 +550,52 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
 
   if (stmt->kind == StmtIRKind::ForLoop) {
     auto* f = static_cast<ForLoopIR*>(stmt.get());
-    f->init = unrollStmt(mod, std::move(f->init), maxUnroll);
-    f->body = unrollStmt(mod, std::move(f->body), maxUnroll);
+    f->init = unrollStmt(mod, std::move(f->init), maxUnroll, modUses);
+    f->body = unrollStmt(mod, std::move(f->body), maxUnroll, modUses);
+
+    // Rebuild the alias info *here*, on the already-inner-unrolled body: the
+    // inner unroll introduced fresh names (`r__u0 = x__u0`), and an AliasInfo
+    // captured before it would not know their reference edges. That stale map
+    // missed the `r__u0 -> x__u0` edge, so `x__u0` looked never-reassigned and
+    // its constant initializer was inlined into the reference binding
+    // (`double& r__u0__u0 = 0.5;`).
+    AliasInfo aliases = AliasInfo::build(f);
 
     std::string var;
     int start = 0, count = 0;
-    if (!matchCountedLoop(f, maxUnroll, var, start, count)) return stmt;
 
-    // Count uses on the (already inner-unrolled) loop so the map is current.
-    auto globalUses = countUses(stmt.get());
+    // Use counts on the (already inner-unrolled) loop, so the map is current.
+    // `globalUses` covers the loop statement itself; `bodyUses` its body.
+    auto globalUses = countReadNames(stmt.get());
+    auto bodyUses = countReadNames(f->body.get());
+
+    // Reads of the counter outside this loop statement. `modUses` covers the
+    // whole function; subtracting everything this loop statement reads (body,
+    // condition, update) leaves the reads from the enclosing code. Those are the
+    // ones that would dangle once the loop -- and the counter's declaration --
+    // are gone.
+    //
+    // A body local gets the same treatment below via `gv != bv`, but there the
+    // reference is `globalUses` (the loop statement) because a body local's
+    // uses must be confined to the *body*. The counter's declaration lives in
+    // the loop statement, so its "outside" is the whole function.
+    std::unordered_map<std::string, int> outsideUses;
+    {
+      std::unordered_map<std::string, int> inside = bodyUses;
+      countReadNames(f->cond, inside);
+      countReadNames(f->update, inside);
+      countReadNames(f->updateRhs, inside);
+      for (const auto& kv : modUses) {
+        auto it = inside.find(kv.first);
+        const int inner = it == inside.end() ? 0 : it->second;
+        const int outer = kv.second - inner;
+        if (outer > 0) outsideUses[kv.first] = outer;
+      }
+    }
+
+    if (!matchCountedLoop(f, maxUnroll, var, start, count, aliases,
+                          &outsideUses))
+      return stmt;
 
     // Every body-local must be confined to the body. Those that can be inlined
     // are removed; the rest are renamed per iteration so clones never share a
@@ -480,13 +604,12 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
     collectDeclNames(f->body.get(), decls);
     std::unordered_map<std::string, DAGNode*> declInits;
     collectDeclInits(f->body.get(), declInits);
-    auto bodyUses = countUses(f->body.get());
     std::set<std::string> inlinable;
     std::set<std::string> renames;
-    // Names written anywhere in the body. A body-local whose initializer reads
-    // one of these cannot be inlined: the read would move past the write.
-    std::unordered_set<std::string> bodyWritten;
-    collectWrittenNames(f->body.get(), bodyWritten);
+    // Names written anywhere in the body, closed over reference edges. A
+    // body-local whose initializer reads one of these cannot be inlined: the
+    // read would move past the write.
+    LocationSet bodyWritten = aliases.writtenBy(f->body.get());
     for (auto& name : decls) {
       auto g = globalUses.find(name);
       auto b = bodyUses.find(name);
@@ -495,8 +618,12 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
       if (gv != bv) return stmt;  // used outside the body: cannot unroll
       auto di = declInits.find(name);
       DAGNode* init = (di == declInits.end()) ? nullptr : di->second;
-      if (declInlinable(init) && !reassignedIn(f->body.get(), name) &&
-          !readsWrittenVar(init, bodyWritten)) {
+      // A reference's referent is an lvalue binding target, not a value: inlining
+      // it would bind the reference to an rvalue (see isAliasedReferent). Rename
+      // it with the other mutable locals instead.
+      if (declInlinable(init) && !reassignedIn(f->body.get(), name, aliases) &&
+          !aliases.isAliasedReferent(name) &&
+          !readsWrittenVar(init, bodyWritten, aliases)) {
         inlinable.insert(name);
       } else {
         renames.insert(name);
@@ -510,10 +637,13 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
       substituteStmt(mod, clone.get(), var, c);
       // Give each iteration its own impure loads / calls.
       freshenStmt(mod, clone.get());
-      // Rename mutable/impure body locals so iterations do not alias.
+      // Rename mutable/impure body locals so iterations do not alias. The new
+      // name comes from `freshName`: a user parameter spelled `t__u0` used to
+      // collide with the first iteration's renamed local, producing a
+      // declaration that shadows a parameter (or, worse, silently rebinding).
       for (auto& name : renames) {
-        std::string to = name + "__u" + std::to_string(i);
-        renameLocal(clone.get(), name, to);
+        std::string to = mod.freshName(name + "__u" + std::to_string(i));
+        renameLocal(mod, clone.get(), name, to);
         substituteStmt(mod, clone.get(), name, mod.getVar(to));
       }
       inlineLocalDecls(mod, clone.get(), inlinable);
@@ -522,7 +652,7 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
     // Unroll loops newly exposed by substituting this loop's variable
     // (e.g. a triangular inner loop whose start depended on the outer var).
     // Recompute use counts: locals were renamed above, so the outer map is stale.
-    return unrollStmt(mod, std::move(block), maxUnroll);
+    return unrollStmt(mod, std::move(block), maxUnroll, modUses);
   }
 
   return stmt;
@@ -532,7 +662,9 @@ std::unique_ptr<StmtIR> unrollStmt(IRModule& mod, std::unique_ptr<StmtIR> stmt,
 
 void LoopUnrollPass::run(IRModule& module) {
   if (!module.body) return;
-  module.body = unrollStmt(module, std::move(module.body), _maxUnroll);
+  const auto modUses = countReadNames(module.body.get());
+  module.body =
+      unrollStmt(module, std::move(module.body), _maxUnroll, modUses);
 }
 
 }  // namespace cse

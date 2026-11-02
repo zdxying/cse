@@ -8,14 +8,7 @@
 #include <cstdio>
 
 #include "write_visibility.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-26s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // 1. `y` is incremented inside an initializer, and a *later* statement reads
@@ -38,8 +31,5 @@ int main() {
   check("ternary(1,c=0)", inc_in_ternary_branch(1.0, 0), 100.0 + 1.0);
   check("ternary(2.5,c=1)", inc_in_ternary_branch(2.5, 1), 250.0 + 3.5);
 
-  std::printf(failures == 0 ? "\nALL WRITE-VISIBILITY CHECKS PASSED\n"
-                            : "\n%d WRITE-VISIBILITY CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("WRITE-VISIBILITY");
 }

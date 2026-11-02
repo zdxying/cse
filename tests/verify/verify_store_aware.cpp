@@ -12,6 +12,7 @@
 #else
 #include "store_aware.cpp.cse"
 #endif
+#include "harness.h"
 
 int g_calls = 0;
 
@@ -19,20 +20,6 @@ int g_calls = 0;
 // so only the definitions are missing here.
 double getnorm_pair(Pair p) { return p.a + p.b; }
 double getsum_array(double* a) { return a[0] + a[1]; }
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-22s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
-
-static void checkInt(const char* name, int got, int want) {
-  bool ok = (got == want);
-  if (!ok) failures++;
-  std::printf("%-22s got=%d want=%d  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
 
 int main() {
   // Hoisting `a * x` would let the second use read the pre-`a = 5` value.
@@ -103,8 +90,5 @@ int main() {
   check("element_index", element_index(ebuf, 1, 5.0), 5.0);
   checkInt("element_index store", ebuf[2] == 5.0 ? 1 : 0, 1);
 
-  std::printf(failures == 0 ? "\nALL STORE-AWARE CHECKS PASSED\n"
-                            : "\n%d STORE-AWARE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("STORE-AWARE");
 }

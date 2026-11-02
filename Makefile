@@ -1,6 +1,7 @@
 CXX      := g++
 OPT      ?= -O0
 CXXFLAGS := -std=c++17 -Wall -Wextra -g $(OPT) -Isrc -MMD -MP
+LDFLAGS  ?=
 SRCDIR   := src
 PLUGDIR  := plugins
 BUILDDIR := build
@@ -34,17 +35,17 @@ $(STATIC_LIB): $(LIB_OBJECTS)
 # Dynamic library
 $(DYNAMIC_LIB): $(PIC_OBJECTS)
 	@mkdir -p $(BINDIR)
-	$(CXX) -shared -o $@ $^
+	$(CXX) $(LDFLAGS) -shared -o $@ $^
 
 # Executable (statically linked)
 $(TARGET): $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.o $(STATIC_LIB)
 	@mkdir -p $(BINDIR)
-	$(CXX) $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.o $(STATIC_LIB) -o $@
+	$(CXX) $(LDFLAGS) $(BUILDDIR)/$(PLUGDIR)/freelb/cse_main.o $(STATIC_LIB) -o $@
 
 # FreeLB .ur.h generator (statically linked)
 $(CSEGEN): $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB)
 	@mkdir -p $(BINDIR)
-	$(CXX) $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB) -o $@
+	$(CXX) $(LDFLAGS) $(BUILDDIR)/$(PLUGDIR)/freelb/ur_emit_main.o $(STATIC_LIB) -o $@
 
 # Normal objects (for static lib and main.o)
 $(BUILDDIR)/$(SRCDIR)/%.o: $(SRCDIR)/%.cpp
@@ -71,6 +72,15 @@ test: all
 release:
 	$(MAKE) clean
 	$(MAKE) OPT=-O2 all
+
+# Sanitized build + full test run (ASan/UBSan). The sanitizer flags go into OPT
+# (compile), LDFLAGS (link) and EXTRA_CXXFLAGS (the verifiers run_tests.sh
+# compiles). Uses its own clean build; never mixes with the normal objects.
+SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
+sanitize:
+	$(MAKE) clean
+	$(MAKE) OPT="-O1 $(SAN)" LDFLAGS="$(SAN)" all
+	EXTRA_CXXFLAGS="$(SAN)" tests/run_tests.sh
 
 PREFIX  ?= /usr/local
 DESTDIR ?=

@@ -17,6 +17,11 @@ class LoopUnrollPass : public Pass {
   std::string name() const override { return "LoopUnroll"; }
   void run(IRModule& module) override;
 
+  // Unrolling replicates the body: an impure call or an increment inside the
+  // loop becomes one per iteration, so the effect count legitimately grows.
+  bool preservesEffects() const override { return false; }
+  bool crossesStatements() const override { return true; }
+
  private:
   int _maxUnroll;
 };

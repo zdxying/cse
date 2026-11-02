@@ -7,14 +7,7 @@
 #include <cstdio>
 
 #include "mixed_ops.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-26s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // 1. `-x` and `--x`: a = -x; x becomes x-1; b = x-1. The sum is -1 for any x.
@@ -47,8 +40,5 @@ int main() {
   check("cast_of_inlined(5.5)", cast_of_inlined_source(5.5), 10.5);
   check("cast_of_inlined(-3.25)", cast_of_inlined_source(-3.25), -6.25);
 
-  std::printf(failures == 0 ? "\nALL MIXED-OP CHECKS PASSED\n"
-                            : "\n%d MIXED-OP CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("MIXED-OP");
 }

@@ -78,6 +78,9 @@ make clean
 | `-r`, `--recombine` | 启用提取公因子（`a*x + a*y → a*(x+y)`） |
 | `-s`, `--safe` | 面向任意 C++ 的保守语义 |
 | `-v`, `--verbose` | 逐 pass 打印到 stderr |
+| `--dump-ir` | 打印每个 pass 前后的 IR（到 stdout） |
+| `--verify` | 检查 pass 不变量（效果保持）；违规时退出码 4 |
+| `--lattice NAME` | 代价模型使用的 lattice 集合（D2Q5、D2Q9、D3Q7、D3Q15、D3Q19、D3Q27） |
 | `-h`, `--help` | 用法 |
 
 ### 生成 FreeLB 的 `.ur.h` 特化
@@ -102,10 +105,12 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 
 ## 安全模型
 
-在保守模式下（`-s`，也是 `CSEConfig` 的默认值），优化通过六条机制保证行为等价：
+在保守模式下（`-s`，也是 `CSEConfig` 的默认值），优化通过八条机制保证行为等价：
 
 1. **纯度**：调用默认视为有副作用，只有登记为纯的调用才允许去重或跨语句提取；
    任何"把两处出现折叠为一处"的重写都要求被折叠的子表达式是纯的。
+   内建数学函数白名单只匹配**限定名**的自由调用（`std::sqrt`）：裸名 `max`/`min`/`abs`
+   可能解析到用户自己的函数，合并两次调用会丢掉副作用；成员调用（`obj.sin`）同样不查白名单。
 2. **内存**：只有只读根的 load 可共享；可变/未知根的 load 每次独立，避免跨 store 复用。
    **指针与引用形参（`T*`、`T&`、数组）一律不视为只读根**——`const` 只承诺"不通过它写"，
    不承诺没有别的名字指向同一对象（`f(x, x)` 可把 `const T&` 与 `T&` 绑到同一实参）；
@@ -116,8 +121,23 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
    （`a[i] = v`、`p->f = v`）算作对 lvalue **根**的写——可能有别的指针指向同一对象，
    这是保守答案。
 4. **支配**：位于 `if`/`else`/循环内的表达式标记为 nested，绝不外提。
-5. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
-6. **展开前提**：只有当循环体声明的每个局部变量都能被内联或安全改名、循环变量未被循环体内的 `++`/`--` 改写、且循环体不含属于本循环的 `break`/`continue` 时才展开，否则保留循环。循环变量还须在 `for` 初始化子句中声明（初始化子句为赋值时也不展开）。
+5. **可投机性**：`isSpeculatable`（`analysis/purity.h`）回答的是另一个问题——
+   *这个求值能不能放到源码不会执行它的位置？* 它与"能否重复求值"只在陷阱处分歧：
+   `1/k` 可以重复求值（值相同）但不可投机（`k=0` 时 trap）。这是
+   `k ? 1/k : 0` 的修复：该除法曾被提到条件之外，`k=0` 时直接崩溃。
+   守卫操作数（三元的两臂、`&&`/`||` 的右操作数）只有在可投机时才提取；
+   提取**整个**条件表达式始终安全（它保留内部短路），所以只需检查条件/左操作数。
+6. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
+   当 region **读取**一个它从未声明的名字时（`double s = t;` 而 `t` 是全局），
+   后续的 `double t = a;` 也必须改名，否则两者会成为同一个节点。
+   所有生成名（`__s`、`__u`、`_cse_`）都来自 `IRModule::freshName`，
+   因此永远不会与用户标识符撞名。
+7. **展开前提**：只有当循环体声明的每个局部变量都能被内联或安全改名、循环变量未被循环体内的
+   `++`/`--` 改写、**循环变量不在循环语句之外被读**、且循环体不含属于本循环的
+   `break`/`continue` 时才展开，否则保留循环。循环变量还须在 `for` 初始化子句中声明
+   （初始化子句为赋值时也不展开）。
+8. **递归有界**：表达式解析深度上限 512 层，超限报 `CSE-PARSE-DEPTH` 并把区域原样透传，
+   而不是栈溢出崩溃。
 
 代码生成还会**原样打印它拿到的树**：同优先级的右子节点一律保留括号——IEEE-754 下不仅
 `a - (b - c)`、`a / (b * c)` 不等于去括号的形式，连 `a * (b * c)` 与 `(a * b) * c`
@@ -134,14 +154,22 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 | 阶段 | 检查内容 |
 |------|----------|
 | 代价回归 | `tests/fixtures/` 下各夹具的 FLOP 计数，分三档执行（默认 / `-r` / `-s`） |
-| 数值校验 | `verify_*` 编译并运行生成代码（semantics_fixes、equilibrium、safety、recombine、parens、store_aware、float_identities、ref_alias） |
-| 配置契约 | `verify_config.cpp` 链接 `libcse.a`，钉住 CLI 无法隔离的 `CSEConfig` 开关行为 |
+| 数值校验 | `verify_*` 编译并运行生成代码（semantics_fixes、equilibrium、safety、recombine、parens、store_aware、float_identities、ref_alias 等） |
+| 配置契约 | `verify_config.cpp` / `verify_counter_prop.cpp` 链接 `libcse.a`，钉住 CLI 无法隔离的 `CSEConfig` 开关与插件注入的 pass |
+| pass 契约 | `verify_pass_contracts.cpp` 钉住：默认管线每个 pass 必须能触发、只有 LoopUnroll 可不保效果、跨语句 pass 必须声明写集契约 |
+| 形状检查 | 对生成文本的 grep 断言，以及 `check_stmt_switches.py`（语句 switch 必须穷举或带 `// partial:` 标记） |
 | `csegen` 冒烟 | 生成头中出现预期的代表性特化 |
 | latset 表防漂移 | 引擎表 vs FreeLB `lattice_set.h`（无 FreeLB checkout 时跳过） |
 | FreeLB 验证脚本 | `verify_{moment,equilibrium,force}.py`（无 FreeLB checkout 时跳过） |
 
-示例结果（before → after）：`basic_cse` 10 → 10、`features` 49 → 49、
-`equilibrium_d3q19` 323 → 84 FLOPs（−74.0%）、`safety_cases` 22 → 19、
+代价模型按**标量 FLOP、向量按 lane 数加权**计费（向量点积为 `2d-1`），已知纯
+helper 经 FreeLB 钩子计价（`getnorm2` → `2d-1` 等），DAG 子表达式按**引用次数**
+计费——每个使用点一次（codegen 每次重印都计），物化临时只算定义一次，
+`totalNodes` 仍为唯一节点数。无法解析的构造显式报告 `unknownLoops` /
+`unmodeledCalls`（此时 flops 是下界）。详见 `docs/cost_model_redesign.md`。
+
+示例结果（before → after）：`basic_cse` 11 → 10、`features` 52 → 51、
+`equilibrium_d3q19` 323 → 84 FLOPs（−74.0%）、`safety_cases` 24 → 21、
 `cost_nested` 478 → 355（`const` 形参不再视为只读根后的保守计数）、
 `cost_descending` 35 → 35。
 
@@ -161,8 +189,12 @@ docs/           架构文档与移植状态
 
 - [docs/architecture.md](docs/architecture.md) — 流水线、IR、pass、安全模型、
   构建与测试覆盖
+- [docs/cost_model_redesign.md](docs/cost_model_redesign.md) — 代价口径
+  （按引用计费、向量加权、钩子）
 - [docs/freelb_port_status.md](docs/freelb_port_status.md) — FreeLB 集成状态、
   未完成 TODO 与通用/FreeLB 边界
+- [docs/cse-round6-audit.md](docs/cse-round6-audit.md) — 最近一轮全仓库架构
+  审计（缺陷、修复、backlog 处置；不入版本控制）
 
 ## 已知局限
 

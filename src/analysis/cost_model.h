@@ -9,20 +9,24 @@ struct CSEConfig;
 // Result of a cost analysis over one IR module (function body).
 //
 // Semantics:
-//  - flops/vectorOps/memOps count *unique* DAG nodes, scaled by the number of
-//    executions of their enclosing loop context (so a computation inside a
-//    loop is charged once per iteration, while a CSE temporary shared by
-//    several statements is charged once).
+//  - flops/vectorOps/memOps count *references* to DAG nodes, scaled by the
+//    number of executions of the enclosing loop context. A shared node that is
+//    not materialized as a temporary is charged once per use site (codegen
+//    re-prints it); a node CSE materialized is charged once, at its definition,
+//    because its uses are cheap variable references. A computation inside a
+//    loop is charged once per iteration.
 //  - flops is a scalar (vector-weighted) count: a vector op costs its lane
 //    count and a vector-vector product is a dot product (2d-1).
-//  - memOps counts unique loads (array/member/arrow access) and stores.
+//  - memOps counts loads (array/member/arrow access) per use site plus one per
+//    complex-lvalue store (loop-scaled).
 //  - unknownLoops / unmodeledCalls report constructs the model could not
-//    evaluate; a non-zero value means flops is a lower bound.
+//    evaluate; a non-zero value means flops is a lower bound. They count
+//    distinct constructs, not references.
 struct CostResult {
   long long flops = 0;           // scalar FLOPs (+, -, *, /), vector-weighted
   long long vectorOps = 0;       // operations with at least one vector operand
-  long long memOps = 0;          // loads (unique) + stores (per assignment)
-  long long totalNodes = 0;      // unique DAG nodes
+  long long memOps = 0;          // loads (per use site) + stores (per assignment)
+  long long totalNodes = 0;      // unique DAG nodes (not reference-weighted)
   long long stmts = 0;           // executed statements (loop-scaled)
   long long vars = 0;            // executed declarations (loop-scaled)
   long long unknownLoops = 0;    // loops whose trip count was not resolvable

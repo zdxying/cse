@@ -2,141 +2,126 @@
 
 #include <sstream>
 
+#include "lexer.h"
+#include "token.h"
+
 namespace cse {
 
 namespace {
 
-// Character-level scan state, carried across lines.
+// Is a line-comment token a `//@cse` marker?
 //
-// A `{` or `}` only counts if it is code. The extractor used to count raw
-// characters, so a brace inside a comment or a string literal moved the count:
-// `// the closing brace } of the scope above` closed the region one line early,
-// the truncated fragment failed to parse, and the whole region was passed
-// through untouched -- the optimizer silently did nothing at all.
-struct ScanState {
-  bool blockComment = false;  // inside a /* ... */ comment
-  bool sawBrace = false;      // a real opening brace has been seen
-  bool topLevelSemi = false;  // a `;` at brace depth 0, before any `{`
-};
-
-// Net `{` minus `}` contributed by one line of code, ignoring quoted text and
-// comments. `st` carries the block-comment state into the next line.
-//
-// This is deliberately not a full lexer: it only has to be right about where a
-// brace is *not*. Anything it cannot decide (an unterminated quote, say) ends at
-// the end of the line, and the lexer reports the real error with a position.
-int braceDelta(const std::string& line, ScanState& st) {
-  int delta = 0;
-  const size_t n = line.size();
-  size_t i = 0;
-  while (i < n) {
-    const char c = line[i];
-    const char next = (i + 1 < n) ? line[i + 1] : '\0';
-
-    if (st.blockComment) {
-      if (c == '*' && next == '/') {
-        st.blockComment = false;
-        i += 2;
-      } else {
-        ++i;
-      }
-      continue;
-    }
-
-    // Tested before the quote cases: `// don't` must not start a character
-    // literal, and `// "` must not start a string.
-    if (c == '/' && next == '/') break;  // line comment: nothing after counts
-    if (c == '/' && next == '*') {
-      st.blockComment = true;
-      i += 2;
-      continue;
-    }
-    if (c == '"' || c == '\'') {
-      const char quote = c;
-      ++i;
-      while (i < n) {
-        if (line[i] == '\\') {  // escape: the next character is data
-          i += 2;
-          continue;
-        }
-        if (line[i] == quote) {
-          ++i;
-          break;
-        }
-        ++i;
-      }
-      continue;
-    }
-
-    if (c == '{') {
-      ++delta;
-      st.sawBrace = true;
-    } else if (c == '}') {
-      --delta;
-    } else if (c == ';' && !st.sawBrace) {
-      // A top-level statement terminator before any brace: the region is a
-      // declaration, not a `{ ... }` body. Without this a marker in front of a
-      // declaration (`//@cse` + `double g = 5.0;`) kept accumulating until the
-      // next function's body, so the declaration was swallowed into that
-      // region and then dropped -- the output no longer declared `g`.
-      st.topLevelSemi = true;
-    }
-    ++i;
-  }
-  return delta;
+// `text` is the raw comment (`//` included). The marker is `//`, optional
+// horizontal whitespace, then `@cse`. Only that prefix is structural: trailing
+// text is the user's and is preserved verbatim by the driver. Because the token
+// stream already separates comments from strings and block comments, a
+// `//@cse` inside a string literal or a `/* ... */` can never reach here as a
+// line comment.
+bool isMarkerComment(const std::string& text) {
+  if (text.size() < 2 || text[0] != '/' || text[1] != '/') return false;
+  size_t q = 2;
+  while (q < text.size() && (text[q] == ' ' || text[q] == '\t')) ++q;
+  return text.compare(q, 4, "@cse") == 0;
 }
 
 }  // namespace
 
+// A region is a `//@cse` marker line followed by the code it marks. Boundaries
+// are found from the lexer's token stream -- `{`/`}` depth for a `{ ... }`
+// body, or a top-level `;` for a declaration -- rather than by counting raw
+// characters. This is the same tokenizer the parser runs on, so braces and
+// semicolons inside comments, string literals and character literals are
+// already gone from the stream and cannot desync the count.
+//
+// The same stream decides whether the region holds a preprocessing directive
+// (`#if`, `#pragma`, ...). That is a token-level question on purpose: a `#` in
+// a comment or a string literal is part of that literal's token and must not be
+// mistaken for one, while a `#` that follows a comment on the same line *is* a
+// directive (C++ replaces a comment with one space before recognising them).
+// Scanning raw lines for a leading `#` got both directions wrong.
 std::vector<CSERegion> RegionExtractor::extract(const std::string& source) const {
-  std::vector<CSERegion> regions;
-  std::istringstream iss(source);
-  std::string line;
-  size_t lineNum = 0;
-  bool inCSE = false;
-  size_t cseStart = 0;
-  int braceCount = 0;
-  std::string cseCode;
-  ScanState st;         // state inside the current region
-  ScanState fileState;  // comment state outside regions, so a `//@cse` that sits
-                        // inside a block comment is not taken for a marker
+  Lexer lexer(source, CSEConfig{});
+  auto tokens = lexer.tokenize(/*keepComments=*/true, /*tolerant=*/true);
 
-  while (std::getline(iss, line)) {
-    lineNum++;
-    std::string trimmed = line;
-    size_t first = trimmed.find_first_not_of(" \t");
-    if (first != std::string::npos) trimmed = trimmed.substr(first);
-
-    if (!inCSE) {
-      if (!fileState.blockComment &&
-          (trimmed == "//@cse" || trimmed.find("//@cse") == 0)) {
-        inCSE = true;
-        cseStart = lineNum;
-        braceCount = 0;
-        cseCode.clear();
-        st = ScanState{};  // each region is scanned as its own text
-        continue;
-      }
-      // Advance the outside comment state so a marker line inside `/* ... */`
-      // is skipped. The brace delta is irrelevant here.
-      braceDelta(line, fileState);
-    } else {
-      braceCount += braceDelta(line, st);
-      cseCode += line + "\n";
-
-      if (braceCount <= 0 && !cseCode.empty()) {
-        if (st.sawBrace || st.topLevelSemi) {
-          regions.push_back({cseStart, lineNum, cseCode});
-          inCSE = false;
-          cseCode.clear();
-          fileState = st;  // resume outside scanning from the region's end state
-        }
-      }
-    }
+  // Split into lines once, so a region's body can be sliced back out of the
+  // original text (comments, spacing and all) by line range.
+  std::vector<std::string> lines;
+  {
+    std::istringstream iss(source);
+    std::string line;
+    while (std::getline(iss, line)) lines.push_back(line);
   }
 
-  if (inCSE && !cseCode.empty()) {
-    regions.push_back({cseStart, lineNum, cseCode});
+  auto sliceLines = [&lines](size_t firstLine, size_t lastLine) {
+    // 1-indexed, inclusive: lines firstLine .. lastLine.
+    std::string code;
+    for (size_t n = firstLine; n <= lastLine && n >= 1; ++n) {
+      if (n - 1 < lines.size()) code += lines[n - 1] + "\n";
+    }
+    return code;
+  };
+
+  std::vector<CSERegion> regions;
+  bool inCSE = false;
+  size_t cseStart = 0;
+  int depth = 0;
+  bool sawBrace = false;       // a real opening brace has been seen
+  bool topLevelSemi = false;   // a `;` at depth 0, before any `{`
+  // Does the region being collected hold a preprocessing directive? A directive
+  // is a *token* (TokenType::PreprocessorDirective), so this is decided by the
+  // same lexer that decides region boundaries: a `#` inside a string literal or
+  // a block comment is part of that token and cannot be mistaken for one.
+  bool sawDirective = false;
+  size_t prevTokenLine = 0;    // line of the previous token, to detect "leads
+                               // the line" (only whitespace before it)
+
+  for (const auto& t : tokens) {
+    if (t.type == TokenType::Eof) break;
+
+    if (!inCSE) {
+      // A marker must be a line comment that begins its line. Comments inside a
+      // block comment are not tokens at all, and a `//@cse` in a string is a
+      // String token, so neither can be mistaken for a marker.
+      if (t.type == TokenType::LineComment && t.line != prevTokenLine &&
+          isMarkerComment(t.text)) {
+        inCSE = true;
+        cseStart = t.line;
+        depth = 0;
+        sawBrace = false;
+        topLevelSemi = false;
+        sawDirective = false;
+      }
+      prevTokenLine = t.line;
+      continue;
+    }
+
+    if (t.type == TokenType::PreprocessorDirective) sawDirective = true;
+
+    if (t.type == TokenType::LBrace) {
+      ++depth;
+      sawBrace = true;
+    } else if (t.type == TokenType::RBrace) {
+      --depth;
+    } else if (t.type == TokenType::Semicolon && !sawBrace) {
+      topLevelSemi = true;
+    }
+
+    if (depth <= 0 && (sawBrace || topLevelSemi)) {
+      regions.push_back(
+          {cseStart, t.line, sliceLines(cseStart + 1, t.line), sawDirective});
+      inCSE = false;
+    }
+    prevTokenLine = t.line;
+  }
+
+  // A marker whose region never closes (no `}` / `;` before EOF) still yields a
+  // region: the parser reports the real error with a position. A marker with an
+  // empty body yields nothing, as before.
+  if (inCSE) {
+    std::string code = sliceLines(cseStart + 1, lines.size());
+    if (!code.empty()) {
+      regions.push_back({cseStart, lines.size(), code, sawDirective});
+    }
   }
 
   return regions;

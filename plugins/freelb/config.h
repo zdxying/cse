@@ -29,6 +29,20 @@ inline bool isFreeLBPureFunction(const std::string& callee) {
   for (const char* p : kPrefixes) {
     if (callee.find(p) != std::string::npos) return true;
   }
+  // Field accessors are pure reads. They are spelled `cell.getOmega()`,
+  // `cell.template get<FIELD>()` and `cell.template hasField<FIELD>()`, and the
+  // builder hands the callee as `getOmega` / `template get<...>` /
+  // `template hasField<...>`. Classifying them as pure keeps them out of the
+  // wildcard write set an impure call contributes (50fc363), which otherwise
+  // clears every known constant counter -- e.g. an `if constexpr(hasField<...>)`
+  // at the top of a kernel would stop CounterProp from specializing the
+  // `tensor[i]; ++i;` chains the moment loops unroll to. `clear` is a write and
+  // is deliberately not matched.
+  static const char* kAccessors[] = {"getOmega", "template get<",
+                                     "template hasField<"};
+  for (const char* p : kAccessors) {
+    if (callee.find(p) != std::string::npos) return true;
+  }
   return false;
 }
 
@@ -73,11 +87,19 @@ inline CSEConfig createFreeLBConfig(const LatticeConfig& lat = {}) {
   // buffers, and a `const Vector&` parameter is read-only for the kernel's
   // lifetime. Asserting it re-enables sharing loads through reference
   // parameters -- without it the aliasing rule makes every reference parameter
-  // a non-shareable root, which costs the force kernels ~85% of their CSE
-  // (D3Q19: 341 -> 626 flops). Generic C++ must not set this; `-s` keeps it
+  // a non-shareable root, which costs the force kernels ~90% of their CSE
+  // (D3Q19: 353 -> 671 flops). Generic C++ must not set this; `-s` keeps it
   // off and stays sound.
   config.noAlias = true;
   config.isPureFunction = isFreeLBPureFunction;
+
+  // Every field a kernel touches is floating (T is a real scalar), so an operand
+  // whose kind cannot be proven -- a `cell[i]` load -- is floating too. The zero
+  // identities need this to fold `0 * cell[i]`, whose zero coefficient is an
+  // *integer* literal from the lattice table; without it each direction leaves
+  // the product in place, which cost the force/moment kernels roughly half their
+  // CSE (moment D3Q19: 779 -> 1477 flops).
+  config.assumeFloatOperands = true;
 
   config.resolveName = [lat](IRModule& mod, const std::string& name) {
     return resolveLatsetConst(mod, name, lat);
@@ -129,8 +151,8 @@ inline CSEConfig createFreeLBConfig(const LatticeConfig& lat = {}) {
     return dim;
   };
 
-  config.binaryOpCost = [](char op, int a, int b, long long& flops) -> int {
-    if (op == '*' && a > 0 && b > 0) {  // vector . vector -> scalar dot
+  config.binaryOpCost = [](OpCode op, int a, int b, long long& flops) -> int {
+    if (op == OpCode::Mul && a > 0 && b > 0) {  // vector . vector -> scalar dot
       int d = std::max(a, b);
       flops = 2LL * d - 1;
       return 0;

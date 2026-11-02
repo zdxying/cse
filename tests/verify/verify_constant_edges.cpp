@@ -7,14 +7,7 @@
 #include <cstdio>
 
 #include "constant_edges.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-30s got=%.6g want=%.6g  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 static void check_true(const char* name, bool got) {
   if (!got) failures++;
@@ -49,8 +42,5 @@ int main() {
   check("shared-literal subscript value", w, 2.0);
   check("shared-literal subscript store", feq[1], 2.0);
 
-  std::printf(failures == 0 ? "\nALL CONSTANT-EDGE CHECKS PASSED\n"
-                            : "\n%d CONSTANT-EDGE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("CONSTANT-EDGE");
 }

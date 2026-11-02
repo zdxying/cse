@@ -150,7 +150,7 @@ class LatticeResolveVisitor {
     }
 
     // u * latset::c<...>(k) -> scalar dot product
-    if (node->kind == NodeKind::BinaryOp && node->op == '*' &&
+    if (node->kind == NodeKind::BinaryOp && node->op == OpCode::Mul &&
         node->operands.size() == 2) {
       DAGNode* a = node->operands[0];
       DAGNode* b = node->operands[1];
@@ -231,12 +231,12 @@ class LatticeResolveVisitor {
 
       DAGNode* term = module.createArrayAccess(
           vec, module.createConst(d, std::to_string(d)), /*shareable=*/true);
-      if (coeff == -1) term = module.createUnaryOp('-', term);
+      if (coeff == -1) term = module.createUnaryOp(OpCode::Neg, term);
 
-      sum = sum ? module.createBinaryOp('+', sum, term) : term;
+      sum = sum ? module.createBinaryOp(OpCode::Add, sum, term) : term;
     }
     resolved++;
-    if (negate) return module.createUnaryOp('-', sum);
+    if (negate) return module.createUnaryOp(OpCode::Neg, sum);
     return sum;
   }
 

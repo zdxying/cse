@@ -9,35 +9,25 @@
 #include <cstdio>
 
 #include "loop_unroll_inline.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-9;
-  if (!ok) failures++;
-  std::printf("%-22s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   const double as[] = {-2.5, -1.0, 0.0, 1.0, 3.75, 10.0};
   const double bs[] = {-3.0, 0.5, 2.0, 7.5};
   for (double a : as) {
-    check("unroll_write_after", sf_unroll_write_after(a),
+    checkNear("unroll_write_after", sf_unroll_write_after(a),
           ref_unroll_write_after(a));
-    check("unroll_write_block", sf_unroll_write_block(a),
+    checkNear("unroll_write_block", sf_unroll_write_block(a),
           ref_unroll_write_block(a));
-    check("unroll_loopvar", sf_unroll_loopvar(a), ref_unroll_loopvar(a));
+    checkNear("unroll_loopvar", sf_unroll_loopvar(a), ref_unroll_loopvar(a));
     for (int c = 0; c <= 1; ++c) {
-      check("unroll_write_cond", sf_unroll_write_cond(a, c),
+      checkNear("unroll_write_cond", sf_unroll_write_cond(a, c),
             ref_unroll_write_cond(a, c));
     }
     for (double b : bs) {
-      check("unroll_stable", sf_unroll_stable(a, b), ref_unroll_stable(a, b));
+      checkNear("unroll_stable", sf_unroll_stable(a, b), ref_unroll_stable(a, b));
     }
   }
 
-  std::printf(failures == 0 ? "\nALL LOOP-UNROLL-INLINE CHECKS PASSED\n"
-                            : "\n%d LOOP-UNROLL-INLINE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("LOOP-UNROLL-INLINE");
 }

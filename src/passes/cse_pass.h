@@ -12,6 +12,7 @@ class CSEPass : public Pass {
  public:
   std::string name() const override { return "CSE"; }
   void run(IRModule& module) override;
+  bool crossesStatements() const override { return true; }
 };
 
 inline std::unique_ptr<Pass> createCSEPass() { return std::make_unique<CSEPass>(); }

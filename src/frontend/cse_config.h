@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../ir/opcode.h"
 #include "token.h"
 
 namespace cse {
@@ -55,6 +56,20 @@ struct CSEConfig {
   // `const T*`, which promises only that the pointee is not written *through
   // that pointer*. See IRBuilder::isReadOnlyRoot.
   bool noAlias = false;
+
+  // Assume an operand whose numeric kind cannot be proven (a load, a call, a
+  // template-dependent member) is floating. Only the zero identities read it:
+  // `x * 0`, `x - x` and `0 / x` replace the whole expression with a constant,
+  // and that constant has to carry the expression's kind -- emitting an integer
+  // `0` for a double product turns an enclosing `/ 4` into integer division.
+  // When the kind is unprovable and this is false the identity is skipped, which
+  // keeps the result correct but leaves the expression in place.
+  //
+  // Off by default: a generic C++ caller may feed integer arithmetic, where
+  // `(0 * x + 2) / 4` is 0 and must not become 0.5. A project whose fields are
+  // all floating (FreeLB sets it) recovers the fold for `0 * cell[i]`, whose
+  // zero coefficient is an *integer* literal.
+  bool assumeFloatOperands = false;
 
   // Predicate deciding whether a function call is pure (no side effects, result
   // depends only on arguments). Unknown calls are treated as impure. A built-in
@@ -113,7 +128,7 @@ struct CSEConfig {
   // operand lane counts. Writes the FLOP cost to `flops` and returns the
   // result lane count (0/1 = scalar). When null, a binary op costs 1 FLOP and
   // is scalar.
-  std::function<int(char op, int aLanes, int bLanes, long long& flops)>
+  std::function<int(OpCode op, int aLanes, int bLanes, long long& flops)>
       binaryOpCost = nullptr;
 };
 

@@ -14,7 +14,8 @@
 // (1)-(2): the unroller's statement clone dropped `AssignIR::compoundOp`, so
 // `out[i] += x` unrolled to `out[i] = x` -- the read of the old value was lost.
 //
-// (3)-(4): the unroller's inlinability test asked only `!hasImpureCall`, which
+// (3)-(4): the unroller's inlinability test asked only whether the initializer
+// contained an impure call, which
 // does not see a non-shareable load (an element/member read through a root that
 // may be written). The local was deleted and its load moved to each use, past
 // the intervening store, so the sum read the zeroed array.

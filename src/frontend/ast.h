@@ -92,7 +92,11 @@ struct Stmt {
   // Assignment / VarDecl
   std::string varName;
   std::unique_ptr<Expr> rhs;
-  std::string varType;  // for VarDecl
+  std::string varType;  // for VarDecl (includes array bounds, e.g. "double [8]")
+  // Array-declarator bounds for a VarDecl ("[8]", "[]", "[4][8]"), or empty for
+  // a scalar. Kept separately so the codegen can spell the declaration the way
+  // C does -- `double arr[8]`, not `double [8] arr`.
+  std::string arrayBounds;
 
   // VarDecl initializer
   std::unique_ptr<Expr> init;

@@ -3,8 +3,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../analysis/effects.h"
+#include "../analysis/purity.h"
 #include "../ir/ir_module.h"
 #include "../ir/ir_utils.h"
+#include "../ir/location.h"
 #include "../ir/statement.h"
 #include "../ir/stmt_walk.h"
 
@@ -12,8 +15,9 @@ namespace cse {
 
 namespace {
 
-// (The side-effect test and the use count both come from ir_utils.h; they used
-// to be private copies here and in loop_unroll, which is how they drifted.)
+// (The side-effect test, the use count and the owned-storage test all come from
+// the shared modules; they used to be private copies here and in loop_unroll,
+// which is how they drifted.)
 
 // Every name the function introduces itself *as private storage*: value
 // parameters plus local declarations.
@@ -36,9 +40,10 @@ namespace {
 // object and `double& r = v; r = 1.0;` writes whatever `r` binds. Both were
 // treated as owned, so the store looked dead and was deleted. A pointer is
 // different -- reassigning the pointer itself only changes the local copy, so
-// it stays owned.
+// it stays owned. `classifyDeclaredType` (ir/location.h) owns the classification;
+// only the *reference* class names storage this function does not own.
 bool isPrivateStorage(const std::string& type) {
-  return type.find('&') == std::string::npos;
+  return classifyDeclaredType(type) != AliasClass::Reference;
 }
 
 void collectDeclared(const StmtIR* stmt, std::unordered_set<std::string>& out) {
@@ -65,9 +70,44 @@ void collectDeclared(const StmtIR* stmt, std::unordered_set<std::string>& out) {
       collectDeclared(ie->elseBranch.get(), out);
       return;
     }
-    default:
+    // These kinds declare nothing. Listed rather than defaulted so that a new
+    // StmtIRKind is a compile error here instead of silently doing nothing (see
+    // the note on StmtIRKind in statement.h).
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::Return:
       return;
   }
+}
+
+// How many statements does this tree contain? The structural bound for DCE's
+// fixpoint: every productive round removes at least one statement.
+int countStmts(const StmtIR* stmt) {
+  if (!stmt) return 0;
+  switch (stmt->kind) {
+    case StmtIRKind::Block: {
+      int n = 1;
+      for (const auto& s : static_cast<const BlockIR*>(stmt)->stmts)
+        n += countStmts(s.get());
+      return n;
+    }
+    case StmtIRKind::ForLoop: {
+      const auto* f = static_cast<const ForLoopIR*>(stmt);
+      return 1 + countStmts(f->init.get()) + countStmts(f->body.get());
+    }
+    case StmtIRKind::IfElse: {
+      const auto* ie = static_cast<const IfElseIR*>(stmt);
+      return 1 + countStmts(ie->thenBranch.get()) +
+             countStmts(ie->elseBranch.get());
+    }
+    // A leaf statement.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::VarDecl:
+    case StmtIRKind::Return:
+      return 1;
+  }
+  return 0;
 }
 
 std::unordered_set<std::string> ownedLocals(const IRModule& module) {
@@ -82,6 +122,42 @@ std::unordered_set<std::string> ownedLocals(const IRModule& module) {
   return owned;
 }
 
+// Recurse into a nested statement so its block gets the same pruning. Only the
+// block shapes carry statements; a loop's init shares the enclosing scope and
+// its body is a block of its own.
+bool pruneBlock(BlockIR* block,
+                const std::unordered_map<std::string, int>& reads,
+                const LocationSet& written,
+                const std::unordered_set<std::string>& owned);
+
+bool pruneNested(StmtIR* s,
+                 const std::unordered_map<std::string, int>& reads,
+                 const LocationSet& written,
+                 const std::unordered_set<std::string>& owned) {
+  if (!s) return false;
+  switch (s->kind) {
+    case StmtIRKind::Block:
+      return pruneBlock(static_cast<BlockIR*>(s), reads, written, owned);
+    case StmtIRKind::ForLoop:
+      return pruneNested(static_cast<ForLoopIR*>(s)->body.get(), reads, written,
+                         owned);
+    case StmtIRKind::IfElse: {
+      auto* ie = static_cast<IfElseIR*>(s);
+      bool changed = pruneNested(ie->thenBranch.get(), reads, written, owned);
+      if (pruneNested(ie->elseBranch.get(), reads, written, owned)) changed = true;
+      return changed;
+    }
+    // These kinds introduce no nested scope. Listed explicitly so a new
+    // StmtIRKind is a compile error here rather than a silently missed scope.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::VarDecl:
+    case StmtIRKind::Return:
+      return false;
+  }
+  return false;
+}
+
 // Remove dead statements from a block. Returns true if any were removed.
 //
 // `reads` counts variable *occurrences*, so it says nothing about a name that is
@@ -91,7 +167,7 @@ std::unordered_set<std::string> ownedLocals(const IRModule& module) {
 // otherwise the surviving store would refer to a variable that no longer exists.
 bool pruneBlock(BlockIR* block,
                 const std::unordered_map<std::string, int>& reads,
-                const std::unordered_set<std::string>& written,
+                const LocationSet& written,
                 const std::unordered_set<std::string>& owned) {
   bool changed = false;
   auto it = block->stmts.begin();
@@ -104,9 +180,9 @@ bool pruneBlock(BlockIR* block,
       bool isZeroInit = !decl->init ||
                         (decl->init->kind == NodeKind::Constant && decl->init->constVal == 0);
       auto rit = reads.find(decl->name);
-      if (isZeroInit && !hasSideEffect(decl->init) &&
+      if (isZeroInit && !hasObservableEffect(decl->init) &&
           (rit == reads.end() || rit->second == 0) &&
-          !written.count(decl->name))
+          !written.containsRoot(decl->name))
         remove = true;
     } else if ((*it)->kind == StmtIRKind::Assign) {
       auto* assign = static_cast<AssignIR*>(it->get());
@@ -123,7 +199,7 @@ bool pruneBlock(BlockIR* block,
       auto rit = reads.find(assign->target);
       if (!assign->targetExpr && owned.count(assign->target) &&
           (rit == reads.end() || rit->second == 0) &&
-          !hasSideEffect(assign->value))
+          !hasObservableEffect(assign->value))
         remove = true;
     }
     if (remove) {
@@ -132,6 +208,20 @@ bool pruneBlock(BlockIR* block,
     } else {
       ++it;
     }
+  }
+
+  // Recurse into nested scopes. A nested `if` / `for` body / bare `{ }` is a
+  // separate block whose own statements were never visited: a dead declaration
+  // or a dead store to a private local inside one survived every round. Cleanup
+  // already recurses (`pruneNested`); DCE did not, so the two disagreed about
+  // what "dead code" means.
+  //
+  // `reads` and `written` are whole-function sets, so reusing them for a nested
+  // block is conservative: a declaration is removed only when nothing anywhere
+  // in the function reads it and nothing writes it. Names are alpha-renamed per
+  // scope by the builder, so two scopes cannot share one by accident.
+  for (auto& s : block->stmts) {
+    if (pruneNested(s.get(), reads, written, owned)) changed = true;
   }
   return changed;
 }
@@ -147,15 +237,25 @@ void DCEPass::run(IRModule& module) {
   // never introduces a declaration.
   const std::unordered_set<std::string> owned = ownedLocals(module);
 
+  // Reference aliases for the whole function: a write through a reference local
+  // also writes its referent (ir/location.h).
+  AliasInfo aliases = AliasInfo::build(module.body.get());
+
   // Iterate until no more dead code is found. `reads` and `written` are
   // recomputed each round, so a declaration blocked only by a store that this
   // round removes is freed in the next one and the two converge.
-  for (int iter = 0; iter < 10; ++iter) {
+  //
+  // The bound is structural, not a magic constant: every productive round
+  // removes at least one statement, so the statement count bounds the rounds.
+  // The old cap of 10 could stop early on a long dead chain, leaving work that
+  // a second run would finish (the output then depended on how many times the
+  // pipeline ran).
+  const int maxRounds = 1 + countStmts(module.body.get());
+  for (int iter = 0; iter < maxRounds; ++iter) {
     std::unordered_map<std::string, int> reads;
     forEachExprDeep(module.body.get(),
-                    [&](DAGNode*& e) { countVarUses(e, reads); });
-    std::unordered_set<std::string> written;
-    collectWrittenNames(module.body.get(), written);
+                    [&](DAGNode*& e) { countReadNames(e, reads); });
+    LocationSet written = aliases.writtenBy(module.body.get());
     if (pruneBlock(static_cast<BlockIR*>(module.body.get()), reads, written,
                    owned)) {
       continue;

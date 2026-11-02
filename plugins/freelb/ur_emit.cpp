@@ -18,7 +18,7 @@
 #include "ir/ir_builder.h"
 #include "ir/ir_module.h"
 #include "lattice_resolve.h"
-#include "passes/counter_prop.h"
+#include "counter_prop.h"
 #include "passes/pass_manager.h"
 
 namespace cse {
@@ -40,29 +40,6 @@ const LatSetDef kLatsets[] = {
 std::string baseName(const std::string& path) {
   size_t slash = path.find_last_of("/\\");
   return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
-// Accept `// @cse`, `//  @cse` and `//@cse` uniformly.
-std::string normalizeMarkers(const std::string& src) {
-  std::string out;
-  out.reserve(src.size());
-  std::istringstream iss(src);
-  std::string line;
-  bool first = true;
-  while (std::getline(iss, line)) {
-    size_t p = line.find("//");
-    if (p != std::string::npos) {
-      size_t q = p + 2;
-      while (q < line.size() && (line[q] == ' ' || line[q] == '\t')) ++q;
-      if (line.compare(q, 4, "@cse") == 0) {
-        line = line.substr(0, p) + "//@cse";
-      }
-    }
-    if (!first) out += "\n";
-    first = false;
-    out += line;
-  }
-  return out;
 }
 
 // Copy the leading C-style license block, if any.
@@ -172,8 +149,13 @@ bool generateUrHeader(const std::string& inputPath,
   ifs.close();
 
   UrConfig cfg = detectUrConfig(inputPath);
-  std::string normalized = normalizeMarkers(source);
-  auto regions = RegionExtractor().extract(normalized);
+  // Marker recognition lives only in the region extractor (it accepts `//@cse`
+  // and `// @cse` alike). There used to be a `normalizeMarkers` rewrite here
+  // that searched for the first `//` on each line -- so a `// @cse` inside a
+  // string literal truncated the literal and the region failed to parse. The
+  // same duplicate pass was already removed from the `cse` driver; this is the
+  // last copy.
+  auto regions = RegionExtractor().extract(source);
   if (regions.empty()) {
     std::cerr << "csegen: no // @cse markers in " << inputPath << "\n";
     return false;
@@ -224,6 +206,18 @@ bool generateUrHeader(const std::string& inputPath,
     if (wantLattice(l.name)) ++latCount;
 
   for (const auto& region : regions) {
+    // A directive inside the region cannot be regenerated: the parsed AST has
+    // no directive node, so emitting from it would delete the guard and
+    // resurrect the code it protects (`#if 0` becoming live in a `.ur.h`).
+    // csegen has no passthrough mode -- it either emits a specialization or
+    // fails -- so it refuses the whole run and names the line.
+    if (region.hasDirectives) {
+      std::cerr << inputPath << ":" << region.startLine
+                << ": preprocessor directive in a //@cse region (not modelled "
+                   "by the frontend); csegen cannot specialize this header\n";
+      return false;
+    }
+
     CSEConfig parseCfg = createFreeLBConfig();
     Parser::ParseResult parsed;
     try {

@@ -22,50 +22,23 @@ void CodeGen::emitTemplateParams(const std::vector<TemplateParam>& params) {
   _out << ">\n";
 }
 
-// Binary-operator precedence. Higher binds tighter. `O`/`A` are logical
-// `||`/`&&` (their own op codes, so they can never be printed as the bitwise
-// `|`/`&`). `=` is lowest. Unknown codes are treated as the loosest so their
-// children are parenthesized rather than silently regrouped.
-static int getPrecedence(char op) {
-  switch (op) {
-    case '=':
-      return 1;
-    case 'O':
-      return 3;  // ||
-    case 'A':
-      return 4;  // &&
-    case 'e':
-    case 'n':
-      return 5;  // == !=
-    case '<':
-    case '>':
-    case 'l':
-    case 'g':
-      return 6;  // < > <= >=
-    case '+':
-    case '-':
-      return 7;
-    case '*':
-    case '/':
-    case '%':
-      return 8;
-    default:
-      return 0;
-  }
-}
-
 // Precedence of a whole expression node when it appears as an operand. Unary
 // operators and casts bind tighter than any binary operator; primary
-// expressions (variables, calls, subscripts, members) bind tightest.
+// expressions (variables, calls, subscripts, members) bind tightest. The
+// binary-operator precedence itself is a property of the OpCode (opcode.h).
 static int exprPrecedence(const DAGNode* n) {
   switch (n->kind) {
     case NodeKind::BinaryOp:
-      return getPrecedence(n->op);
+      return opPrecedence(n->op);
     case NodeKind::Ternary:
       return 2;
     case NodeKind::Cast:
     case NodeKind::UnaryOp:
-      return 9;
+      // Higher than every binary operator, including the multiplicative level
+      // (12): `2.0 * ++y` must print without parentheses. Kept one above the
+      // highest binary precedence so adding a level (`<<`/`>>`) does not
+      // silently start parenthesizing every operand of the top binary level.
+      return 13;
     default:
       return 100;
   }
@@ -80,19 +53,6 @@ static std::string parenthesizePostfixBase(const DAGNode* base,
   return text;
 }
 
-// Map the internal operator encoding back to C++ spelling.
-static std::string opText(char op) {
-  switch (op) {
-    case 'e': return "==";
-    case 'n': return "!=";
-    case 'l': return "<=";
-    case 'g': return ">=";
-    case 'O': return "||";
-    case 'A': return "&&";
-    default: return std::string(1, op);
-  }
-}
-
 // Whether `child` must be wrapped in parentheses as an operand of a binary
 // operator with precedence `parentPrec`.
 //
@@ -102,11 +62,11 @@ static std::string opText(char op) {
 // become `a - b - c`); `=` is right-associative, so the reverse holds. This
 // also keeps `a * (b * c)` parenthesized, which matters under IEEE-754.
 static bool childNeedsParens(const DAGNode* child, int parentPrec,
-                             bool isRightChild, char parentOp) {
+                             bool isRightChild, OpCode parentOp) {
   int cp = exprPrecedence(child);
   if (cp < parentPrec) return true;
   if (cp > parentPrec) return false;
-  if (parentOp == '=') return !isRightChild;
+  if (parentOp == OpCode::Assign) return !isRightChild;
   return isRightChild;
 }
 
@@ -212,19 +172,18 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
       _out << "; ";
       if (forLoop->update) {
         _out << emitExpr(forLoop->update);
-        if (forLoop->updateOp == '=' && forLoop->updateRhs) {
+        if (forLoop->updateOp == OpCode::Assign && forLoop->updateRhs) {
           _out << " = " << emitExpr(forLoop->updateRhs);
-        } else if (forLoop->updateOp == '+' && forLoop->updateRhs) {
-          _out << " += " << emitExpr(forLoop->updateRhs);
-        } else if (forLoop->updateOp == '-' && forLoop->updateRhs) {
-          _out << " -= " << emitExpr(forLoop->updateRhs);
-        } else if (forLoop->updateOp == '*' && forLoop->updateRhs) {
-          _out << " *= " << emitExpr(forLoop->updateRhs);
-        } else if (forLoop->updateOp == '/' && forLoop->updateRhs) {
-          _out << " /= " << emitExpr(forLoop->updateRhs);
-        } else if (forLoop->updateOp == '+') {
+        } else if (forLoop->updateOp != OpCode::None &&
+                   forLoop->updateOp != OpCode::Assign &&
+                   forLoop->updateRhs) {
+          // A compound update (`i += k`, `i -= k`, ...): the spelling is the
+          // base operator plus '='.
+          _out << " " << opSpelling(forLoop->updateOp) << "= "
+               << emitExpr(forLoop->updateRhs);
+        } else if (forLoop->updateOp == OpCode::Inc) {
           _out << "++";
-        } else if (forLoop->updateOp == '-') {
+        } else if (forLoop->updateOp == OpCode::Dec) {
           _out << "--";
         }
       }
@@ -265,7 +224,22 @@ void CodeGen::emitStmt(StmtIR* stmt, int indentLevel) {
     }
     case StmtIRKind::VarDecl: {
       auto* decl = static_cast<VarDeclIR*>(stmt);
-      _out << ind << decl->type << " " << decl->name;
+      // `double arr[8]`, not `double [8] arr`: the bounds follow the name in
+      // C++ declarator syntax. The declared type carries the bounds verbatim
+      // ("double [8]"), so the base type is the text before the first `[` --
+      // every analysis (classifyDeclaredType) reads the type that way, and the
+      // emitter is the one place that has to split it apart.
+      std::string baseType = decl->type;
+      if (!decl->arrayBounds.empty()) {
+        const size_t lb = baseType.find('[');
+        if (lb != std::string::npos) baseType = baseType.substr(0, lb);
+        // Trailing space from "double " prefixes is harmless; trim it so the
+        // emission stays byte-identical to the source spelling.
+        while (!baseType.empty() && baseType.back() == ' ') baseType.pop_back();
+        _out << ind << baseType << " " << decl->name << decl->arrayBounds;
+      } else {
+        _out << ind << baseType << " " << decl->name;
+      }
       if (decl->init) {
         _out << " = " << emitExpr(decl->init);
       }
@@ -320,9 +294,14 @@ void CodeGen::emitForInit(StmtIR* stmt) {
       if (es->expr) _out << emitExpr(es->expr);
       break;
     }
-    default:
-      // No other shape is valid in a `for` init; emit nothing rather than
-      // something malformed.
+    // No other shape is valid in a `for` init; emit nothing rather than
+    // something malformed. Listed explicitly so a new StmtIRKind is a compile
+    // error here (and someone decides what it means in a for-init) instead of
+    // silently emitting nothing.
+    case StmtIRKind::ForLoop:
+    case StmtIRKind::IfElse:
+    case StmtIRKind::Block:
+    case StmtIRKind::Return:
       break;
   }
 }
@@ -335,8 +314,8 @@ void CodeGen::emitAssignBody(const AssignIR* assign) {
   } else {
     _out << assign->target;
   }
-  if (assign->compoundOp) {
-    _out << " " << opText(assign->compoundOp) << "= " << emitExpr(assign->value);
+  if (assign->compoundOp != OpCode::None) {
+    _out << " " << opSpelling(assign->compoundOp) << "= " << emitExpr(assign->value);
   } else {
     _out << " = " << emitExpr(assign->value);
   }
@@ -357,7 +336,7 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       std::string lhs = emitExpr(node->operands[0]);
       std::string rhs = emitExpr(node->operands[1]);
 
-      int pp = getPrecedence(node->op);
+      int pp = opPrecedence(node->op);
       bool parenL = childNeedsParens(node->operands[0], pp, false, node->op);
       bool parenR = childNeedsParens(node->operands[1], pp, true, node->op);
 
@@ -368,7 +347,7 @@ std::string CodeGen::emitExpr(DAGNode* node) {
         result += lhs;
 
       result += " ";
-      result += opText(node->op);
+      result += opSpelling(node->op);
       result += " ";
 
       if (parenR)
@@ -396,13 +375,15 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       // literal, which does not compile. The reassociator builds exactly this
       // shape when it pulls a folded negative constant to the front of a sum.
       DAGNode* sub = node->operands[0];
+      const std::string spelling = opSpelling(node->op);
       bool paren = sub->kind == NodeKind::BinaryOp ||
                    sub->kind == NodeKind::Ternary ||
                    sub->kind == NodeKind::UnaryOp ||
-                   ((node->op == '-' || node->op == '+') && !operand.empty() &&
-                    operand[0] == node->op);
+                   ((node->op == OpCode::Neg || node->op == OpCode::Pos) &&
+                    !operand.empty() && !spelling.empty() &&
+                    operand[0] == spelling[0]);
       if (paren) operand = "(" + operand + ")";
-      return std::string(1, node->op) + operand;
+      return spelling + operand;
     }
 
     case NodeKind::ArrayAccess: {
@@ -473,7 +454,7 @@ std::string CodeGen::emitExpr(DAGNode* node) {
       // A cast applies to a unary-expression; a binary or conditional operand
       // has to be parenthesized or the cast binds to its first subterm
       // (`(double)(a + b)` must not print as `(double)a + b`).
-      if (exprPrecedence(node->operands[0]) < 9) operand = "(" + operand + ")";
+      if (exprPrecedence(node->operands[0]) < 12) operand = "(" + operand + ")";
       return "(" + node->name + ")" + operand;
     }
   }

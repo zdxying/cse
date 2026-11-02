@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dag_node.h"
@@ -43,7 +44,15 @@ class IRModule {
 
   // Create a constant node, deduplicated by value so that expressions built
   // around the same literal share a DAG node (enables cross-statement CSE).
+  // The int/float kind is inferred: from `text` when the source spelled the
+  // literal, else from whether `val` is whole.
   DAGNode* createConst(double val, const std::string& text = "");
+
+  // Create a constant node with an explicit int/float kind. The constant folder
+  // uses this to carry the kind across an arithmetic fold (a whole result is
+  // floating when either operand was), where no source spelling remains.
+  DAGNode* createConstTyped(double val, bool isFloat,
+                            const std::string& text = "");
 
   // Create a constant node that carries a symbolic (declared) form for code
   // emission. Deduplicated by value like createConst; if a node with the same
@@ -55,20 +64,46 @@ class IRModule {
   // Get or create variable
   DAGNode* getVar(const std::string& name);
 
+  // ----- Generated names -----
+  //
+  // Every pass that *invents* a name -- the builder's alpha-renaming
+  // (`x__s1`), the unroller's per-iteration locals (`t__u0`), CSE's
+  // materialized temporaries (`_cse_0_7`) -- used to concatenate a suffix and
+  // hope. Nothing checked the result against the names already in the function,
+  // so a user variable called `_cse_0_7` silently became the *same* node as the
+  // extracted temporary (variables are interned by name), and a user parameter
+  // called `t__u0` collided with an unrolled iteration's renamed local.
+  //
+  // `freshName` is the one authority: it returns `base`, `base_1`, `base_2`, ...
+  // -- the first spelling that is neither an existing variable nor reserved --
+  // and reserves it, so two callers can never be handed the same name.
+  std::string freshName(const std::string& base);
+
+  // Reserve `name` so a later freshName() will not hand it out. Used for names
+  // that are not (yet) variable nodes: the builder reserves every identifier it
+  // sees in the source, so a generated name can never collide with a name the
+  // source uses somewhere the pass has not reached yet.
+  void reserveName(const std::string& name);
+
+  // Record the declared numeric kind of a variable. Derived metadata, so this
+  // updates the existing node in place (it is not part of the identity) and
+  // applies to any later getVar() of the same name.
+  void setVarKind(const std::string& name, NumericKind kind);
+
   // ----- Operators -----
 
   // Create a binary op node with CSE (hash-based dedup)
-  DAGNode* createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs);
+  DAGNode* createBinaryOp(OpCode op, DAGNode* lhs, DAGNode* rhs);
 
   // A plain unary operator: `-x`, `!x`. Shared when its operand is.
-  DAGNode* createUnaryOp(char op, DAGNode* operand);
+  DAGNode* createUnaryOp(OpCode op, DAGNode* operand);
 
   // `++x` / `--x`. Carries a side effect, so it is never shared and never
-  // hoisted; the prefix form also yields the new value.
-  DAGNode* createPreIncDec(char op, DAGNode* operand);
+  // hoisted; the prefix form also yields the new value. `op` is Inc / Dec.
+  DAGNode* createPreIncDec(OpCode op, DAGNode* operand);
 
   // `x++` / `x--`. As above, but yields the old value.
-  DAGNode* createPostIncDec(char op, DAGNode* operand);
+  DAGNode* createPostIncDec(OpCode op, DAGNode* operand);
 
   // `(typeName)operand`.
   DAGNode* createCast(const std::string& typeName, DAGNode* operand);
@@ -118,8 +153,8 @@ class IRModule {
   // otherwise, and returns the candidate unregistered when it is not shareable.
   DAGNode* intern(DAGNode* candidate);
 
-  DAGNode* createUnaryOpImpl(char op, DAGNode* operand, const std::string& name,
-                             bool postfix, bool pure);
+  DAGNode* createUnaryOpImpl(OpCode op, DAGNode* operand,
+                             const std::string& name, bool postfix, bool pure);
 
   // Node pool - owns all DAG nodes
   std::vector<std::unique_ptr<DAGNode>> _node_pool;
@@ -131,7 +166,33 @@ class IRModule {
   // Variable cache: name → node
   std::unordered_map<std::string, DAGNode*> _var_cache;
 
+  // Every name freshName() must not return: the variable cache plus names
+  // reserved explicitly (see reserveName).
+  std::unordered_set<std::string> _reserved_names;
+
+  // Declared numeric kind per variable name (see setVarKind).
+  std::unordered_map<std::string, NumericKind> _var_kinds;
+
   uint32_t _next_node_id = 0;
 };
+
+// Classify a declared C++ type by numeric kind. Understands the spellings the
+// frontend accepts ("double", "float", "int", "unsigned", "long", "size_t",
+// "bool", with const/static/inline/volatile and a trailing '&'). A pointer type
+// and any template/vector type are Unknown: a pointer's kind is not the kind of
+// what it points at, and a vector's elements are lowered separately.
+NumericKind numericKindOfType(const std::string& type);
+
+// The numeric kind a node's own shape implies, or its stored kind when the shape
+// carries no rule (a variable's kind comes from its declaration, a load's from
+// the type of what it denotes).
+//
+// `numKind` is derived metadata, not part of node identity (dag_node.h), so the
+// factories compute it from the operands and nothing should ever *change* it
+// behind the operands' backs. IRModule::verify() holds every owned node to this
+// rule, which is what turns a stale kind -- a parent built before its operand's
+// declaration was seen, or a renamed variable that lost its type -- into a check
+// failure instead of a silent capability gap.
+NumericKind impliedNumericKind(const DAGNode* n);
 
 }  // namespace cse

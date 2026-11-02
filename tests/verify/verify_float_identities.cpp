@@ -13,19 +13,12 @@
 #include <cstdio>
 
 #include "float_identities.cpp.cse"
-
-static int failures = 0;
+#include "harness.h"
 
 static void checkNaN(const char* name, double got) {
   bool ok = std::isnan(got);
   if (!ok) failures++;
   std::printf("%-18s got=%.6f want=NaN  %s\n", name, got, ok ? "OK" : "FAIL");
-}
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-18s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
 }
 
 // Zero compares equal regardless of sign, so the sign has to be inspected
@@ -60,8 +53,11 @@ int main() {
   check("x+0 at 3", add_zero(3.0), 3.0);
   check("0-x at 3", zero_minus(3.0), -3.0);
 
-  std::printf(failures == 0 ? "\nALL FLOAT-IDENTITY CHECKS PASSED\n"
-                            : "\n%d FLOAT-IDENTITY CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  // The chained-additive merge is a signed-zero identity as well: it drops the
+  // accumulator's leading zero. `y = 0.0; y = y + a; y = y + a;` at a = -0.0 is
+  // (0.0 + -0.0) + -0.0 = +0.0, while the merged `y = a + a` would be -0.0.
+  checkZeroSign("chain at -0", cleanup_chain(-0.0), false);
+  check("chain at 3", cleanup_chain(3.0), 6.0);
+
+  return finish("FLOAT-IDENTITY");
 }

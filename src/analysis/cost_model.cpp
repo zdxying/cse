@@ -21,8 +21,9 @@ namespace {
 // product-of-trips estimate (documented approximation).
 constexpr long long kMaxEnum = 1000000;
 
-bool isFlop(char op) {
-  return op == '+' || op == '-' || op == '*' || op == '/';
+bool isFlop(OpCode op) {
+  return op == OpCode::Add || op == OpCode::Sub || op == OpCode::Mul ||
+         op == OpCode::Div;
 }
 
 std::string calleeName(DAGNode* call) {
@@ -54,8 +55,8 @@ std::optional<long long> evalConst(DAGNode* n,
       if (n->operands.size() != 1) return std::nullopt;
       auto v = evalConst(n->operands[0], env);
       if (!v) return std::nullopt;
-      if (n->op == '-') return -*v;
-      if (n->op == '+') return *v;
+      if (n->op == OpCode::Neg) return -*v;
+      if (n->op == OpCode::Pos) return *v;
       return std::nullopt;
     }
     case NodeKind::BinaryOp: {
@@ -64,10 +65,11 @@ std::optional<long long> evalConst(DAGNode* n,
       auto b = evalConst(n->operands[1], env);
       if (!a || !b) return std::nullopt;
       switch (n->op) {
-        case '+': return *a + *b;
-        case '-': return *a - *b;
-        case '*': return *a * *b;
-        case '/': return *b == 0 ? std::nullopt : std::optional<long long>(*a / *b);
+        case OpCode::Add: return *a + *b;
+        case OpCode::Sub: return *a - *b;
+        case OpCode::Mul: return *a * *b;
+        case OpCode::Div:
+          return *b == 0 ? std::nullopt : std::optional<long long>(*a / *b);
         default: return std::nullopt;
       }
     }
@@ -158,7 +160,7 @@ class LaneAnalyzer {
     }
   }
 
-  int binLanes(char op, int a, int b, long long& flops) {
+  int binLanes(OpCode op, int a, int b, long long& flops) {
     if (_cfg && _cfg->binaryOpCost) return _cfg->binaryOpCost(op, a, b, flops);
     flops = 1;
     return 0;
@@ -191,14 +193,13 @@ bool recognizeLoop(ForLoopIR* f, LoopDesc& d) {
   if (!f->cond || f->cond->kind != NodeKind::BinaryOp ||
       f->cond->operands.size() != 2)
     return false;
-  // The parser encodes comparison operators as single chars: '<', '>', and
-  // 'l'/'g' for '<=' / '>=' (see Parser::parseComparison).
+  // The comparison decides the direction: `<`/`<=` count up, `>`/`>=` down.
   bool descending;
   switch (f->cond->op) {
-    case '<': descending = false; d.inclusive = false; break;
-    case 'l': descending = false; d.inclusive = true; break;
-    case '>': descending = true; d.inclusive = false; break;
-    case 'g': descending = true; d.inclusive = true; break;
+    case OpCode::Lt: descending = false; d.inclusive = false; break;
+    case OpCode::Le: descending = false; d.inclusive = true; break;
+    case OpCode::Gt: descending = true; d.inclusive = false; break;
+    case OpCode::Ge: descending = true; d.inclusive = true; break;
     default: return false;
   }
   DAGNode* lhs = f->cond->operands[0];
@@ -206,7 +207,10 @@ bool recognizeLoop(ForLoopIR* f, LoopDesc& d) {
   if (!(lhs->kind == NodeKind::Variable && lhs->name == d.var)) return false;
   d.bound = rhs;
 
-  // update: ++i / i++ (updateOp '+', no rhs) / i += k / --i / i -= k
+  // update: ++i / i++ / i += k / --i / i-- / i -= k. A prefix `++i` arrives as
+  // an Inc unary node; a postfix `i++` is normalized to `update = i` with
+  // updateOp Inc (no rhs); a compound `i += k` is `update = i` with updateOp
+  // Add and updateRhs k.
   long long step = 0;
   if (f->update && f->update->kind == NodeKind::UnaryOp &&
       (f->update->name == "++" || f->update->name == "--") &&
@@ -216,13 +220,15 @@ bool recognizeLoop(ForLoopIR* f, LoopDesc& d) {
     step = (f->update->name == "++") ? 1 : -1;
   } else if (f->update && f->update->kind == NodeKind::Variable &&
              f->update->name == d.var &&
-             (f->updateOp == '+' || f->updateOp == '-')) {
+             (f->updateOp == OpCode::Inc || f->updateOp == OpCode::Dec ||
+              f->updateOp == OpCode::Add || f->updateOp == OpCode::Sub)) {
     long long k = 1;
     if (f->updateRhs) {
       if (f->updateRhs->kind != NodeKind::Constant) return false;
       k = static_cast<long long>(f->updateRhs->constVal);
     }
-    step = (f->updateOp == '-') ? -k : k;
+    bool down = f->updateOp == OpCode::Dec || f->updateOp == OpCode::Sub;
+    step = down ? -k : k;
   } else {
     return false;
   }
@@ -246,6 +252,7 @@ class CostAnalyzer {
       inferVarLanes(module.body.get());
       _lanes.resetMemo();
       stmt(module.body.get());
+      charge();
     }
     return _result;
   }
@@ -290,14 +297,39 @@ class CostAnalyzer {
         inferVarLanes(ie->elseBranch.get());
         break;
       }
-      default:
+      // These kinds introduce no declaration whose lane count could be
+      // inferred. Listed so a new StmtIRKind is a compile error here.
+      case StmtIRKind::ExprStmt:
+      case StmtIRKind::Return:
         break;
     }
   }
 
   long long factor() { return execCount(); }
 
+  // Count an unresolved loop extent once per loop statement. `execCount()` runs
+  // per statement slot (condition, update, body, ...), and a large nest reports
+  // overflow from every one of them; the field counts *distinct constructs*
+  // (cost_model.h), so the innermost loop currently on the stack is remembered.
+  void markUnknownLoop() {
+    // The depth identifies "we are in the same loop nest"; a later, sibling
+    // loop at the same depth must still be counted, so the key also carries the
+    // loop's variable name (unique per statement — even when two loops reuse a
+    // spelling, the unroller has already renamed them apart).
+    std::string key =
+        std::to_string(_stack.size()) + ":" +
+        (_stack.empty() ? std::string() : _stack.back().var);
+    if (_reportedUnknown.insert(key).second) _result.unknownLoops++;
+  }
+
   // Number of executions of the current loop context.
+  //
+  // Returns a *lower bound* when the nest is too large to enumerate: the model
+  // documents `flops` as a lower bound whenever `unknownLoops` is non-zero
+  // (cost_model.h), and a truncated product is exactly that. What it must not do
+  // is return the truncated product *without* flagging it -- `for (i < 2e6)` was
+  // reported as 2 flops with `unknownLoops = 0`, a number that is neither the
+  // real cost nor labelled as an approximation.
   long long execCount() {
     if (_stack.empty()) return 1;
 
@@ -335,8 +367,17 @@ class CostAnalyzer {
         outer.insert(d.var);
       }
     }
-    if (!dependent) return est;
-    if (overflow) return est;  // approximation for very large dependent nests
+    if (!dependent) {
+      if (overflow) markUnknownLoop();
+      return est;
+    }
+    if (overflow) {
+      // A dependent nest too large to enumerate. `est` is a partial product, so
+      // it is a lower bound; report it as an unresolved loop so the CLI's
+      // "flops is a lower bound" note fires.
+      markUnknownLoop();
+      return est;
+    }
 
     // Small dependent (e.g. triangular) nest: enumerate exactly.
     std::unordered_map<std::string, long long> env;
@@ -369,12 +410,91 @@ class CostAnalyzer {
     return false;
   }
 
-  void expr(DAGNode* n) {
-    if (!n || _visited.count(n)) return;
-    _visited.insert(n);
-    long long f = factor();
-    _result.totalNodes++;
+  // ---- per-reference cost ------------------------------------------------
+  //
+  // Each *reference* to a node is charged, not each distinct node: codegen
+  // re-prints a shared (unmaterialized) node at every use site, while a
+  // CSE-materialized temporary reaches the IR as a single definition (its own
+  // VarDecl) whose uses are cheap Variable references -- so counting by
+  // reference occurrence is exact in both cases. `totalNodes` still reports
+  // the distinct-node count.
+  //
+  // A statement's expression slot is one reference per execution of the
+  // statement's loop context; a node's operand slot is one reference per
+  // reference to the node. Multiplicity therefore propagates multiplicatively
+  // down the DAG. The sub-DAG is walked once in topological order so a shared
+  // subgraph is expanded arithmetically rather than re-traversed.
 
+  // A statement's expression slot: `n` is referenced once per execution of the
+  // statement's loop context.
+  void addRoot(DAGNode* n, long long m) {
+    if (!n) return;
+    _rootContrib[n] += m;
+  }
+
+  // The operand slots `expr` would descend into. The call callee (operands[0])
+  // is skipped, matching the old traversal.
+  static void collectChildren(DAGNode* n, std::vector<DAGNode*>& out) {
+    switch (n->kind) {
+      case NodeKind::BinaryOp:
+      case NodeKind::UnaryOp:
+      case NodeKind::ArrayAccess:
+      case NodeKind::MemberAccess:
+      case NodeKind::ArrowAccess:
+      case NodeKind::Ternary:
+      case NodeKind::Cast:
+        for (auto* op : n->operands)
+          if (op) out.push_back(op);
+        break;
+      case NodeKind::Call:
+        for (size_t i = 1; i < n->operands.size(); ++i)
+          if (n->operands[i]) out.push_back(n->operands[i]);
+        break;
+      default:
+        break;
+    }
+  }
+
+  void charge() {
+    // Enumerate the reachable sub-DAG and its operand slots (edges).
+    std::unordered_map<DAGNode*, std::vector<DAGNode*>> kids;
+    std::unordered_map<DAGNode*, long long> indeg;
+    std::vector<DAGNode*> stack;
+    for (auto& kv : _rootContrib) stack.push_back(kv.first);
+    while (!stack.empty()) {
+      DAGNode* n = stack.back();
+      stack.pop_back();
+      if (kids.count(n)) continue;
+      std::vector<DAGNode*> ch;
+      collectChildren(n, ch);
+      for (DAGNode* c : ch) {
+        indeg[c]++;
+        if (!kids.count(c)) stack.push_back(c);
+      }
+      kids[n] = std::move(ch);
+    }
+
+    // Parents-before-children order (Kahn): a node's multiplicity is final by
+    // the time it is charged and propagated to its operand slots.
+    std::unordered_map<DAGNode*, long long> mult;
+    for (auto& kv : _rootContrib) mult[kv.first] = kv.second;
+    std::vector<DAGNode*> queue;
+    for (auto& kv : kids)
+      if (indeg[kv.first] == 0) queue.push_back(kv.first);
+    for (size_t head = 0; head < queue.size(); ++head) {
+      DAGNode* n = queue[head];
+      long long m = mult[n];
+      for (DAGNode* c : kids[n]) {
+        mult[c] += m;
+        if (--indeg[c] == 0) queue.push_back(c);
+      }
+    }
+
+    for (auto& kv : kids) chargeNode(kv.first, mult[kv.first]);
+  }
+
+  void chargeNode(DAGNode* n, long long m) {
+    _result.totalNodes++;
     switch (n->kind) {
       case NodeKind::BinaryOp: {
         int a = _lanes.lanes(n->operands.size() > 0 ? n->operands[0] : nullptr);
@@ -384,26 +504,27 @@ class CostAnalyzer {
           if (_cfg && _cfg->binaryOpCost) {
             _cfg->binaryOpCost(n->op, a, b, flops);
           }
-          _result.flops += flops * f;
-          if (a > 0 || b > 0) _result.vectorOps++;
+          _result.flops += flops * m;
+          if (a > 0 || b > 0) _result.vectorOps += m;
         }
-        for (auto* op : n->operands) expr(op);
         break;
       }
       case NodeKind::UnaryOp: {
-        if (n->op == '+' || n->op == '-') {
+        // A unary `+`/`-` and an increment/decrement each cost one operation:
+        // `++x` is one addition of 1, `--x` one subtraction. (`!`/`~` are not
+        // floating-point work and are not charged.)
+        if (n->op == OpCode::Pos || n->op == OpCode::Neg ||
+            isIncDecOp(n->op)) {
           int a = _lanes.lanes(n->operands.empty() ? nullptr : n->operands[0]);
-          _result.flops += (a > 0 ? a : 1) * f;
-          if (a > 0) _result.vectorOps++;
+          _result.flops += (a > 0 ? a : 1) * m;
+          if (a > 0) _result.vectorOps += m;
         }
-        for (auto* op : n->operands) expr(op);
         break;
       }
       case NodeKind::ArrayAccess:
       case NodeKind::MemberAccess:
       case NodeKind::ArrowAccess:
-        _result.memOps += f;
-        for (auto* op : n->operands) expr(op);
+        _result.memOps += m;
         break;
       case NodeKind::Call: {
         std::vector<int> argLanes;
@@ -412,18 +533,12 @@ class CostAnalyzer {
         if (_cfg && _cfg->callCost) {
           long long c = _cfg->callCost(calleeName(n), argLanes);
           if (c < 0)
-            _result.unmodeledCalls++;
+            _result.unmodeledCalls++;  // distinct unmodeled call nodes
           else
-            _result.flops += c * f;
+            _result.flops += c * m;
         }
-        // Skip operands[0] (the callee); recurse into arguments only.
-        for (size_t i = 1; i < n->operands.size(); ++i) expr(n->operands[i]);
         break;
       }
-      case NodeKind::Ternary:
-      case NodeKind::Cast:
-        for (auto* op : n->operands) expr(op);
-        break;
       default:
         break;
     }
@@ -433,7 +548,7 @@ class CostAnalyzer {
     if (!target) return;
     _result.memOps += factor();
     // Count address/index computations but not the store access itself.
-    for (auto* op : target->operands) expr(op);
+    for (auto* op : target->operands) addRoot(op, factor());
   }
 
   void stmt(StmtIR* s) {
@@ -450,24 +565,24 @@ class CostAnalyzer {
       case StmtIRKind::VarDecl: {
         auto* d = static_cast<VarDeclIR*>(s);
         _result.vars += f;
-        expr(d->init);
+        addRoot(d->init, f);
         break;
       }
       case StmtIRKind::Assign: {
         auto* a = static_cast<AssignIR*>(s);
         if (a->targetExpr) storeTarget(a->targetExpr);
-        expr(a->value);
+        addRoot(a->value, f);
         break;
       }
       case StmtIRKind::ExprStmt:
-        expr(static_cast<ExprStmtIR*>(s)->expr);
+        addRoot(static_cast<ExprStmtIR*>(s)->expr, f);
         break;
       case StmtIRKind::Return:
-        expr(static_cast<ReturnIR*>(s)->value);
+        addRoot(static_cast<ReturnIR*>(s)->value, f);
         break;
       case StmtIRKind::IfElse: {
         auto* ie = static_cast<IfElseIR*>(s);
-        expr(ie->cond);
+        addRoot(ie->cond, f);
         stmt(ie->thenBranch.get());
         stmt(ie->elseBranch.get());
         break;
@@ -478,16 +593,23 @@ class CostAnalyzer {
         LoopDesc d;
         if (recognizeLoop(fo, d) && loopResolvable(d)) {
           _stack.push_back(d);
-          expr(fo->cond);
-          expr(fo->update);
-          expr(fo->updateRhs);
+          // Count the unresolved-extent report once per loop, not once per
+          // `execCount()` call: the model's fields are documented as counting
+          // *distinct constructs*, and a loop's body, condition and update each
+          // re-evaluate the trip count.
+          const long long before = _result.unknownLoops;
+          long long lf = factor();
+          if (_result.unknownLoops != before) _result.unknownLoops = before + 1;
+          addRoot(fo->cond, lf);
+          addRoot(fo->update, lf);
+          addRoot(fo->updateRhs, lf);
           stmt(fo->body.get());
           _stack.pop_back();
         } else {
           _result.unknownLoops++;
-          expr(fo->cond);
-          expr(fo->update);
-          expr(fo->updateRhs);
+          addRoot(fo->cond, f);
+          addRoot(fo->update, f);
+          addRoot(fo->updateRhs, f);
           stmt(fo->body.get());
         }
         break;
@@ -509,8 +631,13 @@ class CostAnalyzer {
   const CSEConfig* _cfg;
   std::unordered_map<std::string, int> _varLanes;
   LaneAnalyzer _lanes;
-  std::unordered_set<DAGNode*> _visited;
+  // Sum of loop-scaled reference counts of every statement slot pointing at a
+  // node; `charge()` propagates these down the DAG.
+  std::unordered_map<DAGNode*, long long> _rootContrib;
   std::vector<LoopDesc> _stack;
+  // Loop nests already reported as having an unresolved extent (see
+  // markUnknownLoop), so one big loop is counted once.
+  std::unordered_set<std::string> _reportedUnknown;
   CostResult _result;
 };
 

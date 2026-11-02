@@ -19,18 +19,20 @@ namespace {
 using SignedTerm = std::pair<int, DAGNode*>;  // sign (+1/-1), term
 
 bool isAdditive(DAGNode* n) {
-  return n && n->kind == NodeKind::BinaryOp && (n->op == '+' || n->op == '-');
+  return n && n->kind == NodeKind::BinaryOp &&
+         (n->op == OpCode::Add || n->op == OpCode::Sub);
 }
 
 // Flatten an additive expression into signed terms.
 void flatten(DAGNode* n, int sign, std::vector<SignedTerm>& out) {
-  if (n->kind == NodeKind::BinaryOp && n->op == '+') {
+  if (n->kind == NodeKind::BinaryOp && n->op == OpCode::Add) {
     flatten(n->operands[0], sign, out);
     flatten(n->operands[1], sign, out);
-  } else if (n->kind == NodeKind::BinaryOp && n->op == '-') {
+  } else if (n->kind == NodeKind::BinaryOp && n->op == OpCode::Sub) {
     flatten(n->operands[0], sign, out);
     flatten(n->operands[1], -sign, out);
-  } else if (n->kind == NodeKind::UnaryOp && n->op == '-' && !isIncDec(n)) {
+  } else if (n->kind == NodeKind::UnaryOp && n->op == OpCode::Neg &&
+             !isIncDec(n)) {
     flatten(n->operands[0], -sign, out);
   } else {
     out.push_back({sign, n});
@@ -80,6 +82,39 @@ class ReassociateVisitor {
       std::vector<SignedTerm> terms;
       flatten(node, +1, terms);
 
+      // Reordering an additive chain changes the *evaluation order of its
+      // terms*, and C++ leaves that order unspecified only for side-effect-free
+      // operands. A term with an observable effect (an impure call, a `++`) can
+      // read or write state another term reads, so sorting the chain can change
+      // the result: `state + f() + state` (f writes state) is 1+1+2 with the
+      // source order, but 1+1+1 once both pure reads are sorted ahead of the
+      // call. That is a silent miscompile, and the effect-preservation oracle
+      // cannot see it -- the effect multiset is unchanged, only its position is.
+      //
+      // Leave such a chain alone. (This is independent of the floating-point
+      // licence that gates the pass: even with reassociation licensed, moving an
+      // effect past a read is a sequencing change, not a rounding change.)
+      bool anyEffect = false;
+      for (auto& [sign, term] : terms) {
+        if (hasObservableEffect(term)) {
+          anyEffect = true;
+          break;
+        }
+      }
+      if (anyEffect) {
+        // Still recurse: a nested additive chain without effects may be
+        // reorderable on its own.
+        bool changed = false;
+        std::vector<DAGNode*> newOps;
+        for (auto* op : node->operands) {
+          DAGNode* r = rewrite(op);
+          newOps.push_back(r);
+          if (r != op) changed = true;
+        }
+        if (!changed) return node;
+        return rebuildWithOperands(module, node, newOps);
+      }
+
       struct Item {
         int sign;
         DAGNode* rewritten;
@@ -105,9 +140,10 @@ class ReassociateVisitor {
       for (auto& it : items) {
         DAGNode* term = it.rewritten;
         if (!acc) {
-          acc = (it.sign > 0) ? term : module.createUnaryOp('-', term);
+          acc = (it.sign > 0) ? term : module.createUnaryOp(OpCode::Neg, term);
         } else {
-          acc = module.createBinaryOp(it.sign > 0 ? '+' : '-', acc, term);
+          acc = module.createBinaryOp(
+              it.sign > 0 ? OpCode::Add : OpCode::Sub, acc, term);
         }
       }
       return acc ? acc : node;

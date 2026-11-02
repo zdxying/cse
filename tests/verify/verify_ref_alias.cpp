@@ -7,8 +7,7 @@
 #include <cstdio>
 
 #include "ref_alias.cpp.cse"
-
-static int failures = 0;
+#include "harness.h"
 
 int main() {
   RefAliasV x;
@@ -21,8 +20,5 @@ int main() {
   if (!ok) failures++;
   std::printf("ref_alias(aliased) got=%.3f want=10.000  %s\n", got, ok ? "OK" : "FAIL");
 
-  std::printf(failures == 0 ? "\nALL REF-ALIAS CHECKS PASSED\n"
-                            : "\n%d REF-ALIAS CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("REF-ALIAS");
 }

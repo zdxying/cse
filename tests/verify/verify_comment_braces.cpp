@@ -9,14 +9,7 @@
 #include <cstdio>
 
 #include "comment_braces.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-26s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // x = y = a*b, so the result is 2*a*b. The source and the optimized form
@@ -28,8 +21,5 @@ int main() {
   check("block_comment(2,3)", braces_in_block_comment(2.0, 3.0), 10.0);
   check("block_comment(-1,4)", braces_in_block_comment(-1.0, 4.0), 6.0);
 
-  std::printf(failures == 0 ? "\nALL COMMENT-BRACE CHECKS PASSED\n"
-                            : "\n%d COMMENT-BRACE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("COMMENT-BRACE");
 }

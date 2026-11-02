@@ -8,14 +8,7 @@
 #include <cstdio>
 
 #include "dead_store_effects.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-28s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // 1. `unused = y++;` increments `y` even though `unused` is never read.
@@ -45,8 +38,5 @@ int main() {
   check("dead_pure_store(2,3)", dead_pure_store(2.0, 3.0), 5.0);
   check("dead_pure_store(-4,0.25)", dead_pure_store(-4.0, 0.25), -3.75);
 
-  std::printf(failures == 0 ? "\nALL DEAD-STORE CHECKS PASSED\n"
-                            : "\n%d DEAD-STORE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("DEAD-STORE");
 }

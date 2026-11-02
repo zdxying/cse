@@ -28,7 +28,8 @@ Token Parser::expect(TokenType type) {
   std::ostringstream oss;
   oss << "expected " << tokenTypeName(type) << " but got "
       << tokenTypeName(peek().type) << " '" << peek().text << "'";
-  throw CSEError({"parse", peek().line, peek().col, oss.str()});
+  throw CSEError(
+      {"parse", "CSE-PARSE-EXPECT", peek().line, peek().col, oss.str()});
 }
 
 SourceLoc Parser::currentLoc() const {
@@ -220,13 +221,30 @@ std::string Parser::parseFullType() {
 
 // ===== Expression parsing =====
 
-std::unique_ptr<Expr> Parser::parseExpr() { return parseAssignment(); }
+std::unique_ptr<Expr> Parser::parseExpr() {
+  enterExpr();
+  auto e = parseAssignment();
+  leaveExpr();
+  return e;
+}
+
+void Parser::enterExpr() {
+  if (++_exprDepth > kMaxExprDepth) {
+    const Token& t = peek();
+    throw CSEError({"parse", "CSE-PARSE-DEPTH", t.line, t.col,
+                    "expression nesting exceeds " +
+                        std::to_string(kMaxExprDepth) +
+                        " levels (the region is too deeply nested to parse)"});
+  }
+}
 
 std::unique_ptr<Expr> Parser::parseAssignment() {
   auto lhs = parseTernary();
   if (check(TokenType::Assign) || check(TokenType::PlusAssign) ||
       check(TokenType::MinusAssign) || check(TokenType::StarAssign) ||
-      check(TokenType::SlashAssign)) {
+      check(TokenType::SlashAssign) || check(TokenType::PercentAssign) ||
+      check(TokenType::AmpAssign) || check(TokenType::PipeAssign) ||
+      check(TokenType::CaretAssign)) {
     auto op = advance();
     auto rhs = parseAssignment();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
@@ -270,12 +288,54 @@ std::unique_ptr<Expr> Parser::parseOr() {
 }
 
 std::unique_ptr<Expr> Parser::parseAnd() {
-  auto lhs = parseEquality();
+  auto lhs = parseBitOr();
   while (match(TokenType::And)) {
-    auto rhs = parseEquality();
+    auto rhs = parseBitOr();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
     // Logical AND gets its own op code (see parseOr).
     expr->op = 'A';
+    expr->lhs = std::move(lhs);
+    expr->rhs = std::move(rhs);
+    lhs = std::move(expr);
+  }
+  return lhs;
+}
+
+// Bitwise levels, in C++ precedence order (loosest first): `|` then `^` then
+// `&`. They sit between logical AND and equality, so `a & b == c` is
+// `a & (b == c)` and `a | b & c` is `a | (b & c)`, exactly as C++ reads them.
+std::unique_ptr<Expr> Parser::parseBitOr() {
+  auto lhs = parseBitXor();
+  while (match(TokenType::Pipe)) {
+    auto rhs = parseBitXor();
+    auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
+    expr->op = '|';
+    expr->lhs = std::move(lhs);
+    expr->rhs = std::move(rhs);
+    lhs = std::move(expr);
+  }
+  return lhs;
+}
+
+std::unique_ptr<Expr> Parser::parseBitXor() {
+  auto lhs = parseBitAnd();
+  while (match(TokenType::Caret)) {
+    auto rhs = parseBitAnd();
+    auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
+    expr->op = '^';
+    expr->lhs = std::move(lhs);
+    expr->rhs = std::move(rhs);
+    lhs = std::move(expr);
+  }
+  return lhs;
+}
+
+std::unique_ptr<Expr> Parser::parseBitAnd() {
+  auto lhs = parseEquality();
+  while (match(TokenType::Amp)) {
+    auto rhs = parseEquality();
+    auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
+    expr->op = '&';
     expr->lhs = std::move(lhs);
     expr->rhs = std::move(rhs);
     lhs = std::move(expr);
@@ -297,12 +357,40 @@ std::unique_ptr<Expr> Parser::parseEquality() {
   return lhs;
 }
 
-std::unique_ptr<Expr> Parser::parseComparison() {
+std::unique_ptr<Expr> Parser::parseShift() {
   auto lhs = parseAddSub();
+  // `<<` / `>>` are recognized as two *adjacent* `<` / `>` tokens rather than
+  // lexicalized as one token. That is deliberate: `latset::c<D3Q19<double>>(k)`
+  // closes two template argument lists with `>>`, and a single `>>` token would
+  // make the template lookahead (which counts `<`/`>` depth) miscount and fall
+  // back to a comparison -- regressing the flagship fixtures. Detecting the
+  // adjacency here keeps the template path token-for-token identical to before.
+  for (;;) {
+    if (!check(TokenType::Less) && !check(TokenType::Greater)) break;
+    // Adjacency is required: `a < <b` (invalid C++ anyway) must not become a
+    // shift, and a shift's two signs are never separated by a comment token
+    // here because the parser sees no comments.
+    size_t next = _pos + 1;
+    if (next >= _tokens.size() || _tokens[next].type != peek().type) break;
+    const bool left = peek().type == TokenType::Less;
+    advance();
+    advance();
+    auto rhs = parseAddSub();
+    auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
+    expr->op = left ? 'L' : 'R';
+    expr->lhs = std::move(lhs);
+    expr->rhs = std::move(rhs);
+    lhs = std::move(expr);
+  }
+  return lhs;
+}
+
+std::unique_ptr<Expr> Parser::parseComparison() {
+  auto lhs = parseShift();
   while (check(TokenType::Less) || check(TokenType::Greater) ||
          check(TokenType::LessEqual) || check(TokenType::GreaterEqual)) {
     auto op = advance();
-    auto rhs = parseAddSub();
+    auto rhs = parseShift();
     auto expr = std::make_unique<Expr>(ExprKind::BinaryOp, lhs->loc);
     switch (op.type) {
       case TokenType::Less: expr->op = '<'; break;
@@ -359,14 +447,36 @@ std::unique_ptr<Expr> Parser::parseUnary() {
     expr->operand = std::move(operand);
     return expr;
   }
-  // `-x`, `!x`, `+x`.
-  if (check(TokenType::Minus) || check(TokenType::Not) || check(TokenType::Plus)) {
+  // `-x`, `!x`, `+x`, `~x`.
+  if (check(TokenType::Minus) || check(TokenType::Not) ||
+      check(TokenType::Plus) || check(TokenType::Tilde)) {
     auto op = advance();
     auto operand = parseUnary();
     auto expr = std::make_unique<Expr>(ExprKind::UnaryOp, currentLoc());
     expr->op = op.text[0];
     expr->operand = std::move(operand);
     return expr;
+  }
+  // `*p` (dereference). The IR already models pointer loads as an
+  // ArrayAccess on the pointer (`p[i]`), so `*p` is lowered to `p[0]` here:
+  // same node kind, same write-set/alias machinery, same code emission. This is
+  // why a pointer-style kernel body (`*p = *q + 1.0;`) used to make the whole
+  // region unparseable.
+  //
+  // Unary `&x` is deliberately *not* accepted: it produces a pointer value, and
+  // the IR has no pointer-typed value to hang it on (see the note on
+  // isReadOnlyRoot in ir_builder.h). Such a region keeps reporting
+  // skipped-unreadable rather than being mis-modeled.
+  if (check(TokenType::Star)) {
+    advance();
+    auto operand = parseUnary();
+    auto access = std::make_unique<Expr>(ExprKind::ArrayAccess, currentLoc());
+    access->base = std::move(operand);
+    auto zero = std::make_unique<Expr>(ExprKind::Number, currentLoc());
+    zero->numVal = 0;
+    zero->numText = "0";
+    access->indices.push_back(std::move(zero));
+    return access;
   }
   // Cast: (type)expr
   if (check(TokenType::LParen)) {
@@ -478,6 +588,10 @@ static bool cannotStartTemplateArg(TokenType t) {
     case TokenType::MinusAssign:
     case TokenType::StarAssign:
     case TokenType::SlashAssign:
+    case TokenType::PercentAssign:
+    case TokenType::AmpAssign:
+    case TokenType::PipeAssign:
+    case TokenType::CaretAssign:
     case TokenType::For:
     case TokenType::If:
     case TokenType::Else:
@@ -586,7 +700,8 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
   }
   std::ostringstream oss;
   oss << "unexpected token '" << peek().text << "'";
-  throw CSEError({"parse", peek().line, peek().col, oss.str()});
+  throw CSEError(
+      {"parse", "CSE-PARSE-UNEXPECTED-TOKEN", peek().line, peek().col, oss.str()});
 }
 
 // ===== Statement parsing =====
@@ -627,9 +742,29 @@ std::unique_ptr<Stmt> Parser::parseFor() {
   auto forStmt = std::make_unique<Stmt>(StmtKind::ForLoop, loc);
 
   // for init
-  if (check(TokenType::Int) || check(TokenType::Double) || check(TokenType::Float) ||
-      check(TokenType::Struct) || check(TokenType::Unsigned) || check(TokenType::Const) ||
-      check(TokenType::Static) || check(TokenType::Inline) || check(TokenType::Void)) {
+  //
+  // `looksLikeVarDecl()` is what the statement-level parser already uses to
+  // recognize a declaration whose type is not a builtin keyword (`size_t i`,
+  // `T* p`, `Vector<T,3> v`). Leaving it out here meant `for (size_t i = 0; ...)`
+  // -- the ordinary way to index an array in a numeric kernel -- was parsed as
+  // an expression statement, which then failed, so the whole region was passed
+  // through unoptimized. Same predicate, same result as at statement level.
+  //
+  // `for (;;)` (an empty init) is legal C++ and appears in kernels whose counter
+  // is declared outside the loop; a missing init is represented by a null
+  // forInit, which every consumer already handles (it is null for an
+  // expression-statement init that failed to parse). An empty init used to be
+  // reported as a parse error, which made the whole region unparseable.
+  if (check(TokenType::Semicolon)) {
+    // Consume the `;` that terminates the (empty) init clause; the condition
+    // starts after it.
+    advance();
+    // leave forInit null
+  } else if (check(TokenType::Int) || check(TokenType::Double) ||
+             check(TokenType::Float) || check(TokenType::Struct) ||
+             check(TokenType::Unsigned) || check(TokenType::Const) ||
+             check(TokenType::Static) || check(TokenType::Inline) ||
+             check(TokenType::Void) || looksLikeVarDecl()) {
     forStmt->forInit = parseVarDecl();
   } else {
     forStmt->forInit = parseExprStmt();
@@ -680,6 +815,32 @@ std::unique_ptr<Stmt> Parser::parseVarDecl() {
   auto decl = std::make_unique<Stmt>(StmtKind::VarDecl, currentLoc());
   decl->varType = typeStr;
   decl->varName = nameTok.text;
+
+  // An array declarator: `double arr[8]`, possibly multi-dimensional. The
+  // bounds are kept verbatim in the type text (the codegen re-emits
+  // `type + name + bounds`, which is how C spells it: `double arr[8]`). The IR
+  // itself models the array as storage named `arr`; loads and stores go through
+  // the ordinary ArrayAccess nodes, whose write-set/alias handling is the same
+  // one every other memory access uses. A bound expression must be a literal
+  // (C requires an integral constant expression, and the IR has no constant
+  // evaluator beyond the folds).
+  std::string arrayBounds;
+  while (check(TokenType::LBrack)) {
+    advance();
+    if (!check(TokenType::Number)) {
+      std::ostringstream oss;
+      oss << "array bounds must be an integer literal, got '"
+          << peek().text << "'";
+      throw CSEError({"parse", "CSE-PARSE-EXPECT", peek().line, peek().col,
+                      oss.str()});
+    }
+    arrayBounds += "[" + advance().text + "]";
+    expect(TokenType::RBrack);
+  }
+  if (!arrayBounds.empty()) {
+    decl->varType = typeStr + " " + arrayBounds;
+    decl->arrayBounds = arrayBounds;
+  }
 
   if (match(TokenType::Assign)) {
     decl->init = parseExpr();
@@ -917,8 +1078,10 @@ std::unique_ptr<NamespaceDef> Parser::parseNamespaceDef() {
       // Function declaration
       def->functions.push_back(parseFunction());
     } else {
-      // Skip unexpected tokens
-      advance();
+      // A construct inside the namespace we do not model. Consume it, but
+      // remember it: the region will be passed through unchanged rather than
+      // emitted with this member missing.
+      skipUnmodeledTopLevelToken();
     }
   }
   expect(TokenType::RBrace);
@@ -928,16 +1091,41 @@ std::unique_ptr<NamespaceDef> Parser::parseNamespaceDef() {
 
 // ===== Full parse =====
 
+// Consume a top-level token the parser does not understand, and remember it so
+// the caller can refuse to emit a partial region. Previously this was a bare
+// `advance()`: the token vanished and the region was still reported as
+// optimized, so a construct the frontend does not model was silently dropped
+// from the output.
+void Parser::skipUnmodeledTopLevelToken() {
+  if (check(TokenType::Semicolon)) {
+    // `;` is an empty declaration -- benign, not a construct we failed to read.
+    advance();
+    return;
+  }
+  if (++_skippedTopLevel == 1) {
+    _firstSkippedLine = peek().line;
+    _firstSkippedText = peek().text;
+  }
+  advance();
+}
+
 Parser::ParseResult Parser::parseAll() {
   ParseResult result;
+  _skippedTopLevel = 0;
+  _firstSkippedLine = 0;
+  _firstSkippedText.clear();
 
   while (!check(TokenType::Eof)) {
-    // Skip preprocessor directives (#include, #ifdef, #else, #endif, #pragma, etc.)
-    if (peek().text.size() > 0 && peek().text[0] == '#') {
+    // A preprocessing directive is outside the language the IR models, so it is
+    // not built into the AST. It is *counted*, never silently dropped: a caller
+    // that regenerates code from this AST must refuse the region (see
+    // ParseResult::directiveCount) instead of emitting it with the guard gone.
+    // The driver already refuses such a region before parsing (CSERegion::
+    // hasDirectives, decided from the same token); this keeps the knowledge
+    // inside the parser for callers that drive it directly.
+    if (check(TokenType::PreprocessorDirective)) {
+      ++result.directiveCount;
       advance();
-      // Skip to end of line / semicolon
-      while (!check(TokenType::Eof) && !check(TokenType::Semicolon)) advance();
-      match(TokenType::Semicolon);
       continue;
     }
 
@@ -985,8 +1173,16 @@ Parser::ParseResult Parser::parseAll() {
     }
 
     // Parse a function if we see: type[*] name(
+    //
+    // The declaration modifiers are part of the type in C++ and `parseType()`
+    // already consumes them, so `static inline double f(...)` is a function the
+    // frontend models. Leaving them out of this lookahead made the region
+    // "contain an unmodeled top-level construct" and pass the whole thing
+    // through unoptimized -- the exact spelling production headers use.
     bool isFuncStart = false;
-    if (isTypeKeyword() || check(TokenType::Void) || check(TokenType::Typename)) {
+    if (isTypeKeyword() || check(TokenType::Void) || check(TokenType::Typename) ||
+        check(TokenType::Static) || check(TokenType::Const) ||
+        check(TokenType::Inline)) {
       isFuncStart = true;
     } else if (check(TokenType::Identifier) && _pos + 1 < _tokens.size() &&
                _tokens[_pos + 1].type == TokenType::Identifier) {
@@ -1000,7 +1196,9 @@ Parser::ParseResult Parser::parseAll() {
     if (isFuncStart) {
       // Look ahead to find identifier then LParen
       size_t ahead = _pos;
-      // Skip type tokens (including pointers, ::, identifiers)
+      // Skip type tokens (including pointers, ::, identifiers, and the
+      // declaration modifiers -- `static inline double` must walk past all of
+      // them or the `(` check below never matches).
       while (ahead < _tokens.size() && (_tokens[ahead].type == TokenType::Star ||
                                          _tokens[ahead].type == TokenType::Identifier ||
                                          _tokens[ahead].type == TokenType::DoubleColon ||
@@ -1008,6 +1206,9 @@ Parser::ParseResult Parser::parseAll() {
                                          _tokens[ahead].type == TokenType::Greater ||
                                          _tokens[ahead].type == TokenType::Typename ||
                                          _tokens[ahead].type == TokenType::Struct ||
+                                         (_tokens[ahead].type == TokenType::Static) ||
+                                         (_tokens[ahead].type == TokenType::Const) ||
+                                         (_tokens[ahead].type == TokenType::Inline) ||
                                          (_tokens[ahead].type == TokenType::Int) ||
                                          (_tokens[ahead].type == TokenType::Double) ||
                                          (_tokens[ahead].type == TokenType::Float) ||
@@ -1023,10 +1224,15 @@ Parser::ParseResult Parser::parseAll() {
       }
     }
 
-    // Skip any other token we don't understand (e.g., stray identifiers from skipped code)
-    advance();
+    // Any other top-level token we don't understand (e.g., a global variable
+    // declaration, or a stray identifier from code the frontend does not
+    // model). Consume and record it -- see skipUnmodeledTopLevelToken().
+    skipUnmodeledTopLevelToken();
   }
 
+  result.skippedTopLevelTokens = _skippedTopLevel;
+  result.firstSkippedLine = _firstSkippedLine;
+  result.firstSkippedText = _firstSkippedText;
   return result;
 }
 

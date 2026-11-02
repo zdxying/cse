@@ -1,10 +1,32 @@
 #pragma once
 #include <functional>
+#include <string>
 
 #include "dag_node.h"
 #include "statement.h"
 
 namespace cse {
+
+// ===== Loop control (`break;` / `continue;`) =====
+//
+// The frontend has no keyword for these: `break;` arrives as an `ExprStmt`
+// whose expression is a bare `Variable` named "break" (likewise "continue").
+// That encoding is a property of this IR, and every pass that reasons about
+// loop control has to agree on it -- a pass that erases "useless" bare-variable
+// statements would silently drop a `break`, and the unroller would splice a
+// loop body that still needs it. One place owns the test.
+//
+// `which`, when given, receives "break" or "continue".
+inline bool isLoopControl(const StmtIR* s, std::string* which = nullptr) {
+  if (!s || s->kind != StmtIRKind::ExprStmt) return false;
+  const DAGNode* e = static_cast<const ExprStmtIR*>(s)->expr;
+  if (!e || e->kind != NodeKind::Variable) return false;
+  if (e->name == "break" || e->name == "continue") {
+    if (which) *which = e->name;
+    return true;
+  }
+  return false;
+}
 
 // ===== Expression traversal for passes =====
 //
@@ -80,7 +102,14 @@ inline void forEachExprDeep(StmtIR* stmt,
       forEachExprDeep(ie->elseBranch.get(), visit, includeLvalue);
       break;
     }
-    default:
+    // These kinds own no nested statements (their own slots were already
+    // visited by forEachExpr above). Listed explicitly so that a new
+    // StmtIRKind -- and with it a new place a slot can hide -- is a compile
+    // error here rather than a silently missed traversal.
+    case StmtIRKind::ExprStmt:
+    case StmtIRKind::Assign:
+    case StmtIRKind::VarDecl:
+    case StmtIRKind::Return:
       break;
   }
 }

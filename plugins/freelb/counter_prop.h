@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-#include "pass.h"
+#include "passes/pass.h"
 
 namespace cse {
 
@@ -25,6 +25,7 @@ class CounterPropPass : public Pass {
 
   std::string name() const override { return "counter-prop"; }
   void run(IRModule& module) override;
+  bool crossesStatements() const override { return true; }
 
  private:
   VectorLocalName _vectorLocalName;

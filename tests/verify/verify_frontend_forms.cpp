@@ -8,14 +8,7 @@
 #include <cstdio>
 
 #include "frontend_forms.cpp.cse"
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-24s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
+#include "harness.h"
 
 int main() {
   // 1. `i++` in a counted loop: four iterations, so `a` grows by 4*b.
@@ -43,8 +36,5 @@ int main() {
   check("sci_notation", sci_notation(1.0), 1e16 + 6.02e23 + 1e-9 + 1.0);
   check("sci_upper(3)", sci_upper(3.0), 2.5e-3 * 3.0);
 
-  std::printf(failures == 0 ? "\nALL FRONTEND-FORM CHECKS PASSED\n"
-                            : "\n%d FRONTEND-FORM CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("FRONTEND-FORM");
 }

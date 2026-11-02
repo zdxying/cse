@@ -6,8 +6,8 @@
 > **唯一权威副本**：本文档是移植状态的单一来源。FreeLB 侧无对应的状态文件，
 > 集成状态一律以本文件为准。
 
-> **分支状态**：`main` 即"通用引擎 + FreeLB 插件 + `.ur.h` 生成器"，
-> 历史集成工作已合入 `main`，本文档中的历史提交号在 `main` 上均可达。
+> **分支状态**：`main` 是"通用引擎 + FreeLB 插件 + `.ur.h` 生成器"的集成分支，
+> 历史集成提交在 `main` 上可达；后续重构与优化在 `dev` 上推进。
 
 ## 1. 目标与架构
 
@@ -23,13 +23,13 @@ FreeLB `tools/cse` 中原有的旧解释器/优化器。
 - **驱动（FreeLB 仓库）**：`third_party/cse` submodule + `tools/cse/` 薄接线，
   `make.mk` 在 `-D_UNROLLFOR` 时调用 `csegen` 到 `generated/` 影子包含目录。
 
-当前分支/提交（HEAD 列为本文档更新时 2026-09-26 的快照）：
+引擎集成里程碑（P0–P2 已合入 `main`）：
 
-| 仓库 | 分支 | 关键提交 | 快照 HEAD |
-|------|------|----------|-----------|
-| `cse` | `main` | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) | `c94bd51` |
-| `FreeLB` | `dev` | P0→P1→P2 集成工作以 squash 提交合入 | `53b0762` |
-| FreeLB submodule | `third_party/cse` | 跟踪 `branch = main` | 指针随每次引擎提交同步 bump |
+| 仓库 | 关键提交 |
+|------|----------|
+| `cse` | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) |
+| `FreeLB` | P0→P1→P2 集成工作以 squash 提交合入 |
+| FreeLB submodule | `third_party/cse` 跟踪 `branch = main`，指针随每次引擎提交同步 bump |
 
 ## 2. 已完成
 
@@ -90,9 +90,9 @@ FreeLB `tools/cse` 中原有的旧解释器/优化器。
 | `verify_moment.py` | 60/60 |
 | `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
 | `verify_equilibrium.py` | PASS |
-| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 49 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 19 / `parens` 19 / `cost_nested` 355 / `cost_descending` 35 flops（向量加权成本模型；另有 mixed_ops、write_visibility、effect_duplication 等 13 个夹具） |
+| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 51 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 21 / `parens` 19 / `cost_nested` 355 / `cost_descending` 35 flops（向量加权、按引用次数计费的成本模型；另有 `mixed_ops`、`write_visibility`、`effect_duplication`、`loop_control`、`member_purity`、`const_typing` 等其余夹具） |
 | 引擎 FLOP 回归（`-r` 档） | `recombine` 24 flops |
-| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 19（别名敏感，移入此档）/ `float_identities` 4 / `ref_alias` 1 / `mixed_ops` 9 / `constant_edges` 7 等 |
+| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 21（别名敏感，移入此档）/ `float_identities` 8 / `ref_alias` 1 / `mixed_ops` 8 / `constant_edges` 6 等 |
 | 引擎数值校验 `tests/verify/verify_*.cpp` | equilibrium / safety / recombine / parens / store_aware / float_identities 等全通过；`verify_config.cpp` 覆盖库层 `CSEConfig` 契约 |
 | `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化；`csegen --cost` 输出 Total；每次运行向 stderr 打印覆盖率（emitted/skipped） |
 | `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
@@ -114,7 +114,7 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
     `noAlias`、`isPureFunction`
   - **FreeLB profile 显式置 `noAlias = true`**：引用别名修复（`&` 形参与 `*`/`[` 同一条
     规则）后，`const Vector&` / `CELL&` 形参的 load 不再跨写共享，force 特化会从
-    341/143 退到 626/217 flops；FreeLB kernel 的实参（cell / momenta / force 缓冲）
+    353/150 退到 671/224 flops；FreeLB kernel 的实参（cell / momenta / force 缓冲）
     从不互为别名，因此在调用点断言并打开该许可。通用默认仍为 `false`。
   - 钩子：`resolveName`、`lowerVectors` + `vectorDim/isVectorType/isVectorProducingCall`、
     `vectorLocalName`、`constBindings`
@@ -130,8 +130,8 @@ FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
 ## 4. 未完成 / TODO
 
 ### 中优先级
-1. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例；引擎侧跑回归。
-   （`make test` 已可手动/脚本调用，CI 未接。）
+1. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例。引擎侧回归已接入
+   `.github/workflows/ci.yml`（`make test` + `make sanitize`），FreeLB 侧仍未接。
 
 ### 低优先级 / 已知限制
 2. **前端子集限制**：
@@ -176,8 +176,10 @@ cd ~/FreeLB/examples/cavity3d && make
 - `src/frontend/{cse_config.h,lexer.cpp,parser.cpp,parser.h,ast.h,token.h}`
 - `src/ir/{ir_builder.h,ir_builder.cpp,ir_utils.h,statement.h}`
 - `src/backend/codegen.{h,cpp}`
-- `src/passes/{loop_unroll.cpp,counter_prop.h,counter_prop.cpp,pass_manager.cpp,value_prop.cpp,dce.cpp,algebraic_simplify.cpp}`
-- `plugins/freelb/{config.h,lattice_resolve.{h,cpp}}`（配置钩子 + latset 解析）
+- `src/passes/{loop_unroll.cpp,pass_manager.cpp,value_prop.cpp,dce.cpp,algebraic_simplify.cpp}`
+- `plugins/freelb/{config.h,lattice_resolve.{h,cpp},counter_prop.{h,cpp}}`
+  （配置钩子 + latset 解析 + 计数器传播——`counter_prop` 是 FreeLB 注入的
+  post-algebra pass，其唯一消费者在本插件内，故归入插件树）
 - `plugins/freelb/{cse_main.cpp,ur_emit.{h,cpp},ur_emit_main.cpp}`（`bin/cse` 与 `bin/csegen` 驱动）
 - `tests/csegen/{moment.h,force.h,equilibrium.h}`
 
@@ -199,7 +201,7 @@ FreeLB（`dev`）：
   `src/ir/{statement,ir_utils}`（`AssignIR::targetExpr`、`IfElseIR::isConstexpr`、
   `substitute` 重建 `Cast/Ternary` 与保留 `++/--`、比较折叠与符号常量保护）；
   `src/backend/codegen`（`generateBody`、`if constexpr` 发射、`targetExpr` 赋值）；
-  `src/passes/{loop_unroll,counter_prop,dce,value_prop,algebraic_simplify,cse_pass}`；
+  `src/passes/{loop_unroll,dce,value_prop,algebraic_simplify,cse_pass}`；
   `Makefile` 的 `OPT/release/install/test` 与 `tests/run_tests.sh`。
 - **B. 通用扩展点**（FreeLB 经此注入，不再内建 FreeLB 语义）：
   `CSEConfig::resolveName`（名字→常量，FreeLB 用于 `LatSet::q/d/cs2/...`）；
@@ -210,6 +212,6 @@ FreeLB（`dev`）：
 - **C. FreeLB 专属**（全部在 `plugins/freelb/`）：
   `config.h`（`LatticeConfig`、`resolveLatsetConst`、`createFreeLBConfig`）、
   `ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`cse_main.cpp`、
-  `lattice_resolve.{h,cpp}`、`cuda_skip.{h,cpp}`；
+  `lattice_resolve.{h,cpp}`、`counter_prop.{h,cpp}`、`cuda_skip.{h,cpp}`；
   以及 `tests/csegen/*.h`、`tests/verify/check_lattice.py`、`Makefile` 的
   `bin/csegen` 文件目标。

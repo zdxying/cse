@@ -7,7 +7,11 @@ namespace cse {
 
 // Where a frontend rejection happened, and why.
 struct Diagnostic {
-  std::string phase;  // "lex" or "parse"
+  std::string phase;  // "lex", "parse" or "build"
+  // A stable, machine-readable identifier for the failure class, so a caller
+  // (or a test) can react to *what* went wrong without matching prose. Empty
+  // when the site has no specific code.
+  std::string code;
   size_t line = 0;    // 1-indexed, relative to the text that was parsed
   size_t col = 0;     // 1-indexed
   std::string message;

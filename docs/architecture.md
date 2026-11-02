@@ -32,15 +32,18 @@ src/
 │   └── cse_config.h      # CSEConfig 配置结构
 ├── ir/
 │   ├── dag_node.h        # DAG 节点定义
+│   ├── opcode.h/cpp      # 运算符分类（OpCode）+ 拼写/优先级表
 │   ├── statement.h       # IR 语句定义
 │   ├── ir_module.h/cpp   # IR 模块（节点池 + 去重）
 │   ├── ir_builder.h/cpp  # AST → IR 转换
-│   └── ir_utils.h        # 工具函数（遍历、替换、折叠）
+│   ├── location.h/cpp    # 读写/别名模型（Location / LocationSet / AliasInfo）
+│   ├── stmt_walk.h       # 语句拥有的表达式槽位遍历（forEachExpr）
+│   ├── ir_printer.h/cpp  # 确定性 IR 结构打印（--dump-ir）
+│   └── ir_utils.h        # 工具函数（替换、折叠、按种类重建）
 ├── passes/
 │   ├── pass.h            # Pass 基类
 │   ├── pass_manager.h/cpp # Pass 管理器
 │   ├── loop_unroll.h/cpp # 计数循环展开
-│   ├── counter_prop.h/cpp # 计数器传播（插件注入的 post-algebra pass）
 │   ├── constant_fold.h/cpp    # 常量折叠
 │   ├── algebraic_simplify.h/cpp # 代数简化 + 强度削减 + 常量乘法合并
 │   ├── reassociate.h/cpp # 加法重结合（按全局频率排序，形成共享前缀）
@@ -51,12 +54,14 @@ src/
 ├── backend/
 │   └── codegen.h/cpp     # 代码生成
 └── analysis/
-    └── cost_model.h/cpp  # FLOP 成本分析
+    ├── cost_model.h/cpp  # FLOP 成本分析
+    └── effects.h/cpp     # 可观察效果签名（效果保持 oracle 与 --verify 用）
 plugins/
 └── freelb/
     ├── cuda_skip.h/cpp   # __xx__ token 过滤器
     ├── config.h          # FreeLB 配置工厂函数
     ├── lattice_resolve.h/cpp  # latset::c/w 常量解析（硬编码查找表）
+    ├── counter_prop.h/cpp # 计数器传播（FreeLB 注入的 post-algebra pass）
     ├── cse_main.cpp      # bin/cse 入口
     ├── ur_emit.h/cpp     # .ur.h 生成器核心（generateUrHeader）
     └── ur_emit_main.cpp  # bin/csegen 入口
@@ -79,6 +84,8 @@ struct CSEConfig {
   bool allowUnsafeFpIdentities = false;           // 允许 x*0→0 / x-x→0 / 0/x→0 / x/x→1 /
                                                   //   x+0→x / 0-x→-x（0/±inf/NaN/符号零）
   bool noAlias = false;                           // 假设不同指针/引用参数互不别名
+  bool assumeFloatOperands = false;               // kind 无法证明的操作数按浮点处理
+                                                  // （只影响零恒等式替换常量的 kind）
   std::function<bool(const std::string&)> isPureFunction;  // 纯函数判定
 
   // 项目钩子（通用扩展点，`src/` 内无 FreeLB 语义）
@@ -90,6 +97,13 @@ struct CSEConfig {
   std::function<bool(const std::string&)> isVectorProducingCall;  // 产生向量的调用
   std::function<std::string(const std::string&, long long)> vectorLocalName; // 向量局部命名
   std::unordered_map<std::string, double> constBindings;         // 非类型模板实参
+
+  // 成本钩子（CostResult 口径的扩展点，见 docs/cost_model_redesign.md）
+  std::function<int(const std::string& type)> vectorLanes;        // 类型的标量 lane 数
+  std::function<int(const std::string& callee)> callResultLanes;  // 调用的结果 lane 数
+  std::function<long long(const std::string&, const std::vector<int>&)>
+      callCost;                                  // 纯调用的 FLOP 成本（负值=未建模）
+  std::function<int(OpCode, int, int, long long&)> binaryOpCost; // 二元运算成本+结果 lane
 };
 ```
 
@@ -122,11 +136,17 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 
 ## 正确性与安全模型
 
-通用模式下优化保持行为等价，六条机制：
+通用模式下优化保持行为等价，八条机制：
 
 1. **效果/纯度**：调用默认视为有副作用，`createCall` 仅对纯调用去重；不纯调用不被合并、
-   不跨语句提取。内置数学函数 + `isPureFunction` 白名单视为纯。任何"把两处出现折叠为一处"
-   的重写，都要求被折叠的子表达式是纯的。
+   不跨语句提取。**内建数学函数白名单只匹配限定名**（`std::sqrt`）的自由调用：
+   裸名 `max`/`min`/`abs` 可能解析到用户定义的同名函数，把它当内建纯函数会让两次带副作用
+   的调用被合并（`-s` 档同样中招）；同名**成员**调用（`s.sin(x)`）同样不查白名单——
+   这里只拿得到方法的裸名。其余情况只有 `isPureFunction` 判真才算纯。
+   任何"把两处出现折叠为一处"的重写，都要求被折叠的子表达式**深纯**
+   （`isReferentiallyTransparent` 递归检查全部操作数）：`pure` 是逐节点的，
+   `createBinaryOp` 一律置 `true`，所以 `f() + 1.0` 顶层 `pure` 为真而内部调用不纯，
+   浅检查会把它当作可重复求值。
 2. **内存屏障**：IRBuilder 预扫描得到只读根（未被写且未传入调用的变量）；
    仅只读根的 load 可去重/跨语句共享，可变/未知根的 load 每次独立，避免跨 store 复用。
    注意 `const T*` / `const T&` 参数**不再**自动视为只读根——`const` 只承诺"不通过它写"，
@@ -137,7 +157,7 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
    `ValueProp` 只内联初值依赖的变量在整个函数内都没被写过的定义。这与第 2 条是同一条
    原则，只是作用于**标量变量**而非内存访问。
    **元素/成员写也要算写**：`a[i] = x;` / `p->f = x;` 写的是 lvalue 的**根**变量，
-   两处扫描通过 `ir_utils.h:collectWrittenNames`（共用一份实现）把它记进写集合——
+   各处扫描通过 `ir/location.h` 的 `collectWriteLocations`（共用一份实现）把它记进写集合——
    只记根是刻意的：可能有别的指针指向同一对象，此时"不知道是否有别名"只能取保守答案。
    `VarDecl` 不记入（它引入的是新名字，不是覆盖已有值）。
    这类写在 IR 里是**结构化语句** `AssignIR`（`targetExpr` + `value`），不随
@@ -145,15 +165,35 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
    表达式，写集合漏掉了整类写。
 4. **支配安全**：出现在 `if`/`else`/循环内的子表达式标记为 nested，不参与顶层提取，
    避免把条件执行的计算提升为无条件计算。
-5. **作用域**：IRBuilder 维护作用域栈并对遮蔽变量 alpha-rename（如 `y__s1`），
-   保证同名变量不跨作用域误合并。
-6. **循环展开前提**：仅当下列条件全部满足才展开，否则保留循环：
+5. **可投机性**：`analysis/purity.h` 的 `isSpeculatable` 回答"能不能在源码不会求值的
+   位置求值"。它与 `isReferentiallyTransparent`（能不能重复/移动）是**两个问题**，只在
+   陷阱处分歧：`1/k` 可以重复求值（值相同）但不可投机（k=0 时 trap）。
+   CSE 的候选过滤对两类节点分别判定：
+   - 语句级 nested（`if`/`loop` 里）→ 一律不提取；
+   - 表达式级守卫（`c ? x : y` 的 x/y、`a && b` 的 b）→ **仅当**该节点
+     `isSpeculatable` 才提取。于是 `k ? a*b : 0` 里的 `a*b` 仍被共享，而
+     `k ? 1/k : 0` 里的除法不会。把整个三元/`&&` 提取是安全的（它保留内部短路），
+     因此 `isSpeculatable` 对这两个操作符只检查条件/左操作数。
+6. **作用域**：IRBuilder 维护作用域栈并对遮蔽变量 alpha-rename（如 `y__s1`），
+   保证同名变量不跨作用域误合并。遮蔽判据覆盖三种情况：仍在作用域内的同名、
+   已 pop 的兄弟作用域的同名、以及**region 只读不声明的外部名字**（全局/外层局部）——
+   `double s = t; double t = a;` 里的 `t` 若与全局 `t` 共用节点，`s` 会被内联成 `a`。
+   **生成名必须唯一**：所有 invent 出来的名字（builder `*__s*`、展开 `*__u*`、
+   CSE `_cse_*`）都经 `IRModule::freshName` 分配，它保证结果不等于任何已驻留变量名
+   或已预留名。
+7. **循环展开前提**：仅当下列条件全部满足才展开，否则保留循环：
    - 循环体内每个局部声明都能被内联消除（初始化表达式为纯、非变量、不被重新赋值）
      或安全改名；这避免把同一局部变量跨迭代共享、进而被误当作循环不变量
      （例如 `uc` 的初始化含不纯调用时）。
    - 循环变量未被循环体改写（`i++`），否则常量替换会得到 `0++`。
+   - 循环变量**不被循环语句之外读**，否则展开删掉它的声明会让那个读悬空
+     （输入本身多半也不合法，但把一处错误放大成另一处仍然是错的）。
    - 循环体不含属于本循环的 `break`/`continue`，否则展开会把它们移出所命名的循环。
-   「被改写」的判据是 `collectWrittenNames`，覆盖 `++`/`--` 与以表达式形式书写的赋值。
+   「被改写」的判据是 `collectWriteLocations`，覆盖 `++`/`--` 与以表达式形式书写的赋值；
+   「循环外被读」的判据是整函数读集减去本循环语句（body + cond + update）的读集。
+8. **纯函数判定**：内建数学函数白名单只匹配**限定名**（`std::sqrt`）的自由调用。
+   裸名 `max`/`min`/`abs` 可能解析到用户定义的同名函数，其副作用会被 CSE 合并掉；
+   成员调用（`obj.sin`）同样不查白名单。未注册的调用一律视为不纯。
 
 另外，CSE 工具**总是原样打印 IR 的树**：同优先级的右子节点一律保留括号，因为浮点下
 `a - (b - c)`、`a / (b * c)` 甚至 `a * (b * c)` 与去掉括号后的形式都不等价。
@@ -165,11 +205,20 @@ FreeLB 特定逻辑位于 `plugins/freelb/`：
 
 | 开关 | 授权 |
 |------|------|
-| `assumeNumericCommutative` / `assumeNumericAssociative`（联合生效） | 交换/结合律重排、恒等消除 |
+| `assumeNumericCommutative` / `assumeNumericAssociative`（联合生效） | 交换/结合律重排（叶子排序、乘法链重排）。**精确恒等式不受此门控**（见 §5 代数简化），唯一的例外是符号规范化在 `0*inf` 处改变 NaN 的符号位，这一条只记录不门控 |
 | `allowFpReassoc` | 浮点加法重排（`Reassociate`）、乘法链重排（`normalizeProduct`） |
-| `allowUnsafeFpIdentities` | `x*0→0`、`x-x→0`、`0/x→0`、`x/x→1`、`x+0→x`、`0-x→-x`（在 `0`/`±inf`/`NaN`/符号零处改变结果） |
+| `allowUnsafeFpIdentities` | `x*0→0`、`x-x→0`、`0/x→0`、`x/x→1`、`x+0→x`、`0-x→-x`（在 `0`/`±inf`/`NaN`/符号零处改变结果）；以及 CleanupPass 的加法链合并（`x=0; x=x+a; x=x+b → x=a+b`，丢弃累加器前导 `0`） |
 
-`-s`（保守档）全部关闭；默认档（FreeLB profile）全部打开。`-s` 与 `-r` 互不影响。
+这三条零恒等式（`x*0`、`x-x`、`0/x`）替换的是**整个表达式**，所以替换出的常量必须
+携带表达式的 int/float kind——对 double 发射整型 `0` 会把外层 `/ 4` 变成整除。kind
+由 `joinNumericKind` 推断，而 load 的 kind 不可证（`Unknown`），于是授权由
+`assumeFloatOperands` 单独给出：开启后 `0 * cell[i]` 折成 `0.0` 而不是原样保留。
+**可证明的整型始终优先**：`(0 * k + 2) / 4` 在开启时仍是整数除法。一个有**浮点字面量**
+的零乘积（`0.0 * a[i]`）不需要任何授权，按 usual arithmetic conversions 即可证明。
+
+`-s`（保守档）关闭以上**全部假设/授权档**；默认档（FreeLB profile）全部打开。但
+AlgebraicSimplify 的**精确档**（逐位精确的恒等式，见 §5）在任何档位都运行，包括 `-s`。
+`-s` 与 `-r` 互不影响。
 
 ## 优化管线
 
@@ -185,7 +234,7 @@ LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra
 | **LoopUnroll** | `for (i=0; i<N; ++i)` 展开为 N 条语句，并内联循环体局部变量 |
 | **Resolve** | 插件 Pass（`resolvePass`）：解析 `latset::c/w` 为常量/点积（FreeLB） |
 | **ConstantFold** | 编译期计算常量表达式 |
-| **AlgebraicSimplify** | 恒等消除 + 强度削减 + 交换律排序 + 常量乘法合并 + `(-a)*(-a)→a*a`；FP 恒等与乘法链重排另有开关 |
+| **AlgebraicSimplify** | 精确恒等（`a*1→a`、`a-0→a`、`a/1→a`、`--a→a`、`a+(-b)→a-b`、`a-(-b)→a+b`、`x*2→x+x`、`(-a)*(-a)→a*a`、符号规范化，始终运行）+ 假设档（交换律排序、常量乘法合并，受 `numeric_`/`allowFpReassoc` 门控）；FP 恒等另有 `allowUnsafeFpIdentities` |
 | **PostAlgebra** | 插件 Pass 槽位（`postAlgebraPass`），FreeLB 注入 **CounterProp**：直线计数器解析（`tensor[i]→tensor[0]`）、降级向量局部索引（`unew[1]→unew_1`）、常量条件折叠 |
 | **Reassociate** | 加法项按全局出现频率重排，使对称语句共享不变前缀（需 `assumeNumericAssociative` **且** `allowFpReassoc`） |
 | **CSEPass** | 跨语句公共子表达式提取（含干扰写检查，见「正确性与安全模型」第 3 条） |
@@ -215,7 +264,7 @@ static PassManager createDefault(const CSEConfig& config,
 IR 构建阶段通过哈希表实现自然去重：
 
 ```cpp
-DAGNode* IRModule::createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs) {
+DAGNode* IRModule::createBinaryOp(OpCode op, DAGNode* lhs, DAGNode* rhs) {
     auto candidate = createNode(NodeKind::BinaryOp);
     candidate->op = op;
     candidate->operands = {lhs, rhs};
@@ -228,6 +277,13 @@ DAGNode* IRModule::createBinaryOp(char op, DAGNode* lhs, DAGNode* rhs) {
 「先填满语义字段 → 再算哈希 → 再入桶」这个顺序，`intern` 统一拒绝把不 `pure` 的节点
 登记进表。文档化的协议与不变量检查见 `src/ir/dag_node.h` 与
 `IRModule::verify()`（每个 Pass 之后在 debug 构建下断言）。
+
+身份字段表**只写一处**：`CSE_DAGNODE_IDENTITY_FIELDS`（`dag_node.h`）列出决定「两个节点是否同一
+节点」的全部字段，`DAGNode::sameContentAs()` 与 `computeHash()` 都展开这个宏——**被比较的集合与被
+哈希的集合按构造相同**，二者不可能各自漂移。每个字段自己的规则（操作数按节点身份比、常量按原始位
+比且 `isFloat` 参与身份）放在对应的 `identityEqual_<f>` / `identityHash_<f>` 助手里。
+`tests/verify/verify_node_identity.cpp` 从外部钉住这张表：凡改变节点语义的字段都必须让两节点
+`sameContentAs` 为假且 hash 相异——从宏里删一个字段即报红。
 
 **优点**：零额外开销，在构建时自动完成
 **局限**：只识别结构完全相同的表达式，不识别代数等价（如 `(a*b)*c` ≠ `a*(b*c)`）
@@ -274,22 +330,35 @@ ForLoopIR
 **例外：除数为 0 时不折叠。** 整数除零是未定义行为、浮点除零是 inf/NaN，`0` 是唯一对两者
 都错的答案，而 IR 不携带类型、无法区分二者。该表达式原样保留，交给编译器诊断或求值。
 
-**常量文本保留字面量拼写。** `createConst` 只在调用方未给出拼写时才自行格式化成不带
-`.0` 的整数值；源码里的 `1e16` / `0.5` / `-0.0` 按原样发射。`numText` 不参与节点身份，
-所以同一个常量节点可能同时出现在算术位置（`1.0 * x`）与下标位置（`feq[1]`）——
-下标由 `codegen` 强制发射为整数字面量，否则会写出不编译的 `feq[1.0]`。
+**常量文本保留字面量拼写，int/float 类型参与身份。** `createConst` 只在调用方未给出拼写时
+才自行格式化：整数值的浮点（`isFloat`）补 `.0`（`2.0`），整数值的整数发射为裸数字（`2`）；
+源码里的 `1e16` / `0.5` / `-0.0` 按原样发射。常量的 **int/float 类型（`isFloat`）是节点身份的
+一部分**——`4/3` 与 `4.0/3` 是不同节点、不同值，折叠与去重都必须保留这一位（早期只按数值
+哈希，把二者并成一个，`(2.0+2.0)/(1.0+2.0)` 被折成整数除法 `4/3`）；`numText`（拼写）不参与
+身份。codegen 对下标位置仍强制发射整数字面量，避免写出不编译的 `feq[1.0]`。
 
 ### 5. 代数简化 (AlgebraicSimplifyPass)
 
-恒等消除 + 强度削减 + 叶子交换。整组规则受 `numeric_`（= 交换律 ∧ 结合律）门控；
-其中 `a*0→0`、`a-a→0`、`0/a→0`、`a/a→1`、`a+0→a`、`0-a→-a` 六条另需
-`allowUnsafeFpIdentities`，乘法链重排需 `allowFpReassoc`：
+恒等消除 + 强度削减 + 叶子交换。规则分两档：**精确档**始终运行（每条都逐位精确，
+含 `±0.0`/`±inf`/`NaN`/次正规数，故 `-s` 与裸 `CSEConfig` 也保留），**假设档**按
+开关门控。`-s` 只关假设档，不再把精确档一并关掉。
 
-**恒等消除（`numeric_` 门控）：**
+**精确档（无需任何假设）：**
 - `a * 1 → a`，`1 * a → a`
-- `a - 0 → a`（精确），`a / 1 → a`
+- `a - 0 → a`（两个符号零都精确），`a / 1 → a`
 - `--a → a`（双重否定消除）
 - `a + (-b) → a - b`，`a - (-b) → a + b`
+- `x * 2 → x + x`（操作数须**深纯** `isReferentiallyTransparent`，否则会重复求值）
+- `(-a) * (-a) → a * a`
+- `a * (-b) → -(a * b)` 等符号规范化（**唯一例外**：`0 * inf` / `inf * 0` 产生的
+  NaN **符号位**与源码不同——源码得 IEEE "invalid" 形式，改写后传播被取反操作数的符号。
+  NaN 的符号/payload 不是 IEEE-754 的可观察值，`isnan` 与所有比较都不区分，故仍留在
+  精确档；放到 `numeric_` 后面会让 `-s` 丢掉 equilibrium 正反方向共享的收益（93→84）。
+  `verify_exact_identities.cpp` 同时钉住两半：非 NaN 操作数逐位精确，NaN 仍是 NaN）
+
+**假设档（需 `numeric_` = 交换律 ∧ 结合律）：**
+- 交换律排序：叶子节点按常量优先、变量名字典序排列，促进后续 CSE 匹配
+- 乘法链重排：常量因子合并 + 左结合重建（另需 `allowFpReassoc`）
 
 **另需 `allowUnsafeFpIdentities`（在 `0`/`±inf`/`NaN`/符号零处改变结果）：**
 - `a + 0 → a`，`0 + a → a`（`a = -0.0` 时和为 `+0.0`）
@@ -298,10 +367,10 @@ ForLoopIR
 - `0 / a → 0`
 - `a - a → 0`，`a / a → 1`
 
-**强度削减：**
-- `x * 2 → x + x`
-
-**交换律排序：** 叶子节点按常量优先、变量名字典序排列，促进后续 CSE 匹配。
+注：`x + 0` 因符号零**不精确**（故留在 `allowUnsafeFpIdentities`），而 `x - 0` 精确
+（在精确档）——两者不可混为一谈。常量匹配要求 `symbol.empty()`：符号常量（如
+`ns::w<T>(1)`，为发射保留）带真实数值但**不是**数值字面量，不能被折掉（与
+`normalizeProduct` 的常量折叠守卫一致）。
 
 ### 6. 表达式重组 (ExprRecombinePass)
 
@@ -329,7 +398,7 @@ ForLoopIR
 归一，都需要 `+`/`*` 满足交换律，因此挂在 `assumeNumericCommutative` 上。直组合
 （`la==ra`、`lb==rb`）不需要交换律，无条件生效。
 
-覆盖：`tests/fixtures/recombine.cpp`（`-r` 成本回归 18→21 flops，另有两项 FLOP 中性的
+覆盖：`tests/fixtures/recombine.cpp`（`-r` 成本回归 28→24 flops，另有两项 FLOP 中性的
 形状检查）+ `tests/verify/verify_recombine.cpp`（差分执行校验：乘法因子提取数值等价、
 除法与整数除法语义不变、不纯调用求值两次）。
 
@@ -342,14 +411,19 @@ double val = a;       // 初值是 Variable → 可内联
 double t = val * val; // 内联后: double t = a * a;
 ```
 
-`double val = a * x;` **不会**被内联——`isTrivial` 只接受
+`double val = a * x;` **不会**被内联——`isCheapShareableValue`（`analysis/purity.h`）只接受
 Constant / Variable / MemberAccess / ArrowAccess（后者基须为 Variable），
 任何 `BinaryOp` 都会被拒绝（内联=复制表达式，只允许零成本的形式）。
 
 **安全约束：**
 - 只内联上述"零成本"表达式；
-- 被内联的变量本身不得被重新赋值（`findReassigned` 预扫描）；
-- **初值读取的变量不得在整个函数内被写过**（`initDepsStable`）。否则
+- 被内联的变量本身不得被重新赋值（预扫描 `collectWriteLocations` 得到 `reassigned`，
+  再经 `AliasInfo::closeWrites` 把引用局部变量的写展开到其 referent）；
+- **不得内联某个引用的 referent**（`AliasInfo::isAliasedReferent`）：`double& r = v;` 的初值是
+  *lvalue 绑定上下文*，把 `v` 换成它的值会得到 `double& r = 0.5;`（对非 const 引用不合法；
+  对 `const&` 则静默改绑到临时）；
+- **初值读取的变量不得在整个函数内被写过**（`initDepsStable` 经 `AliasInfo::writeAffectsRead`
+  查同一 `reassigned`——读名先沿引用边闭包，故读 `s3`（引用 `b`）会被写 `b` 影响）。否则
   `double t = a; a = b; return t;` 会被改写成 `a = b; return a;`；
 - 不内联函数参数**本身**——但"以只读参数为初值的局部"可以内联（参数未被写过就是稳定的）；
   这两个集合（`blocked` 与 `written`）必须分开维护；
@@ -376,7 +450,7 @@ return t;
 | 目标不是本函数**自己声明**的局部（形参 + 本模块的 `VarDecl`），可能是全局 | `g = a;` 曾被整条删除，函数外看不到赋值 |
 | 右值本身有副作用（`hasSideEffect`：不纯调用 / `++` `--` / 表达式形式的赋值） | `unused = y++;` 曾被删除，`y` 的增量随之消失，函数返回 `a` 而非 `a+1` |
 
-声明可删的条件同样是两个：**既没被读也没被写**。`countUses` 只数出现次数（读），
+声明可删的条件同样是两个：**既没被读也没被写**。`countReadNames` 只数出现次数（读），
 对被写入过、却从没被读的名字一无所知——保留了一条 `unused = y++;` 之后，
 若把 `double unused` 删掉，留下的语句就引用了一个不存在的变量。
 `reads` 与 `written` 每轮重算，所以"删除赋值 → 下一轮释放声明"会自行收敛。
@@ -384,8 +458,17 @@ return t;
 DCE 之后还跑一个 **CleanupPass** 做末段清扫：删除没被读**也没被写**的零初始化声明
 （与 DCE 同一条 written 判定——只看"没被读"会把 `unused = y++;` 的声明删掉、留下
 编译不过的悬空赋值，合并时曾真实发生）、删除自赋值（`u_value[i] = u_value[i];`）、
-合并链式的声明赋值与赋值语句。`pruneBlock` 目前只清理函数体顶层 `Block`，
-嵌套块的局限见"未完成"清单。
+合并链式的声明赋值与赋值语句。`pruneBlock` 递归进入 `if`/`for` 体与嵌套 `{ }`（见
+`pruneNested`），把每一层作用域都当独立块清理；`allowUnsafeFpIdentities` 门控贯穿
+每一层。分析助手（`countReadNames` / `collectWriteLocations`）本就是深递归，缺的只是
+对嵌套语句的**删除**。
+
+**链式合并受 `allowUnsafeFpIdentities` 门控**：`x = 0; x = x + a; x = x + b` 合并为
+`x = a + b` 时**丢掉了累加器的前导 `0`**，这正是 `x + 0 → x` 那条符号零恒等——
+`a = b = -0.0` 时原式得 `+0.0`、合并式得 `-0.0`（`1.0/x` 因此从 `+inf` 变 `-inf`）。
+它挂在同一个授权开关上：默认档合并，`-s` 档保留 `x = 0; x = x + a; …`。
+（`-s` 的 `cse_main.cpp` 分支此前漏清该开关，靠 `AlgebraicSimplify` 的 `numeric_` 门控
+掩盖；Cleanup 无 `numeric_` 门控，故一并补齐。）
 
 ### 9. 前端 C++ 语法支持
 
@@ -398,7 +481,7 @@ DCE 之后还跑一个 **CleanupPass** 做末段清扫：删除没被读**也没
 | `static` / `const` / `inline` 修饰符 | 已支持 |
 | `unsigned int` 复合类型 | 已支持 |
 | `__any__` / `__host__` 等双下划线宏 | 已跳过（可配置） |
-| `#include` / `#ifdef` 等预处理指令 | 已跳过 |
+| `#include` / `#ifdef` 等预处理指令 | **不建模**：词法器发出 `PreprocessorDirective` 词法单元（不再静默丢弃整行），区域提取器据此把 `CSERegion::hasDirectives` 置位，驱动把该区域**原样透传**并计入 `skipped-unsupported`。因为 IR 没有指令节点，按 AST 重建会删掉 `#if` 守卫并把 `#if 0` 的体复活。`#` 在注释/字符串里是普通文本（那两种字面量先整块成词），所以不会被误判 |
 | `T{1}` 括号初始化 | 已支持（可配置简化） |
 | `++k` / `--k` 前缀运算符 | 已支持 |
 | `k++` / `k--` 后缀运算符 | 已支持（最长匹配成词，否则 `a++ + b` 与 `a + +b` 同流） |
@@ -409,24 +492,33 @@ DCE 之后还跑一个 **CleanupPass** 做末段清扫：删除没被读**也没
 | 模板函数调用 `latset::c<LatSet>(k)` | 已支持（作为不透明调用） |
 | 模板实参与 `<` 比较的区分 | 已支持（`ident<…>` 仅在实参列表合法、且 `>` 后紧跟 `(`/`::`/`.`/`->`/`[` 时才算模板 id，否则按 `<` 比较解析） |
 
-### 10. IR 工具函数 (ir_utils.h / stmt_walk.h)
+### 10. IR 工具函数 (stmt_walk.h / location.h / ir_utils.h)
 
 提供 pass 通用的工具函数，不侵入 IRModule：
 
+**表达式槽位遍历（`stmt_walk.h`）**
 - `forEachExpr(stmt, visit, includeLvalue=true)` —
-  **语句拥有的表达式槽位**，就地遍历（`stmt_walk.h`）。`Assign` 贡献两个槽位：
-  lvalue 与 value；引用语义允许改写。
+  **语句拥有的表达式槽位**，就地遍历。`Assign` 贡献两个槽位：lvalue 与 value；引用语义允许改写。
 - `forEachExprDeep(stmt, visit, includeLvalue=true)` — 同上，含嵌套语句。
-- `countUses(root)` — 统计 StmtIR 树中每个变量名的使用次数（经 `forEachExprDeep`）
-- `lvalueRoot(node)` — lvalue 的根变量名（`a[i].m` → `a`）
-- `collectWrittenNames(stmt, out)` — 一条语句写了哪些名字（见「正确性与安全模型」第 3 条）
+
+**读写/别名模型（`location.h`，见「正确性与安全模型」第 3 条）**
+- `locationRoot(node)` / `locationOf(node)` — lvalue 的根变量名（`a[i].m` → `a`）/ 位置
+- `collectReadNames` / `countReadNames` — 读集 / 每个名字的读次数（经 `forEachExprDeep`）
+- `collectWriteLocations` — 一条语句写了哪些位置
+- `LocationSet` / `mayAlias` / `AliasInfo` — 位置集合、别名关系、引用 referent 闭包
+- `AliasInfo::writtenBy` / `isAliasedReferent` / `writeAffectsRead` — 闭包后的写集 / 某名是否为某引用的
+  referent（不得值传播）/ 某写集是否影响对某名的读（读名先沿引用边闭包——与写集闭包的镜像）
+
+**其余（`ir_utils.h` 与 `analysis/purity.h`）**
 - `substitute(mod, root, name, replacement)` — 在 DAG 子树中替换变量
-- `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数；除数为 0 时不折叠）
-- `hasSideEffect(node)` — 丢弃这个值会不会丢掉副作用（不纯调用 / `++` `--` / `=`
-  形式的赋值）。`hasImpureCall` 只看调用，DCE 曾因此删掉 `unused = y++;` 里的自增
+- `foldConst(mod, node)` — 常量折叠（BinaryOp 两个 Constant 操作数；除数为 0 时不折叠；
+  结果保留操作数的 int/float 类型，整数除法不产生小数）
+- `hasObservableEffect(node)`（`analysis/purity.h`）— 丢弃这个值会不会丢掉副作用（不纯调用 /
+  `++` `--` / `=` 形式的赋值）。早先只看调用的 `hasImpureCall` 已删除，DCE 曾因此删掉
+  `unused = y++;` 里的自增
 
 **为什么要有 `stmt_walk.h`**：表达式槽位的清单原先在约十个 pass 里各写一遍
-（`countUses`、DCE、五个重写型 pass、CSE 的三处收集/替换、cost model），
+（`countReadNames`、DCE、五个重写型 pass、CSE 的三处收集/替换、cost model），
 每次新增一个槽位都要同步十来处，`AssignIR::targetExpr` 就是这么被漏掉的。
 现在清单只有一份；新增语句种类或槽位时只改 `forEachExpr`。
 `includeLvalue=false` 只给一个调用者用：CSEPass 不能把 lvalue 换成临时变量
@@ -461,7 +553,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 展开前还要确认展开本身是安全的，否则整个循环保持原样（不展开）：
 
 - **循环变量不得被循环体改写**：`for (i=0; i<4; ++i) { s += a; i++; }` 里的 `i++`
-  会随常量替换变成 `0++`。判据由 `collectWrittenNames` 提供，覆盖 `++`/`--`、以
+  会随常量替换变成 `0++`。判据由 `collectWriteLocations` 提供，覆盖 `++`/`--`、以
   表达式形式书写的赋值，以及结构化 store 的根。
 - **循环体局部若被改写**（`t++;`）则改名（`t__u0` …）而非内联，否则内联会把 `t`
   代进它自己的 `++`（`(a + 1.0)++`）。
@@ -499,15 +591,19 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | **类型系统不完整** | 类型用字符串表示 | 不支持类型检查、模板实例化、类型推导 |
 | **区域内无错误恢复** | 区域解析失败时整块跳过、原样输出，退出码区分全部成功 / 部分跳过 / 全失败 | 一个区域内只报第一个错误；跨区域已能继续 |
 | **仅处理标记区域** | 只解析 `//@cse` 标记的代码 | 无法跨区域优化 |
-| **作用域实现较浅** | alpha-rename 处理遮蔽；`for` 内声明简化为同一作用域 | 复杂的声明/生命周期场景可能不准 |
-| **数组复合赋值未建模** | `a[i] += x` 未展开为 `a[i] = a[i] + x` | 仅与变量 `x += y` 等价 |
+| **作用域只覆盖本区域** | alpha-rename 处理本函数内的遮蔽，以及本区域**读过**的外部名字；但工具看不到 region 之外的声明 | 若 region 外有一个与 region 内局部同名、且 region **从未读**的名字，两者仍可能共用节点。实际影响面很窄（该名字在 region 内无引用），彻底修法需要扫描 region 外的顶层声明 |
+| **数组复合赋值未建模** | `a[i] += x` 未展开为 `a[i] = a[i] + x` | 仅与变量 `x += y` 等价；`AssignIR::compoundOp` 保留原样求值 |
 | **无通用 constexpr** | 仅模式匹配已知 lattice | 其他 constexpr 调用仍不透明 |
 | ~~引用型形参未纳入别名判据~~ | **已修**：`&` 与 `*`/`[` 一起进 `_pointerParams`（形参与引用型局部） | `f(const V& v, V& w)` 以 `f(x, x)` 调用时不再跨写复用 `v` 的 load（`ref_alias` 夹具钉住）；`noAlias` 仍是恢复共享的唯一出口 |
-| **写集合只看 lvalue 的根** | `collectWrittenNames` 对元素/成员写只记根变量名 | 若两个不同根实际别名同一对象，检查会认为"没写"；`noAlias` 与"根名不同即不别名"是当前的全部依据 |
+| **写集合只看 lvalue 的根** | `collectWriteLocations` 对元素/成员写只记根变量名 | 若两个不同根实际别名同一对象，检查会认为"没写"；`noAlias` 与"根名不同即不别名"是当前的全部依据 |
 | **写集合不含声明** | `VarDecl` 不计入写集合 | 名字遮蔽已做 alpha-rename，故不会与旧绑定混淆；新增读写分析时注意这一点 |
 | **break/continue 阻断展开** | 循环体内出现属于本循环的 `break`/`continue` 时不展开该循环 | 该循环体不参与跨语句 CSE（正确性优先）；`break;`/`continue;` 以「名为 `break`/`continue` 的裸变量表达式语句」形式到达 IR，因为前端没有这两个关键字 |
-| **FLOP 口径是「每条语句一次」** | `cost_model` 按**提及该节点的语句数**计数，而不是 DAG 节点数 | 它要近似的是**生成代码**的开销：DAG 已哈希去重，而 codegen 在每个使用点重印该节点。改成整函数去重会把 `for (i<4) a+=b;` 展开出的四条 `a = a + b;` 报成 1 flop（实为 4），所以不是缺陷；真正未解决的是同一条语句内重复的子表达式只计一次 |
+| **FLOP 口径是「按引用次数」** | `cost_model` 按**每个使用点**（引用次数）计费，而非 DAG 唯一节点数；物化临时只算其定义一次（`totalNodes` 仍为唯一节点数） | 它近似的是**生成代码**的开销：DAG 已哈希去重，而 codegen 在每个使用点重印未物化的节点。`for (i<4) a+=b;` 展开出的四条 `a = a + b;` 记 4；同一条语句内重复的子表达式也逐处计（旧口径只计一次，是已修掉的近似）。规则由 `verify_cost.cpp` 钉住，实现是反向拓扑多重度传播（O(V+E)） |
 | **常量文本不进身份** | `numText` / `symbol` 不是节点身份的一部分 | 同一个常量节点只有一份拼写，可能被算术位置与下标位置共用；下标由 codegen 保证整型 |
+| **`if`/`else` 体内不做跨语句 CSE** | `nested` 是一个布尔标记：节点只要在条件执行里出现过就整体排除 | 过度保守而非不安全：`if (n>0) { t=a*b; u=a*b; }` 完全不提取。改成支配树即可放开（见 `docs/cse-round6-audit.md` §4 B1） |
+| **CSE 提取是 O(n²)** | 每提取一个候选就重扫全部语句、重算写集 | 400 个独立候选约 7 秒；大内核会到分钟级（§4 C1） |
+| **解析深度上限 512** | 表达式嵌套超过 512 层报 `CSE-PARSE-DEPTH` 并透传区域 | 防的是栈溢出崩溃；真实内核远低于此 |
+| **明确搁置的改造** | B1 支配树（放开 if 体内 CSE）、C1 CSE 单遍化（O(n²)→O(n)）、C2 变量版本化（消除按名驻留 + 写集补偿层）、E1 region 外声明扫描、E2 AssignIR 双表示统一、P2-7 `IRBuilder::buildExpr`/`buildValue` 双路径合并 | 2026-10 审计（`docs/cse-round6-audit.md` §7）评估后**有意搁置**：均为能力提升或整洁收益，无正确性增量，而回归面集中在核心 pass。重启条件：C2 需「忘问写集」类缺陷再现成模式；B1 需有真实内核因 if 体内 CSE 缺失而收益可见；E1 需 A3 的最小修法（读/写外部名登记）再暴露新缺口；P2-7 需两条镜像路径出现行为漂移的缺陷（它们是「同一判断多份实现」的已知形状，当前靠同一套孪生测试兜住——合并须带向量开启档逐位不变的验证） |
 
 > 注：不纯调用合并、跨 store 复用 load、分支外提、遮蔽、`==`/`<=` 运算符等
 > 正确性问题已在通用安全模式下修复（见「正确性与安全模型」）。
@@ -526,6 +622,7 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 |------|------|------|
 | **通用 constexpr 求值** | 解析 constexpr 数组/函数，不依赖硬编码表 | 待实现 |
 | **乘法一般结合律** | `(a*b)*c` 与 `a*(b*c)` 视为等价 | 部分实现（常量因子） |
+| **CounterProp 失效细化** | `updateKnown`/`entrySeedFor` 遇到任何 wildcard 写集就清空整个计数器表；可细化为只失效「实际被写」的计数器 | 待实现（性能优化，非性能正确性） |
 
 ### 低优先级
 
@@ -533,41 +630,48 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 |------|------|------|
 | **错误恢复** | 遇到 `;` 或 `}` 时同步，继续解析 | 待实现 |
 | **CFG 支持** | 支持 break/continue/goto | 待实现 |
+| **parser 重复收敛** | `parseType`/`parseFullType` 的限定名/模板实参平衡扫描逐行近似重复（~65 行），`template<...>` 跳过前瞻三份手写复制；可收敛为带参数的单函数 + `skipTemplateParams()`（约 −100 行） | 机会性做：下次因新特性改动 parser.cpp 时顺手合并，不单独立项（纯整洁收益，无判据可红） |
 
 ### 延后项（可选）
 
 | 项 | 描述 | 状态 |
 |----|------|------|
-| **Cleanup 递归清理** | `CleanupPass::pruneBlock` 目前只清理函数体顶层 `Block`，不递归进入 `if`/嵌套块。向量 lowering 产生的自赋值（`u_value[i] = u_value[i];`）在 `LoopUnroll` 后位于顶层，已由本次修复覆盖；更深的嵌套场景需让 `pruneBlock` 递归 | 待实现 |
-| **生成物自赋值回归断言** | 在 `tests/run_tests.sh` 的 csegen 冒烟中，对生成输出断言不存在 `a[i] = a[i];`（python 正则 backreference），防止 `CleanupPass` 自赋值删除逻辑回归 | 待实现 |
+| **Cleanup 递归清理** | `CleanupPass::pruneBlock` 递归进入 `if`/`for` 体与嵌套 `{ }`（`pruneNested`），每层作用域独立清理，`allowUnsafeFpIdentities` 门控贯穿。夹具 `cleanup_nested` + `run_tests.sh` 形状检查钉住 | **已实现** |
+| **生成物自赋值回归断言** | `tests/verify/check_self_assign.py`（正则 backreference，注释盲）在 csegen 冒烟中对三个 `.ur.h` 断言不存在 `a[i] = a[i];` | **已实现** |
 
 ## 测试覆盖
 
 | 测试 | 覆盖功能 |
 |------|----------|
 | `tests/fixtures/basic_cse.cpp` | 基本 CSE / 乘积链因式分解（10 flops after） |
-| `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（49 flops after；含 runtime-bound 循环，报告为下界） |
+| `tests/fixtures/features.cpp` | 多函数综合：结构体/方法、模板、箭头/成员访问、循环、分支（51 flops after；含 runtime-bound 循环，报告为下界） |
 | `tests/fixtures/namespace_case.cpp` | `//@cse` 区域内 namespace 的函数/结构体被优化并输出（4 flops after） |
 | `tests/fixtures/equilibrium_d3q19.cpp` | FreeLB D3Q19 loop 版：展开 + 常量解析 + 重结合（向量加权后 84 flops） |
-| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（19 flops after） |
-| `tests/fixtures/cost_nested.cpp` | 成本模型：三角 dim 循环、runtime-bound 循环（计一次并标记 unknownLoops）、向量加权、helper call（355 flops after，合并后实测；247 是依赖已删除的 `const`-shortcut 的旧值） |
+| `tests/fixtures/safety_cases.cpp` | 正确性风险用例：不纯调用/load-store/分支/比较运算符/遮蔽（21 flops after） |
+| `tests/fixtures/cost_nested.cpp` | 成本模型：三角 dim 循环、runtime-bound 循环（计一次并标记 unknownLoops）、向量加权、helper call（355 flops after） |
 | `tests/fixtures/cost_descending.cpp` | 成本模型：递减循环（`>=`+`--`、`>`+`-=k`）正确计数，runtime-bound 循环标记 unknownLoops（35 flops） |
 | `tests/fixtures/recombine.cpp` | 表达式重组（`-r`）：乘法因子提取生效，除法/整数除法/不纯调用不被改写（24 flops after） |
 | `tests/verify/verify_equilibrium.cpp` | D3Q19 生成代码与参考实现数值一致性 |
 | `tests/verify/verify_safety.cpp` | 安全用例的差分执行校验 |
 | `tests/verify/verify_recombine.cpp` | `-r` 输出的差分执行校验（数值等价 + 副作用出现次数） |
 | `tests/fixtures/parens.cpp` | 括号保持：右子节点在等高优先级时必须保留括号（默认档 + `-s` 档，19 flops） |
-| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名；成员、箭头、元素写；只写不读的局部必须活过 DCE；共享索引要两侧同时改写（19 flops，`-s` 档） |
-| `tests/fixtures/float_identities.cpp` | `-s` 档必须保留 0 / ±inf / NaN 处的 IEEE 语义（4 flops） |
+| `tests/fixtures/store_aware.cpp` | 跨语句改写必须尊重写操作：CSE / ValueProp / `const` 别名；成员、箭头、元素写；只写不读的局部必须活过 DCE；共享索引要两侧同时改写（21 flops，`-s` 档） |
+| `tests/fixtures/float_identities.cpp` | `-s` 档必须保留 0 / ±inf / NaN 处的 IEEE 语义（8 flops） |
 | `tests/verify/verify_parens.cpp` | 括号保持的差分执行校验（覆盖 `-` `/` `*` `%` 的各种右子节点） |
 | `tests/verify/verify_store_aware.cpp` | 跨 store 重写的差分执行校验（含**真别名**调用） |
 | `tests/fixtures/ref_alias.cpp` | 引用形参与指针同一条别名规则：`f(const V& v, V& w)` 以同一对象调用时不得跨写复用 `v` 的 load（1 flops，`-s` 档） |
 | `tests/verify/verify_ref_alias.cpp` | 真别名调用 `f(x, x)` 的数值校验（修复前得 2.0，应为 10.0） |
 | `tests/verify/verify_float_identities.cpp` | 特殊值下的数值校验（NaN 是否仍然产生） |
 | `tests/verify/verify_config.cpp` | 库层 `CSEConfig` 契约（CLI 无法隔离的新开关） |
+| `tests/fixtures/speculation.cpp` | 惰性求值不得被投机：`k ? 1/k : 0` 与 `k && (10/k)` 写两遍时，除法不得被提到条件之外（`k=0` 曾 SIGFPE）；对照 `k ? a*b : 0` 里的乘积仍应被提取（8 flops，`-s` 档 + 孪生差分 4 对） |
+| `tests/fixtures/fresh_names.cpp` | 生成名唯一性：用户变量 `_cse_0_4`、形参 `t__u0`、局部 `x__s1` 分别撞上 CSE/展开/builder 的命名空间，必须不共享节点（3 对孪生） |
+| `tests/fixtures/shadow_global.cpp` | region 只读不声明的外部名字：`double s = t; double t = a;` 里的局部 `t` 必须 alpha-rename，否则 `s` 被内联（基线 2995 处不匹配，3 对孪生） |
+| `tests/fixtures/purity_names.cpp` | 内建白名单只认限定名：用户自定义 `max` 的两次调用必须各生效一次（调用计数器为判据）；对照 `std::sqrt` 仍去重（形状检查） |
+| `tests/fixtures/loop_escape.cpp` | 循环变量逃逸：`return s + i;` 后的循环不得展开（形状检查，输入本身不合法 C++）；对照：受控计数器仍展开、形参同名仍展开、兄弟循环各自展开（15 flops，3 对孪生） |
+| `tests/verify/verify_purity_names.cpp` | 上述 `max` 的调用计数 + `std::sqrt` 的值校验 |
 | `tests/fixtures/comment_braces.cpp` | 区域提取：注释里的 `{` `}` 不参与括号计数（默认档 + `-s` 档，4 flops） |
 | `tests/fixtures/dead_store_effects.cpp` | DCE 保留带副作用的死存储；纯死存储仍删除（3 flops + 三条形状检查） |
-| `tests/fixtures/constant_edges.cpp` | 除零不折叠、`-0.0` 与 `1e16` 拼写保留、共享字面量的下标仍为整数（6 / `-s` 7 flops + 三条文本检查） |
+| `tests/fixtures/constant_edges.cpp` | 除零不折叠、`-0.0` 与 `1e16` 拼写保留、共享字面量的下标仍为整数（6 / `-s` 6 flops + 三条文本检查） |
 | `tests/fixtures/void_param.cpp` | `f(void)` 可解析，普通形参列表不受影响（4 flops） |
 | `tests/verify/verify_comment_braces.cpp` | 注释含括号的区域的数值校验 |
 | `tests/verify/verify_dead_store_effects.cpp` | 自增/自减、全局写、不纯调用、纯死存储的数值校验 |
@@ -579,11 +683,11 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 | `tests/verify/verify_value_prop_chain.cpp` | 链式局部变量（二/三链、成员 load 起链、多次使用、遮蔽全局）的差分执行校验 |
 | `tests/fixtures/cleanup_store_index.cpp` | Cleanup：只在 store 左值（`a[x] = v` / `p[i].v = v`）中读取的局部变量不得删声明；含遮蔽同名全局的静默错槽变体（5 flops，默认档 + `-s` 档） |
 | `tests/verify/verify_cleanup_store_index.cpp` | store 索引局部变量（纯左值 / 左值内表达式 / 成员元素 / 遮蔽全局）的差分执行校验（返回值与被改写缓冲区同时比较） |
-| `tests/fixtures/semantics_fixes.cpp` | 语义安全修复回归（两批）：逻辑运算符、codegen 括号、复合存、跨调用写、不纯调用被 `*0.0` 丢弃、整数除法、遮蔽、链式合并、分数起点循环；第二批的 `for` 初始化赋值、循环变量/局部被 `++` 改写、`break`/`continue` 阻断展开、负常量前导 `-`、`<` 后接 `>` 的区域解析（默认档 76 / `-r` 档 76 / `-s` 档 77 flops + 一条 `<`/`>` 形状检查） |
+| `tests/fixtures/semantics_fixes.cpp` | 语义安全修复回归（两批）：逻辑运算符、codegen 括号、复合存、跨调用写、不纯调用被 `*0.0` 丢弃、整数除法、遮蔽、链式合并、分数起点循环；第二批的 `for` 初始化赋值、循环变量/局部被 `++` 改写、`break`/`continue` 阻断展开、负常量前导 `-`、`<` 后接 `>` 的区域解析（默认档 77 / `-r` 档 77 / `-s` 档 76 flops + 一条 `<`/`>` 形状检查） |
 | `tests/verify/verify_semantics_fixes.cpp` | 上述用例的差分执行校验（`sf_*` 对未标记的 `ref_*` 孪生），默认档 + `-s` 档各跑一次 |
 | `tests/fixtures/ref_param_store.cpp` | DCE 不得删除对引用的存储（引用形参或引用型局部）；指针形参自身的存储仍应删除（9 flops） |
 | `tests/verify/verify_ref_param_store.cpp` | 引用存储存活、指针自存仍死的差分执行校验 |
-| `tests/fixtures/loop_unroll_inline.cpp` | 展开：循环体局部若其初值读取了循环体写入的变量，必须改名而非内联（默认档 21 / `-s` 档 23 flops） |
+| `tests/fixtures/loop_unroll_inline.cpp` | 展开：循环体局部若其初值读取了循环体写入的变量，必须改名而非内联（默认档 39 / `-s` 档 40 flops） |
 | `tests/verify/verify_loop_unroll_inline.cpp` | 展开内联越过写入的差分执行校验 |
 | `tests/fixtures/struct_region.cpp` | `//@cse` 标记的纯数据 struct 必须输出（2 flops） |
 | `tests/verify/verify_struct_region.cpp` | 纯数据 struct 输出的编译校验 |
@@ -597,16 +701,23 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 > 数值正确性以夹具 + 验证器成对覆盖（equilibrium、safety、recombine、parens、store_aware、ref_alias、
 > float_identities、mixed_ops、write_visibility、effect_duplication、frontend_forms、
 > comment_braces、dead_store_effects、constant_edges、void_param、loop_unroll_semantics、value_prop_chain、cleanup_store_index、
-> semantics_fixes、ref_param_store、loop_unroll_inline、struct_region、region_toplevel），而非 golden-diff。
+> semantics_fixes、ref_param_store、loop_unroll_inline、struct_region、region_toplevel 等——
+> 上表为代表性条目，全部夹具与判据的权威清单在 `tests/README.md` 与 `run_tests.sh`），
+> 而非 golden-diff。
+> 库层契约有两类：CLI 够不到的开关与守卫（`verify_config`、`verify_builder_guards`、
+> `verify_counter_prop`——counter-prop 是插件注入的 pass，CLI 不注册它），以及
+> **pass 契约**（`verify_pass_contracts.cpp`：每个默认管线的 pass 必须能触发、
+> 只有 LoopUnroll 可不保效果、跨语句 pass 必须声明写集契约 `Pass::crossesStatements`）。
 > 注意 **FLOP 回归对某些缺陷无效**：括号丢失不改变 flops，`a*x ± a` 的提取是 FLOP 中性的，
 > 跨成员写的错误共享也恰好省下同样的 flops（store_aware 修复前后是同一个数），
 > `y++` 与 `-0.0` 更是完全不进 flops——这几类只能靠数值验证器或生成文本的形状检查，
 > 因此 `run_tests.sh` 里另有一组 grep 形状检查（重组形态、强度削减、死存储、常量发射、
-> store 索引、`<`/`>` 区域解析）。
+> store 索引、`<`/`>` 区域解析、**穷举 switch**——`check_stmt_switches.py` 断言
+> 每个 `switch (stmt->kind)` 显式穷举或带 `// partial:` 标记，见「编码约定」）。
 > FreeLB 侧 `verify_*.py` 是**数值**校验：解析两个文件、按公式求值再逐个比较，
 > 不做文本比对（所以重命名 `_cse_*` 这类内部标识符它发现不了，字面量拼写变化也不影响它）。
 > 入口是 `make test`（`tests/run_tests.sh`）：FLOP 代价回归（默认档 + `-r` 档 + `-s` 档）→
-> 形状检查 → 数值校验 → 库层契约（`verify_config` + `verify_builder_guards`）→ `csegen`
+> 形状检查 → 数值校验 → 库层契约（`verify_config` + `verify_builder_guards` + pass 契约）→ `csegen`
 > 冒烟；`check_lattice.py` 与 FreeLB 侧 `verify_*.py` 仅在存在 FreeLB checkout
 > （`FREELB=` 或 `~/FreeLB`）时运行，否则跳过。
 
@@ -615,11 +726,11 @@ namespace，须为 `moment` / `equilibrium` / `force` 之一（FreeLB 的 `.ur.h
 成本模型现在按 **标量 FLOP、向量按 lane 加权** 计算：向量算子的代价为其 lane
 数，向量点积为 `2d-1`，纯 helper/intrinsic 调用由 FreeLB 插件按名给定代价
 （`getnorm2 -> 2d-1` 等），未知调用与无法解析的循环会被显式计数
-（`unknownLoops` / `unmodeledCalls`）。共享子表达式按 **唯一 DAG 节点** 计一次
-（与生成的 CSE 临时变量一致），循环体按执行次数缩放（三角 `for (b=a; b<d; ++b)`
-嵌套精确计数）。详见 `docs/cost_model_redesign.md`。
+（`unknownLoops` / `unmodeledCalls`）。子表达式按 **引用次数** 计费：每个使用点
+一次，物化临时只算其定义一次（`totalNodes` 仍是唯一节点数），循环体按执行次数
+缩放（三角 `for (b=a; b<d; ++b)` 嵌套精确计数）。详见 `docs/cost_model_redesign.md`。
 
-### D3Q19 equilibrium 实测（cse -c，向量加权 + 唯一节点）
+### D3Q19 equilibrium 实测（cse -c，向量加权 + 按引用次数）
 
 `tests/fixtures/equilibrium_d3q19.cpp`（通用 `cse -c` 入口，引擎回归用）：
 
@@ -647,14 +758,22 @@ FreeLB 头文件的成本由 **`csegen --cost`** 测量：它与生成 `.ur.h` �
 
 | 头文件 | lattice | Before | After | Saved | vector-ops |
 |--------|:-------:|:------:|:-----:|:-----:|:----------:|
-| `moment.h` | D2Q9 | 958 | 339 | 64.6% | 0→0 |
-| `moment.h` | D3Q19 | 3115 | 749 | 76.0% | 0→0 |
-| `equilibrium.h` | D2Q9 | 138 | 43 | 68.8% | 1→0 |
-| `equilibrium.h` | D3Q19 | 328 | 89 | 72.9% | 1→0 |
-| `force.h` | D2Q9 | 360 | 143 | 60.3% | 0→0 |
-| `force.h` | D3Q19 | 1254 | 341 | 72.8% | 0→0 |
+| `moment.h` | D2Q9 | 956 | 355 | 62.9% | 0→0 |
+| `moment.h` | D3Q19 | 3113 | 781 | 74.9% | 0→0 |
+| `equilibrium.h` | D2Q9 | 138 | 45 | 67.4% | 9→0 |
+| `equilibrium.h` | D3Q19 | 328 | 91 | 72.3% | 19→0 |
+| `force.h` | D2Q9 | 396 | 150 | 62.1% | 0→0 |
+| `force.h` | D3Q19 | 1482 | 353 | 76.2% | 0→0 |
 
-`equilibrium` 的 After=89 与手写参考基线一致。
+`equilibrium` 的 After=91（此前 89）。差的 2 来自 `const T&` 形参不再自动视为
+只读根的正确性收紧，不是这次零恒等式改动引入的。
+
+> 这组数字在 2026-10 一度整体退化近一倍（`moment` D3Q19 779 → 1477、`force`
+> D3Q19 341 → 635）。根因是三条零恒等式要求被替换常量携带表达式的 int/float
+> kind，而 `0 * cell[i]` 的操作数是 load、kind 无法证明，于是每个零方向分量都
+> 原样留下。`CSEConfig::assumeFloatOperands`（FreeLB profile 开启，`-s` 关闭）
+> 让"无法证明"按浮点处理，恢复了折叠；可证明的整型仍然优先，所以
+> `(0 * k + 2) / 4` 依旧是整数除法。
 
 ## 构建
 

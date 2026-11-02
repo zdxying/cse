@@ -88,6 +88,9 @@ outside the region is copied through unchanged, and the output file is always
 | `-r`, `--recombine` | enable factor extraction (`a*x + a*y → a*(x+y)`) |
 | `-s`, `--safe` | conservative semantics for arbitrary C++ |
 | `-v`, `--verbose` | print each pass to stderr |
+| `--dump-ir` | print the IR before and after each pass (to stdout) |
+| `--verify` | check pass invariants (effect preservation); exit 4 on violation |
+| `--lattice NAME` | lattice set for the cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27) |
 | `-h`, `--help` | usage |
 
 ### Generate FreeLB `.ur.h` specializations
@@ -120,12 +123,15 @@ the build entry points and the current status.
 ## Safety model
 
 In conservative mode (`-s`, and the `CSEConfig` defaults), optimization
-preserves behavior through six mechanisms:
+preserves behavior through eight mechanisms:
 
 1. **Purity** — calls are assumed to have side effects; only calls registered as
    pure may be deduplicated or hoisted across statements. Any rewrite that
    collapses two occurrences into one requires the collapsed subexpression to be
-   pure.
+   pure. The builtin math list matches **qualified** free calls only
+   (`std::sqrt`): a bare `max`/`min`/`abs` may name the user's own function, and
+   merging two calls to it drops a side effect. Member calls (`obj.sin`) never
+   consult the list.
 2. **Memory** — loads from read-only roots may be shared; loads from writable or
    unknown roots are kept independent so nothing is reused across a store.
    Pointer *and* reference parameters (`T*`, `T&`, arrays) get no special
@@ -143,13 +149,28 @@ preserves behavior through six mechanisms:
    the conservative answer when another pointer may refer to the same object.
 4. **Dominance** — expressions computed inside `if`/`else`/loops are marked
    nested and never lifted out.
-5. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
-   with the same name are never merged.
-6. **Loop unrolling precondition** — a loop is only unrolled when every local it
+5. **Speculation** — `isSpeculatable` (`analysis/purity.h`) answers a different
+   question from purity: *may this run where the source did not run it?* It is
+   the fix for `k ? 1/k : 0`, whose division used to be hoisted out of the
+   conditional and trap at `k = 0`. A guarded operand (a ternary arm, the right
+   side of `&&`/`||`) is extracted only when it is speculatable. Hoisting the
+   *whole* conditional is always safe — it keeps its internal short-circuit —
+   so only the condition / left operand has to be speculatable.
+6. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
+   with the same name are never merged. The rename also fires when the region
+   *reads* a name it never declares (`double s = t;` where `t` is a global): the
+   later `double t = a;` must not become the same node. Every generated name
+   (`__s`, `__u`, `_cse_`) comes from `IRModule::freshName`, so it can never
+   collide with a user identifier.
+7. **Loop unrolling precondition** — a loop is only unrolled when every local it
    declares can be inlined or safely renamed, its induction variable is not
-   written by `++`/`--` inside the body, and the body contains no `break` /
-   `continue` of its own; otherwise the loop stays. The induction variable must
-   also be declared in the `for` init (an assignment init keeps the loop).
+   written by `++`/`--` inside the body, is not read *after* the loop statement,
+   and the body contains no `break` / `continue` of its own; otherwise the loop
+   stays. The induction variable must also be declared in the `for` init (an
+   assignment init keeps the loop).
+8. **Bounded recursion** — expression parsing is capped at 512 nesting levels
+   and reports `CSE-PARSE-DEPTH` instead of overflowing the stack. The region is
+   skipped and passed through, like any other unreadable region.
 
 The code generator also always prints the tree it was given: a right child at
 equal precedence keeps its parentheses, because under IEEE-754 not only
@@ -162,6 +183,20 @@ reassociation (additive and multiplicative regrouping) via `allowFpReassoc`, and
 the special-value / signed-zero identities (`x*0`, `x-x`, `0/x`, `x/x`, `x+0`,
 `0-x`) via `allowUnsafeFpIdentities`.
 
+The zero identities substitute a constant, so that constant has to carry the
+expression's int/float kind: emitting an integer `0` where the source computed a
+double turns an enclosing `/ 4` into integer division. The kind of a load is not
+provable, so `assumeFloatOperands` (on in the FreeLB profile, off under `-s`)
+says an unprovable operand is floating, which is what lets `0 * cell[i]` fold.
+A *proven* integer always wins, so `(0 * k + 2) / 4` stays an integer division.
+
+One rule is unconditionally on because it is bit-exact: sign normalization
+(`a * (-b) -> -(a * b)`). Its only deviation is the sign bit of the NaN that
+`0 * inf` produces -- not an observable value under IEEE-754, and gating it would
+cost the conservative profile the equilibrium kernel's opposite-direction
+sharing. `verify_exact_identities.cpp` pins both the exactness and that
+exception.
+
 ## Tests
 
 `make test` runs `tests/run_tests.sh`:
@@ -170,19 +205,24 @@ the special-value / signed-zero identities (`x*0`, `x-x`, `0/x`, `x/x`, `x+0`,
 |-------|----------------|
 | Cost regression | FLOP counts for the fixtures in `tests/fixtures/`, run under three configurations (default, `-r`, `-s`) |
 | Numerical | `verify_*` compile and run generated output (semantics_fixes, equilibrium, safety, recombine, parens, store_aware, float_identities, ref_alias, …) |
-| Config contract | `verify_config.cpp` links `libcse.a` and pins the `CSEConfig` switch behaviour the CLI cannot isolate |
+| Config contract | `verify_config.cpp` / `verify_counter_prop.cpp` link `libcse.a` and pin the `CSEConfig` switches and plugin-injected passes the CLI cannot isolate |
+| Pass contracts | `verify_pass_contracts.cpp` pins that every default-pipeline pass fires somewhere, only LoopUnroll may forgo effect preservation, and cross-statement passes declare the write-set contract |
+| Shape checks | grep assertions on generated text, plus `check_stmt_switches.py` (every statement-kind switch stays exhaustive or marked `// partial:`) |
 | `csegen` smoke | representative specializations appear in generated headers |
 | Lattice drift guard | engine tables vs FreeLB `lattice_set.h` (skipped without a FreeLB checkout) |
 | FreeLB verifiers | `verify_{moment,equilibrium,force}.py` (skipped without a FreeLB checkout) |
 
 The cost model counts **scalar FLOPs with vector ops weighted by lane count**
 (a vector-vector product is a dot: `2d-1`), charges known pure helpers via a
-FreeLB hook (`getnorm2` → `2d-1`, …), counts each shared DAG node once, and
-reports `unknownLoops` / `unmodeledCalls` so unresolved constructs are visible
-as a lower bound. See `docs/cost_model_redesign.md`.
+FreeLB hook (`getnorm2` → `2d-1`, …), and charges each **reference** to a DAG
+node — once per use site, so a shared node that codegen re-prints costs each
+time it is printed, while a CSE-materialized temporary costs only its
+definition. `totalNodes` stays the distinct-node count. It reports
+`unknownLoops` / `unmodeledCalls` so unresolved constructs are visible as a
+lower bound. See `docs/cost_model_redesign.md`.
 
-Sample results (before → after): `basic_cse` 10 → 10, `features` 49 → 49,
-`equilibrium_d3q19` 323 → 84 FLOPs (−74.0%), `safety_cases` 22 → 19,
+Sample results (before → after): `basic_cse` 11 → 10, `features` 52 → 51,
+`equilibrium_d3q19` 323 → 84 FLOPs (−74.0%), `safety_cases` 24 → 21,
 `cost_nested` 478 → 355 (conservative since `const` parameters stopped being
 assumed read-only roots), `cost_descending` 35 → 35.
 
@@ -202,8 +242,13 @@ docs/           architecture and port status
 
 - [docs/architecture.md](docs/architecture.md) — pipeline, IR, passes, safety
   model, build and test coverage
+- [docs/cost_model_redesign.md](docs/cost_model_redesign.md) — the cost
+  accounting model (per-reference FLOPs, vector weighting, hooks)
 - [docs/freelb_port_status.md](docs/freelb_port_status.md) — FreeLB integration
   status, open TODOs and the generic/FreeLB boundary
+- [docs/cse-round6-audit.md](docs/cse-round6-audit.md) — the latest full
+  architecture audit (defects found, fixes landed, backlog dispositions;
+  not version-controlled)
 
 ## Known limitations
 

@@ -1,5 +1,6 @@
 #include "ir_builder.h"
 
+#include "location.h"
 
 #include "../frontend/diagnostics.h"
 
@@ -15,16 +16,16 @@ namespace {
 const Stmt& requireStmt(const std::unique_ptr<Stmt>& stmt, const char* what,
                         SourceLoc loc) {
   if (!stmt)
-    throw CSEError(
-        {"build", loc.line, loc.col, std::string("empty statement slot: ") + what});
+    throw CSEError({"build", "CSE-BUILD-EMPTY-STMT", loc.line, loc.col,
+                    std::string("empty statement slot: ") + what});
   return *stmt;
 }
 
 const Expr& requireExpr(const std::unique_ptr<Expr>& expr, const char* what,
                         SourceLoc loc) {
   if (!expr)
-    throw CSEError(
-        {"build", loc.line, loc.col, std::string("empty expression slot: ") + what});
+    throw CSEError({"build", "CSE-BUILD-EMPTY-EXPR", loc.line, loc.col,
+                    std::string("empty expression slot: ") + what});
   return *expr;
 }
 
@@ -48,10 +49,9 @@ void IRBuilder::prescanFunction(const FunctionDef& func) {
     // *through this reference*; another reference to the same object may still
     // write it (`f(x, x)` with `f(const V& v, V& w)`), so a load through it must
     // not be shared across that write. Reading only `*`/`[` here left the
-    // reference case outside the rule.
-    if (p.type.find('*') != std::string::npos ||
-        p.type.find('&') != std::string::npos ||
-        p.type.find('[') != std::string::npos)
+    // reference case outside the rule. `classifyDeclaredType` (location.h) owns
+    // the "does this type name an aliasable root?" test.
+    if (classifyDeclaredType(p.type) != AliasClass::PrivateLocal)
       _pointerParams.insert(p.name);
   }
 
@@ -69,9 +69,7 @@ void IRBuilder::prescanStmt(const Stmt& stmt) {
       break;
     case StmtKind::VarDecl:
       _declared.insert(stmt.varName);
-      if (stmt.varType.find('*') != std::string::npos ||
-          stmt.varType.find('&') != std::string::npos ||
-          stmt.varType.find('[') != std::string::npos)
+      if (classifyDeclaredType(stmt.varType) != AliasClass::PrivateLocal)
         _pointerParams.insert(stmt.varName);
       if (stmt.init) prescanExpr(*stmt.init);
       break;
@@ -171,7 +169,7 @@ void IRBuilder::prescanExpr(const Expr& expr) {
   }
 }
 
-bool IRBuilder::isPureCallee(const std::string& callee) const {
+bool IRBuilder::isPureCallee(const std::string& callee, bool isMemberCall) const {
   if (callee.empty()) return false;
   std::string last = callee;
   auto q = last.rfind("::");
@@ -179,13 +177,29 @@ bool IRBuilder::isPureCallee(const std::string& callee) const {
   auto lt = last.find('<');
   if (lt != std::string::npos) last = last.substr(0, lt);
 
-  static const char* kBuiltin[] = {
-      "sin",   "cos",  "tan",   "asin",  "acos",  "atan",  "atan2",
-      "exp",   "log",  "log2",  "log10", "sqrt",  "cbrt",  "pow",
-      "fabs",  "abs",  "floor", "ceil",  "round", "trunc", "fmin",
-      "fmax",  "min",  "max",   "hypot", "fmod",  "copysign"};
-  for (const char* w : kBuiltin) {
-    if (last == w) return true;
+  // The builtin whitelist may only be consulted for a *qualified* free call
+  // (`std::sqrt`, `::fabs`). Two things can go wrong without that restriction:
+  //
+  //   * a member call `obj.sin(...)` carries only the method's bare name here,
+  //     so a user method called `sin`/`max`/`abs` would be treated as a builtin;
+  //   * a *free* call to a user-defined `max(...)` is indistinguishable from
+  //     `std::max` by its bare name -- and `max`/`min`/`abs` are exactly the
+  //     names users define most often. CSE then merges two calls with side
+  //     effects into one (`g_calls` went from 2 to 1 in the fixture).
+  //
+  // A qualified name is safe in the other direction: user code cannot add a
+  // name to `std`, so `std::max` really is the standard one. Free calls to a
+  // *bare* `sqrt`/`max` are pure only when the configured hook says so.
+  const bool qualified = callee.find("::") != std::string::npos;
+  if (!isMemberCall && qualified) {
+    static const char* kBuiltin[] = {
+        "sin",   "cos",  "tan",   "asin",  "acos",  "atan",  "atan2",
+        "exp",   "log",  "log2",  "log10", "sqrt",  "cbrt",  "pow",
+        "fabs",  "abs",  "floor", "ceil",  "round", "trunc", "fmin",
+        "fmax",  "min",  "max",   "hypot", "fmod",  "copysign"};
+    for (const char* w : kBuiltin) {
+      if (last == w) return true;
+    }
   }
   if (_config.isPureFunction && _config.isPureFunction(callee)) return true;
   return false;
@@ -237,18 +251,35 @@ std::string IRBuilder::declare(const std::string& name) {
   // interns variables by name, so two sibling `{ double t; }` blocks would
   // otherwise share one node; ValueProp's flat defs map then keeps only the
   // last `t` and applies it to both. `_seenNames` covers both cases.
-  bool shadowed = _seenNames.count(name) != 0;
+  //
+  // `_externallyReferenced` covers the third case, which is not about the
+  // function at all: a name the region never declares but *reads* names storage
+  // that lives outside the region (`double s = t;` where `t` is a global). If
+  // the region then declares its own `t`, the two must not share a node --
+  // variables are interned by name, so without the rename the global read and
+  // the local declaration become the same DAGNode and value propagation inlines
+  // the local's value into the earlier read:
+  //
+  //   double t = 5.0;
+  //   //@cse
+  //   double f(double a) { double s = t; double t = a; return s + t; }
+  //
+  // `f(2)` is 7 (5 + 2); without the rename it becomes `a + a` = 4.
+  bool shadowed = _seenNames.count(name) != 0 ||
+                  _externallyReferenced.count(name) != 0;
   for (const auto& s : _scopes) {
     if (s.count(name)) {
       shadowed = true;
       break;
     }
   }
-  std::string internal = name;
-  if (shadowed) {
-    int& n = _shadowCounters[name];
-    internal = name + "__s" + std::to_string(++n);
-  }
+  // `freshName` owns uniqueness: it checks the module's reserved set, which
+  // includes every variable node and every name the builder has reserved, so a
+  // generated name can never collide with a user identifier the pass has not
+  // reached yet.
+  std::string internal =
+      shadowed ? _module->freshName(name + "__s") : name;
+  if (!shadowed) _module->reserveName(name);
   _scopes.back()[name] = internal;
   _seenNames.insert(name);
   _seenNames.insert(internal);
@@ -264,8 +295,20 @@ std::string IRBuilder::resolve(const std::string& name) const {
   return name;
 }
 
+bool IRBuilder::isBound(const std::string& name) const {
+  for (auto it = _scopes.rbegin(); it != _scopes.rend(); ++it)
+    if (it->count(name)) return true;
+  return false;
+}
+
 DAGNode* IRBuilder::varRef(const std::string& name) {
-  return _module->getVar(resolve(name));
+  const std::string resolved = resolve(name);
+  // A name that no declaration in the region binds denotes storage declared
+  // outside it (a global, or an enclosing function's local). Remember it, so a
+  // later declaration of the same spelling is alpha-renamed instead of silently
+  // sharing its node (see declare()).
+  if (!isBound(name)) _externallyReferenced.insert(name);
+  return _module->getVar(resolved);
 }
 
 int IRBuilder::typeLanes(const std::string& type) const {
@@ -284,8 +327,8 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
   prescanFunction(func);
 
   _scopes.clear();
-  _shadowCounters.clear();
   _seenNames.clear();
+  _externallyReferenced.clear();
   _vectorVars.clear();
   _vecLocalComps.clear();
   _vecDim = _config.lowerVectors ? _config.vectorDim : 0;
@@ -294,6 +337,7 @@ void IRBuilder::buildFunction(const FunctionDef& func) {
     _scopes.back()[p.name] = p.name;
     _seenNames.insert(p.name);
     _module->getVar(p.name)->vecDim = typeLanes(p.type);
+    _module->setVarKind(p.name, numericKindOfType(p.type));
     if (_config.lowerVectors && _config.isVectorType &&
         _config.isVectorType(p.type)) {
       _vectorVars.insert(p.name);
@@ -322,12 +366,12 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       if (stmt.forUpdate) {
         // Try to parse update as simple: var++, var--, var+=expr, var=var+expr
         if (stmt.forUpdate->kind == ExprKind::PostfixOp) {
-          forIR->updateOp = stmt.forUpdate->op;
+          forIR->updateOp = incDecOpCode(stmt.forUpdate->name);
           forIR->update = buildExpr(*stmt.forUpdate->operand);
         } else if (stmt.forUpdate->kind == ExprKind::BinaryOp && stmt.forUpdate->lhs &&
                    stmt.forUpdate->lhs->kind == ExprKind::Variable) {
           forIR->update = buildExpr(*stmt.forUpdate->lhs);
-          forIR->updateOp = stmt.forUpdate->op;
+          forIR->updateOp = assignOpCode(stmt.forUpdate->op);
           if (stmt.forUpdate->rhs) {
             forIR->updateRhs = buildExpr(*stmt.forUpdate->rhs);
           }
@@ -372,10 +416,12 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
       }
       auto decl = std::make_unique<VarDeclIR>();
       decl->type = stmt.varType;
+      decl->arrayBounds = stmt.arrayBounds;
       if (stmt.init) decl->init = buildExpr(*stmt.init);
       // Declare after the initializer (initializer sees the outer binding).
       decl->name = declare(stmt.varName);
       _module->getVar(decl->name)->vecDim = typeLanes(stmt.varType);
+      _module->setVarKind(decl->name, numericKindOfType(stmt.varType));
       return decl;
     }
     case StmtKind::Return: {
@@ -412,6 +458,13 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
         }
       }
       auto assign = std::make_unique<AssignIR>();
+      // The target goes through resolve(), not varRef(), so a name the region
+      // never binds would otherwise bypass the external-name registry: writing
+      // `t = a;` before declaring a local `t` would leave the later
+      // declaration interned onto the same node as the external store, and the
+      // write would land on the local (see declare()). Register the unbound
+      // spelling here, exactly as varRef() does for reads.
+      if (!isBound(stmt.varName)) _externallyReferenced.insert(stmt.varName);
       assign->target = resolve(stmt.varName);
       if (stmt.rhs) assign->value = buildExpr(*stmt.rhs);
       return assign;
@@ -436,7 +489,8 @@ std::unique_ptr<StmtIR> IRBuilder::buildStmt(const Stmt& stmt) {
         // `a[i] += x` keeps its operator rather than becoming
         // `a[i] = a[i] + x`: the latter would evaluate a side-effecting lvalue
         // (e.g. `a[i++] += x`) twice.
-        if (stmt.expr->op != '=') assign->compoundOp = stmt.expr->op;
+        OpCode compound = assignOpCode(stmt.expr->op);
+        if (compound != OpCode::Assign) assign->compoundOp = compound;
         return assign;
       }
       auto exprStmt = std::make_unique<ExprStmtIR>();
@@ -512,7 +566,7 @@ DAGNode* IRBuilder::buildExpr(const Expr& expr) {
 
     case ExprKind::PostfixOp: {
       DAGNode* operand = buildExpr(*expr.operand);
-      return _module->createPostIncDec(expr.op, operand);
+      return _module->createPostIncDec(incDecOpCode(expr.name), operand);
     }
   }
   return nullptr;
@@ -603,7 +657,7 @@ IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
 
     case ExprKind::PostfixOp: {
       DAGNode* op = buildValue(*expr.operand).scalar;
-      return makeScalar(_module->createPostIncDec(expr.op, op));
+      return makeScalar(_module->createPostIncDec(incDecOpCode(expr.name), op));
     }
   }
   return makeScalar(nullptr);
@@ -612,7 +666,7 @@ IRBuilder::VecValue IRBuilder::buildValue(const Expr& expr) {
 IRBuilder::VecValue IRBuilder::valueBinary(const Expr& expr) {
   VecValue a = buildValue(*expr.lhs);
   VecValue b = buildValue(*expr.rhs);
-  const char op = expr.op;
+  const OpCode op = binaryOpCode(expr.op);
 
   auto scale = [&](VecValue& v, DAGNode* s, bool scalarOnLeft) {
     std::vector<DAGNode*> comps;
@@ -625,11 +679,12 @@ IRBuilder::VecValue IRBuilder::valueBinary(const Expr& expr) {
   };
 
   if (a.vec && b.vec) {
-    if (op == '*') {  // dot product
+    if (op == OpCode::Mul) {  // dot product
       DAGNode* sum = nullptr;
       for (size_t i = 0; i < a.comps.size() && i < b.comps.size(); ++i) {
-        DAGNode* p = _module->createBinaryOp('*', a.comps[i], b.comps[i]);
-        sum = sum ? _module->createBinaryOp('+', sum, p) : p;
+        DAGNode* p =
+            _module->createBinaryOp(OpCode::Mul, a.comps[i], b.comps[i]);
+        sum = sum ? _module->createBinaryOp(OpCode::Add, sum, p) : p;
       }
       return makeScalar(sum);
     }
@@ -652,12 +707,13 @@ IRBuilder::VecValue IRBuilder::valueUnary(const Expr& expr) {
   if (a.vec) {
     std::vector<DAGNode*> comps;
     for (auto* ci : a.comps)
-      comps.push_back(incDec ? _module->createPreIncDec(expr.op, ci)
-                             : _module->createUnaryOp(expr.op, ci));
+      comps.push_back(incDec ? _module->createPreIncDec(incDecOpCode(expr.name), ci)
+                             : _module->createUnaryOp(unaryOpCode(expr.op), ci));
     return makeVector(std::move(comps));
   }
-  return makeScalar(incDec ? _module->createPreIncDec(expr.op, a.scalar)
-                           : _module->createUnaryOp(expr.op, a.scalar));
+  return makeScalar(
+      incDec ? _module->createPreIncDec(incDecOpCode(expr.name), a.scalar)
+             : _module->createUnaryOp(unaryOpCode(expr.op), a.scalar));
 }
 
 IRBuilder::VecValue IRBuilder::valueArray(const Expr& expr) {
@@ -716,14 +772,17 @@ IRBuilder::VecValue IRBuilder::valueCall(const Expr& expr) {
 DAGNode* IRBuilder::buildScalarCall(const Expr& expr) {
   DAGNode* callee = expr.base ? buildValue(*expr.base).scalar : nullptr;
   std::string calleeText;
+  bool isMemberCall = false;
   if (expr.base) {
     if (expr.base->kind == ExprKind::Variable)
       calleeText = expr.base->name;
     else if (expr.base->kind == ExprKind::MemberAccess ||
-             expr.base->kind == ExprKind::ArrowAccess)
+             expr.base->kind == ExprKind::ArrowAccess) {
       calleeText = expr.base->memberName;
+      isMemberCall = true;
+    }
   }
-  bool pure = isPureCallee(calleeText);
+  bool pure = isPureCallee(calleeText, isMemberCall);
   std::vector<DAGNode*> args;
   for (const auto& arg : expr.callArgs) args.push_back(buildValue(*arg).scalar);
   return _module->createCall(callee, args, pure);
@@ -732,7 +791,7 @@ DAGNode* IRBuilder::buildScalarCall(const Expr& expr) {
 DAGNode* IRBuilder::buildBinaryOp(const Expr& expr) {
   DAGNode* lhs = buildExpr(*expr.lhs);
   DAGNode* rhs = buildExpr(*expr.rhs);
-  return _module->createBinaryOp(expr.op, lhs, rhs);
+  return _module->createBinaryOp(binaryOpCode(expr.op), lhs, rhs);
 }
 
 DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
@@ -742,8 +801,8 @@ DAGNode* IRBuilder::buildUnaryOp(const Expr& expr) {
   // of its identity. Creating it as a plain unary and writing those two fields
   // afterwards is exactly how `-x` and `--x` came to share one node.
   if (expr.name == "++" || expr.name == "--")
-    return _module->createPreIncDec(expr.op, operand);
-  return _module->createUnaryOp(expr.op, operand);
+    return _module->createPreIncDec(incDecOpCode(expr.name), operand);
+  return _module->createUnaryOp(unaryOpCode(expr.op), operand);
 }
 
 DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {
@@ -761,13 +820,16 @@ DAGNode* IRBuilder::buildArrayAccess(const Expr& expr) {
 DAGNode* IRBuilder::buildCall(const Expr& expr) {
   DAGNode* callee = buildExpr(*expr.base);
   std::string calleeText;
+  bool isMemberCall = false;
   if (expr.base) {
     if (expr.base->kind == ExprKind::Variable) calleeText = expr.base->name;
     else if (expr.base->kind == ExprKind::MemberAccess ||
-             expr.base->kind == ExprKind::ArrowAccess)
+             expr.base->kind == ExprKind::ArrowAccess) {
       calleeText = expr.base->memberName;
+      isMemberCall = true;
+    }
   }
-  bool pure = isPureCallee(calleeText);
+  bool pure = isPureCallee(calleeText, isMemberCall);
   std::vector<DAGNode*> args;
   for (const auto& arg : expr.callArgs) {
     args.push_back(buildExpr(*arg));

@@ -37,7 +37,7 @@ class ExprRecombineVisitor {
     }
 
     // Try to apply recombination patterns
-    if (node->kind == NodeKind::BinaryOp && (node->op == '+' || node->op == '-')) {
+    if (node->kind == NodeKind::BinaryOp && (node->op == OpCode::Add || node->op == OpCode::Sub)) {
       DAGNode* result = tryFactorAddSub(node);
       if (result && result != node) {
         return result;
@@ -62,14 +62,38 @@ class ExprRecombineVisitor {
     return a && b && a->pure && b->pure && a->id == b->id;
   }
 
+  // Factoring moves the sum inside the product. If the factors mix an integral
+  // and a floating kind, the source computes (part of) the products at one
+  // width and the rewrite computes the sum at another -- `a*x + a` with a
+  // double and an unsigned x is a double sum, `a*(x+1)` wraps x+1. Require a
+  // single *known* kind across every operand the rewrite regroups; Unknown
+  // (template parameter, member) cannot be proven either way and is refused.
+  bool sameKnownKind(DAGNode* a, DAGNode* b) {
+    return a && b && a->numKind != NumericKind::Unknown &&
+           a->numKind == b->numKind;
+  }
+
+  bool allSameKind(DAGNode* a, DAGNode* b, DAGNode* c) {
+    return sameKnownKind(a, b) && sameKnownKind(a, c);
+  }
+
+  bool allSameKind(DAGNode* a, DAGNode* b, DAGNode* c, DAGNode* d) {
+    return allSameKind(a, b, c) && sameKnownKind(a, d);
+  }
+
+  DAGNode* oneOfKind(DAGNode* like) {
+    return module.createConstTyped(
+        1.0, like->numKind == NumericKind::Float, "");
+  }
+
   bool isMul(DAGNode* n) {
-    return n && n->kind == NodeKind::BinaryOp && n->op == '*' &&
+    return n && n->kind == NodeKind::BinaryOp && n->op == OpCode::Mul &&
            n->operands.size() == 2;
   }
 
   // The inner expression of a negation (`-t` -> t), or nullptr.
   DAGNode* negInner(DAGNode* n) {
-    if (n && n->kind == NodeKind::UnaryOp && n->op == '-' && !isIncDec(n) &&
+    if (n && n->kind == NodeKind::UnaryOp && n->op == OpCode::Neg && !isIncDec(n) &&
         n->operands.size() == 1)
       return n->operands[0];
     return nullptr;
@@ -78,16 +102,16 @@ class ExprRecombineVisitor {
   DAGNode* tryFactorAddSub(DAGNode* addNode) {
     DAGNode* lhs = addNode->operands[0];
     DAGNode* rhs = addNode->operands[1];
-    char addOp = addNode->op;
+    OpCode addOp = addNode->op;
 
     // Normalize to "<product> ± <other term>" so that one set of patterns covers
     // both the source order and the order ReassociatePass leaves behind: it
     // rewrites `a*x + a` as `a + a*x`, and `a*x - a` as `(-a) + a*x`. Both steps
     // move an operand across the operator, so they need `+` to commute.
-    if (commutative_ && addOp == '+') {
+    if (commutative_ && addOp == OpCode::Add) {
       if (DAGNode* neg = negInner(lhs)) {
         // (-t) + p  ->  p - t
-        addOp = '-';
+        addOp = OpCode::Sub;
         lhs = rhs;
         rhs = neg;
       } else if (!isMul(lhs) && isMul(rhs)) {
@@ -111,55 +135,55 @@ class ExprRecombineVisitor {
       DAGNode* rb = rhs->operands[1];
 
       // a*x ± a*y → a*(x ± y)
-      if (samePureExpr(la, ra)) {
+      if (samePureExpr(la, ra) && allSameKind(la, lb, ra, rb)) {
         auto inner = module.createBinaryOp(addOp, lb, rb);
-        return module.createBinaryOp('*', la, inner);
+        return module.createBinaryOp(OpCode::Mul, la, inner);
       }
-      if (samePureExpr(lb, rb)) {
+      if (samePureExpr(lb, rb) && allSameKind(la, lb, ra, rb)) {
         auto outer = module.createBinaryOp(addOp, la, ra);
-        return module.createBinaryOp('*', outer, lb);
+        return module.createBinaryOp(OpCode::Mul, outer, lb);
       }
       // The two cross combinations regroup the factors of the products --
       // `la*lb + ra*la` becomes `la*(lb+ra)` -- which assumes `*` commutes.
-      if (commutative_ && samePureExpr(la, rb)) {
+      if (commutative_ && samePureExpr(la, rb) && allSameKind(la, lb, ra, rb)) {
         auto inner = module.createBinaryOp(addOp, lb, ra);
-        return module.createBinaryOp('*', la, inner);
+        return module.createBinaryOp(OpCode::Mul, la, inner);
       }
-      if (commutative_ && samePureExpr(lb, ra)) {
+      if (commutative_ && samePureExpr(lb, ra) && allSameKind(la, lb, ra, rb)) {
         auto outer = module.createBinaryOp(addOp, la, rb);
-        return module.createBinaryOp('*', outer, lb);
+        return module.createBinaryOp(OpCode::Mul, outer, lb);
       }
     }
 
     // Pattern: a*x + a -> a*(x + 1)
-    if (addOp == '+' && isMul(lhs)) {
+    if (addOp == OpCode::Add && isMul(lhs)) {
       DAGNode* mulA = lhs->operands[0];
       DAGNode* mulB = lhs->operands[1];
-      if (samePureExpr(mulA, rhs)) {
-        auto one = module.createConst(1, "1");
-        auto inner = module.createBinaryOp('+', mulB, one);
-        return module.createBinaryOp('*', mulA, inner);
+      if (samePureExpr(mulA, rhs) && allSameKind(mulA, mulB, rhs)) {
+        auto one = oneOfKind(mulA);
+        auto inner = module.createBinaryOp(OpCode::Add, mulB, one);
+        return module.createBinaryOp(OpCode::Mul, mulA, inner);
       }
-      if (samePureExpr(mulB, rhs)) {
-        auto one = module.createConst(1, "1");
-        auto inner = module.createBinaryOp('+', mulA, one);
-        return module.createBinaryOp('*', mulB, inner);
+      if (samePureExpr(mulB, rhs) && allSameKind(mulA, mulB, rhs)) {
+        auto one = oneOfKind(mulB);
+        auto inner = module.createBinaryOp(OpCode::Add, mulA, one);
+        return module.createBinaryOp(OpCode::Mul, mulB, inner);
       }
     }
 
     // Pattern: a*x - a -> a*(x - 1)
-    if (addOp == '-' && isMul(lhs)) {
+    if (addOp == OpCode::Sub && isMul(lhs)) {
       DAGNode* mulA = lhs->operands[0];
       DAGNode* mulB = lhs->operands[1];
-      if (samePureExpr(mulA, rhs)) {
-        auto one = module.createConst(1, "1");
-        auto inner = module.createBinaryOp('-', mulB, one);
-        return module.createBinaryOp('*', mulA, inner);
+      if (samePureExpr(mulA, rhs) && allSameKind(mulA, mulB, rhs)) {
+        auto one = oneOfKind(mulA);
+        auto inner = module.createBinaryOp(OpCode::Sub, mulB, one);
+        return module.createBinaryOp(OpCode::Mul, mulA, inner);
       }
-      if (samePureExpr(mulB, rhs)) {
-        auto one = module.createConst(1, "1");
-        auto inner = module.createBinaryOp('-', mulA, one);
-        return module.createBinaryOp('*', mulB, inner);
+      if (samePureExpr(mulB, rhs) && allSameKind(mulA, mulB, rhs)) {
+        auto one = oneOfKind(mulB);
+        auto inner = module.createBinaryOp(OpCode::Sub, mulA, one);
+        return module.createBinaryOp(OpCode::Mul, mulB, inner);
       }
     }
 

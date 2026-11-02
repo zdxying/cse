@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <exception>
 
 #include "diagnostics.h"
 
@@ -10,7 +11,9 @@ namespace cse {
 Lexer::Lexer(const std::string& source, const CSEConfig& config)
     : _config(config), _src(source) {}
 
-std::vector<Token> Lexer::tokenize() {
+std::vector<Token> Lexer::tokenize(bool keepComments, bool tolerant) {
+  _keepComments = keepComments;
+  _tolerant = tolerant;
   std::vector<Token> tokens;
   while (_pos < _src.size()) {
     skipWhitespace();
@@ -18,15 +21,18 @@ std::vector<Token> Lexer::tokenize() {
 
     char c = peek();
 
-    // Check for //@cse marker
+    // Line comment. Emitted as a token when comments are kept (the region
+    // extractor needs the marker text); otherwise skipped.
     if (c == '/' && peek2() == '/') {
-      skipLineComment();
+      if (_keepComments) tokens.push_back(readLineComment());
+      else skipLineComment();
       continue;
     }
 
     // Block comment
     if (c == '/' && peek2() == '*') {
-      skipBlockComment();
+      if (_keepComments) tokens.push_back(readBlockComment());
+      else skipBlockComment();
       continue;
     }
 
@@ -51,6 +57,13 @@ std::vector<Token> Lexer::tokenize() {
     // String literal
     if (c == '"') {
       tokens.push_back(readString());
+      continue;
+    }
+
+    // Character literal. The region extractor must not read a brace or
+    // semicolon inside `'{'` as structure, so `'...'` is lexed as one token.
+    if (c == '\'') {
+      tokens.push_back(readChar());
       continue;
     }
 
@@ -97,7 +110,11 @@ std::vector<Token> Lexer::tokenize() {
           tokens.push_back(makeToken(TokenType::Slash, "/"));
         break;
       case '%':
-        tokens.push_back(makeToken(TokenType::Percent, "%"));
+        if (peek() == '=') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::PercentAssign, "%="));
+        } else
+          tokens.push_back(makeToken(TokenType::Percent, "%"));
         break;
       case '=':
         if (peek() == '=') {
@@ -128,18 +145,41 @@ std::vector<Token> Lexer::tokenize() {
           tokens.push_back(makeToken(TokenType::Greater, ">"));
         break;
       case '&':
+        // `&&` first, then `&=`, then the single `&`: longest match wins.
         if (peek() == '&') {
           _pos++;
           tokens.push_back(makeToken(TokenType::And, "&&"));
+        } else if (peek() == '=') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::AmpAssign, "&="));
         } else {
           tokens.push_back(makeToken(TokenType::Amp, "&"));
         }
         break;
       case '|':
+        // `||` first, then `|=`, then the single `|`. A lone `|` used to fall
+        // through and be silently dropped -- the byte vanished, so `a | b`
+        // lexed as `a b` and every region using bitwise OR was mis-handled.
         if (peek() == '|') {
           _pos++;
           tokens.push_back(makeToken(TokenType::Or, "||"));
+        } else if (peek() == '=') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::PipeAssign, "|="));
+        } else {
+          tokens.push_back(makeToken(TokenType::Pipe, "|"));
         }
+        break;
+      case '^':
+        if (peek() == '=') {
+          _pos++;
+          tokens.push_back(makeToken(TokenType::CaretAssign, "^="));
+        } else {
+          tokens.push_back(makeToken(TokenType::Caret, "^"));
+        }
+        break;
+      case '~':
+        tokens.push_back(makeToken(TokenType::Tilde, "~"));
         break;
       case '?':
         tokens.push_back(makeToken(TokenType::Question, "?"));
@@ -179,12 +219,22 @@ std::vector<Token> Lexer::tokenize() {
         tokens.push_back(makeToken(TokenType::RBrace, "}"));
         break;
       case '#':
-        // Skip preprocessor directives (#include, #ifdef, #else, #endif, #pragma, etc.)
-        while (_pos < _src.size() && peek() != '\n') advance();
+        // A preprocessing directive. Emitted as one token (text = the whole
+        // line, `#` through the newline) instead of being skipped: a silently
+        // dropped directive is how `#if 0` bodies came back to life. The
+        // frontend cannot model directives, so the consumer decides what to do
+        // with the knowledge -- and it now has it.
+        tokens.push_back(readDirective());
         break;
       default:
-        throw CSEError({"lex", _line, _col,
-                        std::string("unexpected character '") + c + "'"});
+        // `c` has already been consumed. Tolerant mode drops the byte and
+        // carries on; strict mode reports it. A lone `|` used to fall through
+        // this way -- see the `|` case above.
+        if (!_tolerant) {
+          throw CSEError({"lex", "CSE-LEX-UNEXPECTED-BYTE", _line, _col,
+                          std::string("unexpected character '") + c + "'"});
+        }
+        break;
     }
   }
   tokens.push_back(makeToken(TokenType::Eof, ""));
@@ -210,9 +260,9 @@ void Lexer::skipWhitespace() {
     char c = peek();
     if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
       advance();
-    } else if (c == '/' && peek2() == '/') {
+    } else if (!_keepComments && c == '/' && peek2() == '/') {
       skipLineComment();
-    } else if (c == '/' && peek2() == '*') {
+    } else if (!_keepComments && c == '/' && peek2() == '*') {
       skipBlockComment();
     } else {
       break;
@@ -293,13 +343,20 @@ Token Lexer::readNumber() {
   std::string text = _src.substr(start, coreEnd - start);
   // An integer literal with a leading zero is octal (`010` is 8, not 10).
   // Decimal float forms (`0.5`, `0e5`) contain '.'/'e' and are excluded.
-  double val;
+  double val = 0;
   bool isOctal = text.size() > 1 && text[0] == '0' &&
                  text.find_first_of(".eE") == std::string::npos;
-  if (isOctal) {
-    val = static_cast<double>(std::strtoull(text.c_str(), nullptr, 8));
-  } else {
-    val = std::stod(text);
+  try {
+    if (isOctal) {
+      val = static_cast<double>(std::strtoull(text.c_str(), nullptr, 8));
+    } else {
+      val = std::stod(text);
+    }
+  } catch (const std::exception&) {
+    // A literal too large for a double (`1e999`) throws out_of_range. In
+    // tolerant mode (the region extractor lexing the whole file) fall back to
+    // 0; strict mode lets it propagate so the region is reported unreadable.
+    if (!_tolerant) throw;
   }
   Token tok;
   tok.type = TokenType::Number;
@@ -380,6 +437,94 @@ Token Lexer::readString() {
   tok.line = _line;
   tok.col = startCol;
   return tok;
+}
+
+// `'...'`. Escapes are consumed so `'\''` closes correctly. An unterminated
+// literal (or a stray apostrophe) stops at the newline; the parser reports the
+// real error if the region needs it.
+Token Lexer::readChar() {
+  size_t startLine = _line;
+  size_t startCol = _col;
+  advance();  // skip opening '
+  std::string text;
+  while (_pos < _src.size() && peek() != '\'' && peek() != '\n') {
+    if (peek() == '\\') {
+      advance();
+      text += advance();
+    } else {
+      text += advance();
+    }
+  }
+  if (_pos < _src.size() && peek() == '\'') advance();  // skip closing '
+  Token tok;
+  tok.type = TokenType::Char;
+  tok.text = text;
+  tok.line = startLine;
+  tok.col = startCol;
+  return tok;
+}
+
+// `// ...` up to (not including) the newline. The token's text is the raw
+// comment, `//` included, so a consumer can tell it is a line comment and read
+// the marker spelling off it.
+Token Lexer::readLineComment() {
+  size_t start = _pos;
+  size_t startLine = _line;
+  size_t startCol = _col;
+  while (_pos < _src.size() && peek() != '\n') advance();
+  Token tok;
+  tok.type = TokenType::LineComment;
+  tok.text = _src.substr(start, _pos - start);
+  tok.line = startLine;
+  tok.col = startCol;
+  return tok;
+}
+
+// `/* ... */`, delimiters included. An unterminated block comment runs to end
+// of input, matching skipBlockComment().
+Token Lexer::readBlockComment() {
+  size_t start = _pos;
+  size_t startLine = _line;
+  size_t startCol = _col;
+  advance();
+  advance();  // skip /*
+  while (_pos < _src.size()) {
+    if (peek() == '*' && peek2() == '/') {
+      advance();
+      advance();
+      break;
+    }
+    advance();
+  }
+  Token tok;
+  tok.type = TokenType::BlockComment;
+  tok.text = _src.substr(start, _pos - start);
+  tok.line = startLine;
+  tok.col = startCol;
+  return tok;
+}
+
+// `# ...` up to (not including) the newline. The token's text is the raw
+// directive, `#` included, so the region extractor can report it and the driver
+// can decide the region as a whole is unmodellable. Because the token starts at
+// the `#`, `makeToken()`'s `_col - text.size()` names that byte.
+//
+// A `#` inside a comment or a string literal is part of that literal's token and
+// never gets here. `skipWhitespace()` consumes a block comment before the `#`,
+// which is right: C++ replaces a comment with one space before it recognises
+// directives, so `/* note */ #if 0` IS a directive.
+//
+// The lexer does not verify that the `#` is the first token on its line -- that
+// would need a per-line flag, and `foo # bar` is ill-formed C++ anyway. Treating
+// any such `#` as a directive makes the region pass through unchanged, which is
+// the conservative answer for source the frontend could not compile correctly.
+Token Lexer::readDirective() {
+  // The operator switch has already consumed the `#`, so the token starts one
+  // byte back. The scan stops at the newline, leaving `_line`/`_col` on it.
+  size_t start = _pos - 1;
+  while (_pos < _src.size() && peek() != '\n') advance();
+  return makeToken(TokenType::PreprocessorDirective,
+                   _src.substr(start, _pos - start));
 }
 
 Token Lexer::makeToken(TokenType type, const std::string& text) {

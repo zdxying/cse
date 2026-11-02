@@ -25,12 +25,15 @@ static void printUsage(const char* prog) {
             << "  -c, --cost         Analyze and report FLOP cost comparison\n"
             << "  -s, --safe         Conservative mode (no unsafe algebraic rules)\n"
             << "  -v, --verbose      Print each pass as it runs (to stderr)\n"
+            << "  --dump-ir          Print the IR before and after each pass (to stdout)\n"
+            << "  --verify           Check pass invariants (effect preservation); exit 4 on violation\n"
             << "  --json             Output in JSON format (use with -c)\n"
             << "  --lattice NAME     Lattice set for cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27)\n"
             << "  -h, --help         Show this help\n"
             << "\n"
             << "Exit status: 0 if every region was optimized, 2 if some were left\n"
-            << "             unchanged because they could not be read, 3 if none could.\n";
+            << "             unchanged (unreadable or unsupported), 3 if none were\n"
+            << "             optimized, 4 if an internal invariant was broken.\n";
 }
 
 struct FunctionCost {
@@ -39,11 +42,27 @@ struct FunctionCost {
   cse::CostResult after;
 };
 
+// The outcome of optimizing one marked region. Every region lands in exactly
+// one bucket, and the driver's exit code is a function of the buckets -- so
+// "the optimizer silently did nothing" can never masquerade as success.
+enum class RegionOutcome {
+  Optimized,           // parsed and regenerated (possibly legally unchanged)
+  SkippedUnsupported,  // marked, but holds nothing this tool can model
+  SkippedUnparseable,  // the frontend rejected the region
+  AbortInternal,       // a non-frontend failure: an internal invariant broke
+};
+
 struct OptResult {
   std::string code;
   cse::CostResult costBefore;
   cse::CostResult costAfter;
   std::vector<FunctionCost> functionCosts;
+  RegionOutcome outcome = RegionOutcome::Optimized;
+  // Human-readable explanation for the two skip outcomes; empty otherwise.
+  std::string skipReason;
+  // Invariant violations found by --verify (one string per offending pass,
+  // prefixed by the function it happened in). Empty unless --verify is on.
+  std::vector<std::string> violations;
 };
 
 // Optimize a set of struct definitions and functions and append the generated
@@ -53,7 +72,7 @@ static void optimizeFunctionsAndStructs(
     const std::vector<std::unique_ptr<cse::StructDef>>& structs,
     const cse::CSEConfig& config, const std::string& latAlias,
     const std::string& latName, bool enableRecombine, bool collectCost,
-    bool verbose, OptResult& optResult) {
+    bool verbose, bool dumpIR, bool verify, OptResult& optResult) {
   // Optimize struct methods (each method gets its own IR pipeline). Pure data
   // structs (no methods) are emitted once via `structPtrs` below.
   std::vector<cse::OptimizedStruct> optStructs;
@@ -75,7 +94,11 @@ static void optimizeFunctionsAndStructs(
 
       auto pm = cse::PassManager::createDefault(
           config, enableRecombine, cse::freelb::createLatticeResolvePass(latAlias, latName));
-      pm.runAll(*methodMod, verbose);
+      pm.setCheckEffects(verify);
+      pm.runAll(*methodMod, verbose, dumpIR);
+      for (const auto& v : pm.effectViolations()) {
+        optResult.violations.push_back(sd->name + "::" + method->name + ": " + v);
+      }
 
       if (collectCost) {
         auto after = cse::analyzeCost(*methodMod, &config);
@@ -113,7 +136,11 @@ static void optimizeFunctionsAndStructs(
 
     auto pm = cse::PassManager::createDefault(
         config, enableRecombine, cse::freelb::createLatticeResolvePass(latAlias, latName));
-    pm.runAll(module, verbose);
+    pm.setCheckEffects(verify);
+    pm.runAll(module, verbose, dumpIR);
+    for (const auto& v : pm.effectViolations()) {
+      optResult.violations.push_back(func->name + ": " + v);
+    }
 
     if (collectCost) {
       auto after = cse::analyzeCost(module, &config);
@@ -153,7 +180,7 @@ static OptResult optimizeRegion(const std::string& code,
                                 const std::string& latAlias,
                                 const std::string& latName,
                                 bool enableRecombine, bool collectCost,
-                                bool verbose) {
+                                bool verbose, bool dumpIR, bool verify) {
   // 2. Lex: tokenize source
   cse::Lexer lexer(code, config);
   auto tokens = lexer.tokenize();
@@ -162,10 +189,36 @@ static OptResult optimizeRegion(const std::string& code,
   cse::Parser parser(tokens, config);
   auto result = parser.parseAll();
 
+  // Nothing the tool models was parsed. Either the region is a declaration-only
+  // / empty region, or it holds constructs outside the supported subset.
   if (result.functions.empty() && result.structDefs.empty() &&
       result.usingDecls.empty() && result.namespaces.empty()) {
     OptResult r;
     r.code = code;
+    r.outcome = RegionOutcome::SkippedUnsupported;
+    if (result.skippedTopLevelTokens > 0) {
+      r.skipReason = "unmodeled top-level construct starting at line " +
+                     std::to_string(result.firstSkippedLine) + " ('" +
+                     result.firstSkippedText + "')";
+    } else {
+      r.skipReason =
+          "no function/struct/using/namespace parsed (unsupported or "
+          "declaration-only region)";
+    }
+    return r;
+  }
+
+  // Something parsed, but the parser also skipped a top-level construct it does
+  // not model. Regenerating the code from `functions`/`structDefs` would drop
+  // that construct, so pass the whole region through unchanged instead.
+  if (result.skippedTopLevelTokens > 0) {
+    OptResult r;
+    r.code = code;
+    r.outcome = RegionOutcome::SkippedUnsupported;
+    r.skipReason = "region also contains an unmodeled top-level construct "
+                   "starting at line " +
+                   std::to_string(result.firstSkippedLine) + " ('" +
+                   result.firstSkippedText + "')";
     return r;
   }
 
@@ -185,14 +238,14 @@ static OptResult optimizeRegion(const std::string& code,
     }
     optimizeFunctionsAndStructs(ns->functions, ns->structDefs, config,
                                 latAlias, latName, enableRecombine, collectCost,
-                                verbose, optResult);
+                                verbose, dumpIR, verify, optResult);
     optResult.code += "}\n";
   }
 
   // Top-level structs and functions
   optimizeFunctionsAndStructs(result.functions, result.structDefs, config,
                               latAlias, latName, enableRecombine, collectCost,
-                              verbose, optResult);
+                              verbose, dumpIR, verify, optResult);
 
   return optResult;
 }
@@ -210,6 +263,8 @@ int main(int argc, char* argv[]) {
   bool outputJson = false;
   bool safeMode = false;
   bool verbose = false;
+  bool dumpIR = false;
+  bool verify = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -224,6 +279,10 @@ int main(int argc, char* argv[]) {
       safeMode = true;
     } else if (arg == "-v" || arg == "--verbose") {
       verbose = true;
+    } else if (arg == "--dump-ir") {
+      dumpIR = true;
+    } else if (arg == "--verify") {
+      verify = true;
     } else if (arg == "--json") {
       outputJson = true;
     } else if (arg == "--lattice") {
@@ -254,7 +313,17 @@ int main(int argc, char* argv[]) {
     safe.assumeNumericCommutative = false;
     safe.assumeNumericAssociative = false;
     safe.allowFpReassoc = false;
+    // The signed-zero / special-value identities are licensed by their own
+    // switch, so `-s` has to clear it too. It used to be left on, which was
+    // inert only because AlgebraicSimplify gates every identity on `numeric_`
+    // (comm && assoc, off under `-s`). CleanupPass's chained-additive merge is
+    // gated on this switch directly and has no `numeric_` gate, so leaving it on
+    // let `-s` drop a leading zero and turn +inf into -inf.
+    safe.allowUnsafeFpIdentities = false;
     safe.noAlias = false;
+    // The zero identities substitute a constant whose kind cannot be proven
+    // from the operands; under `-s` that is not a licence to assume floating.
+    safe.assumeFloatOperands = false;
     safe.isPureFunction = nullptr;
     config = safe;
   }
@@ -285,31 +354,11 @@ int main(int argc, char* argv[]) {
     (std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
   ifs.close();
 
-  // Normalize // @cse markers to //@cse (accepts `// @cse`, `//  @cse`, `//@cse`)
-  auto normalizeMarkers = [](std::string& src) {
-    std::string out;
-    out.reserve(src.size());
-    std::istringstream iss(src);
-    std::string line;
-    bool first = true;
-    while (std::getline(iss, line)) {
-      size_t p = line.find("//");
-      if (p != std::string::npos) {
-        size_t q = p + 2;
-        while (q < line.size() && (line[q] == ' ' || line[q] == '\t')) ++q;
-        if (line.compare(q, 4, "@cse") == 0) {
-          line = line.substr(0, p) + "//@cse";
-        }
-      }
-      if (!first) out += "\n";
-      first = false;
-      out += line;
-    }
-    src.swap(out);
-  };
-  normalizeMarkers(source);
-
-  // Find CSE regions
+  // Find CSE regions. Marker recognition lives entirely in the extractor now
+  // (it is the one place that knows what a marker line is); the driver no
+  // longer rewrites the source to normalize `// @cse` -- that pass searched for
+  // the first `//` on each line, so it truncated trailing text and corrupted
+  // string literals that happened to contain the marker spelling.
   auto regions = cse::RegionExtractor().extract(source);
   if (regions.empty()) {
     std::cerr << "No //@cse markers found in " << inputFile << "\n";
@@ -327,8 +376,14 @@ int main(int argc, char* argv[]) {
   }
 
   cse::CostResult totalBefore, totalAfter;
-  size_t skippedRegions = 0;
+  size_t optimizedRegions = 0;    // parsed and regenerated
+  size_t unparseableRegions = 0;  // frontend rejected the region
+  size_t unsupportedRegions = 0;  // marked but held nothing optimizable
+  size_t internalRegions = 0;     // a non-frontend failure (internal bug)
   std::vector<FunctionCost> allFunctionCosts;
+  // Invariant violations found by --verify, across all regions. Non-empty means
+  // a pass broke a promised invariant (see PassManager::effectViolations).
+  std::vector<std::string> allViolations;
 
   for (const auto& region : regions) {
     // Copy lines before this region
@@ -341,6 +396,22 @@ int main(int argc, char* argv[]) {
       output += allLines[region.startLine - 1] + "\n";
     }
 
+    // A preprocessor directive inside the region is invisible to the frontend:
+    // the lexer drops the whole line, so the guard never reaches the parser and
+    // the code it protects is compiled as if it were live. Regenerating from the
+    // AST then deletes the directive *and* resurrects whatever it guarded --
+    // `#if 0` code silently becomes the function body. There is nothing to
+    // regenerate a directive from, so the region is passed through verbatim.
+    if (region.hasDirectives) {
+      output += region.code;
+      std::cerr << inputFile << ":" << region.startLine
+                << ": region skipped [CSE-REGION-UNSUPPORTED]: preprocessor "
+                   "directive in region (not modelled by the frontend)\n";
+      unsupportedRegions++;
+      lastEnd = region.endLine;
+      continue;
+    }
+
     // Optimize and output the region. A region the frontend cannot read is
     // reported and passed through unchanged while the rest of the file is still
     // optimized: the first parse error used to reach std::terminate, and since
@@ -348,8 +419,39 @@ int main(int argc, char* argv[]) {
     // region in the file, including the ones already optimized successfully.
     try {
       auto opt = optimizeRegion(region.code, config, latCfg.alias, latCfg.name,
-                                enableRecombine, collectCost, verbose);
+                                enableRecombine, collectCost, verbose, dumpIR,
+                                verify);
       output += opt.code;
+
+      // Every region lands in exactly one bucket, and a non-optimized region is
+      // named here -- "the optimizer silently did nothing" cannot masquerade as
+      // an optimized file.
+      switch (opt.outcome) {
+        case RegionOutcome::Optimized:
+          optimizedRegions++;
+          break;
+        case RegionOutcome::SkippedUnsupported:
+          std::cerr << inputFile << ":" << region.startLine
+                    << ": region skipped [CSE-REGION-UNSUPPORTED]: "
+                    << opt.skipReason << "\n";
+          unsupportedRegions++;
+          break;
+        case RegionOutcome::SkippedUnparseable:
+          // Not returned: an unparseable region throws a CSEError, handled
+          // below. Listed so the switch stays exhaustive over the contract.
+          std::cerr << inputFile << ":" << region.startLine
+                    << ": region skipped [CSE-REGION-UNPARSEABLE]\n";
+          unparseableRegions++;
+          break;
+        case RegionOutcome::AbortInternal:
+          std::cerr << inputFile << ":" << region.startLine
+                    << ": region aborted [CSE-INTERNAL]\n";
+          internalRegions++;
+          break;
+      }
+
+      allViolations.insert(allViolations.end(), opt.violations.begin(),
+                           opt.violations.end());
 
       if (collectCost) {
         totalBefore += opt.costBefore;
@@ -364,15 +466,20 @@ int main(int argc, char* argv[]) {
       // //@cse marker, which is region.startLine).
       const cse::Diagnostic& d = e.diagnostic();
       std::cerr << inputFile << ":" << (region.startLine + d.line) << ":" << d.col
-                << ": " << d.phase << " error: " << d.message
+                << ": ";
+      if (!d.code.empty()) std::cerr << "[" << d.code << "] ";
+      std::cerr << d.phase << " error: " << d.message
                 << " -- region passed through unchanged\n";
       output += region.code;
-      skippedRegions++;
+      unparseableRegions++;
     } catch (const std::exception& e) {
+      // A failure that is not a frontend rejection is a bug in this tool, not a
+      // property of the input. Report it as such; the exit code makes it
+      // distinguishable from a merely unreadable region.
       std::cerr << inputFile << ":" << region.startLine
-                << ": region passed through unchanged: " << e.what() << "\n";
+                << ": region aborted [CSE-INTERNAL]: " << e.what() << "\n";
       output += region.code;
-      skippedRegions++;
+      internalRegions++;
     }
 
     lastEnd = region.endLine;
@@ -395,10 +502,14 @@ int main(int argc, char* argv[]) {
 
   std::cout << "Optimized output written to " << outputFile << "\n";
 
-  if (skippedRegions > 0) {
-    std::cerr << skippedRegions << " of " << regions.size()
-              << " regions were left unoptimized\n";
-  }
+  // Coverage summary: every marked region must land in exactly one bucket. A
+  // skipped region is visible here and (for the unsupported case) named above,
+  // instead of vanishing into an exit-0 "success".
+  std::cerr << "cse: coverage: " << regions.size() << " regions ("
+            << optimizedRegions << " optimized, " << unparseableRegions
+            << " skipped-unreadable, " << unsupportedRegions
+            << " skipped-unsupported, " << internalRegions
+            << " aborted-internal)\n";
 
   // Cost analysis output
   if (collectCost) {
@@ -421,7 +532,9 @@ int main(int argc, char* argv[]) {
       jsonSide("after", totalAfter);
       std::cout << "  \"saved\": {\"flops\":" << saved
                 << ",\"percent\":" << std::round(pct * 10.0) / 10.0 << "},\n";
-      std::cout << "  \"skipped\": " << skippedRegions << "\n";
+      std::cout << "  \"skipped\": "
+                << (unparseableRegions + unsupportedRegions + internalRegions)
+                << "\n";
       std::cout << "}\n";
     } else {
       std::cout << "\n=== FLOP Cost Analysis ===\n";
@@ -476,7 +589,21 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // 0 = every region optimized, 2 = some skipped, 3 = none could be.
-  if (skippedRegions == 0) return 0;
-  return skippedRegions == regions.size() ? 3 : 2;
+  // Exit-code contract (kept compatible with the pre-B4 codes; 4 is new):
+  //   0  every marked region was readable (an unsupported region is a legal
+  //      no-op -- a declaration-only region is reported on stderr but does not
+  //      change the code, so existing callers are unaffected)
+  //   2  some region was unreadable and passed through
+  //   3  every region was unreadable
+  //   4  an internal invariant was broken (a non-frontend failure, or a --verify
+  //      violation)
+  // 4 dominates: a bug in this tool must never look like a clean run.
+  if (!allViolations.empty()) {
+    std::cerr << "cse: --verify found " << allViolations.size()
+              << " invariant violation(s):\n";
+    for (const auto& v : allViolations) std::cerr << v;
+  }
+  if (internalRegions > 0 || !allViolations.empty()) return 4;
+  if (unparseableRegions == 0) return 0;
+  return unparseableRegions == regions.size() ? 3 : 2;
 }

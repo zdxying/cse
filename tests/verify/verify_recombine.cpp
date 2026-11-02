@@ -11,16 +11,9 @@
 #include <cstdio>
 
 #include "recombine.cpp.cse"
+#include "harness.h"
 
 int g_calls = 0;
-
-static int failures = 0;
-
-static void check(const char* name, double got, double want) {
-  bool ok = std::fabs(got - want) < 1e-12;
-  if (!ok) failures++;
-  std::printf("%-20s got=%.6f want=%.6f  %s\n", name, got, want, ok ? "OK" : "FAIL");
-}
 
 int main() {
   // Factored products must stay numerically identical to the sum of products.
@@ -71,8 +64,5 @@ int main() {
               imp, 2.0 * s1 + 3.0 * s2, valueOk ? "OK" : "FAIL");
   if (!callsOk || !valueOk) failures++;
 
-  std::printf(failures == 0 ? "\nALL RECOMBINE CHECKS PASSED\n"
-                            : "\n%d RECOMBINE CHECK(S) FAILED\n",
-              failures);
-  return failures == 0 ? 0 : 1;
+  return finish("RECOMBINE");
 }
