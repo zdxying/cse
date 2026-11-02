@@ -6,9 +6,9 @@ namespace cse {
 class IRModule;
 
 // Base class for all optimization passes.
-// Passes operate on IRModule (DAG nodes + structured statements).
-// The pipeline itself is assembled in PassManager::createDefault(); see
-// docs/architecture.md for the order and the gating of each stage.
+// Passes mutate an IRModule (DAG nodes + structured statements) in place; the
+// default pipeline's order and per-stage gating live in
+// PassManager::createDefault().
 class Pass {
  public:
   virtual ~Pass() = default;

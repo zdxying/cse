@@ -28,12 +28,14 @@ static void printUsage(const char* prog) {
             << "  --dump-ir          Print the IR before and after each pass (to stdout)\n"
             << "  --verify           Check pass invariants (effect preservation); exit 4 on violation\n"
             << "  --json             Output in JSON format (use with -c)\n"
-            << "  --lattice NAME     Lattice set for cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27)\n"
+            << "  --lattice NAME     Lattice set for LatSet::* resolution and the cost model\n"
+            << "                     (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27)\n"
             << "  -h, --help         Show this help\n"
             << "\n"
-            << "Exit status: 0 if every region was optimized, 2 if some were left\n"
-            << "             unchanged (unreadable or unsupported), 3 if none were\n"
-            << "             optimized, 4 if an internal invariant was broken.\n";
+            << "Exit status: 0 if every marked region was readable (an unsupported\n"
+            << "             region is a legal no-op), 2 if some regions were\n"
+            << "             unreadable and passed through, 3 if none were readable,\n"
+            << "             4 if an internal invariant was broken or --verify failed.\n";
 }
 
 struct FunctionCost {

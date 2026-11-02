@@ -1271,8 +1271,16 @@ twin_run() {
   "$CSE" -s "$WORK/twin/$base.cpp" >/dev/null 2>&1 || true
   python3 "$VERIFY/gen_twin_main.py" "$WORK/twin/$base.cpp.cse" \
     "$WORK/twin/${base}_main.cpp" 2>/dev/null
-  "$CXX" $EXTRA_CXXFLAGS -std=c++17 -O2 "$WORK/twin/${base}_main.cpp" \
-    -o "$WORK/twin/$base" || return 2
+  # Bit-exact comparison, so the *compiler* must not be free to change the
+  # result: `-ffp-contract=off -fno-fast-math` forbid FMA contraction and other
+  # fast-math latitude. Without them, an unrolled straight-line twin and the
+  # loop-shaped reference can be contracted differently (a fused `s + a*b` in
+  # one, a separate multiply and add in the other), which differs by 1 ULP and
+  # reds the oracle on a compiler/target that contracts asymmetrically. The
+  # oracle exists to catch the optimizer reassociating under `-s`, not to detect
+  # the compiler exercising a standard-permitted contraction.
+  "$CXX" $EXTRA_CXXFLAGS -std=c++17 -O2 -ffp-contract=off -fno-fast-math \
+    "$WORK/twin/${base}_main.cpp" -o "$WORK/twin/$base" || return 2
   local out
   out="$("$WORK/twin/$base")" || { printf '%s\n' "$out"; return 1; }
   local n
@@ -1469,8 +1477,9 @@ for ((seed = 1; seed <= FUZZ_SEEDS; seed++)); do
   fi
   python3 "$VERIFY/gen_twin_main.py" "$gen.cse" "$WORK/fuzz_${seed}_main.cpp" \
     2>/dev/null
-  if ! "$CXX" $EXTRA_CXXFLAGS -std=c++17 -O2 "$WORK/fuzz_${seed}_main.cpp" \
-       -o "$WORK/fuzz_$seed" 2>/dev/null; then
+  # Same strict-FP flags as twin_run: this is a bit-exact comparison too.
+  if ! "$CXX" $EXTRA_CXXFLAGS -std=c++17 -O2 -ffp-contract=off -fno-fast-math \
+       "$WORK/fuzz_${seed}_main.cpp" -o "$WORK/fuzz_$seed" 2>/dev/null; then
     echo "FAIL  fuzz seed $seed: the differential driver did not build" >&2
     fuzz_fail=1
     continue

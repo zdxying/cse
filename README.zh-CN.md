@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 CSE 分析你用 `//@cse` 标记的函数，找出跨语句重复的计算，并把去重后的区域写回。
-它是独立的 C++17 工具，采用受 LLVM 启发的三阶段流水线 **前端 → IR → Pass → 后端**，
+它是独立的 C++17 工具，采用受 LLVM 启发的四段流水线 **前端 → IR → Pass → 后端**，
 以「库 + 两个可执行文件」的形式交付。
 
 ```cpp
@@ -45,7 +45,8 @@ LoopUnroll → [Resolve] → ConstantFold → AlgebraicSimplify → [PostAlgebra
 
 - GNU make
 - 支持 C++17 的编译器（默认 `g++`，可用 `CXX=...` 覆盖）
-- Python 3（仅 `make test` 内的 latset 检查需要）
+- Python 3（`make test` 依赖它：孪生 harness、生成式模糊与若干检查脚本都是 Python，
+  缺少它整套测试跑不起来；latset 防漂移与 FreeLB 校验另外还需要 FreeLB checkout）
 
 ## 构建
 
@@ -68,19 +69,20 @@ make clean
 ./bin/cse input.cpp -s -c --json
 ```
 
-区域从**去除缩进后以 `//@cse` 开头的那一行**开始，到下一个配平的 `{ ... }` 函数体
-结束。区域之外的内容原样保留，输出文件固定为源文件旁的 `<input>.cse`。
+区域从首个 token 为 `//@cse` 的那一行开始（允许行首缩进，也允许 `//` 与 `@cse`
+之间有空白），到下一个配平的 `{ ... }` 体结束；若标记的是声明，则到下一个顶层
+`;` 结束。区域之外的内容原样保留，输出文件固定为源文件旁的 `<input>.cse`。
 
 | 选项 | 作用 |
 |------|------|
-| `-c`, `--cost` | 打印优化前后的 FLOP / 向量操作 / 访存 / 节点 / 语句计数 |
+| `-c`, `--cost` | 打印优化前后的 FLOP / 向量操作 / 访存 / 节点 / 语句计数（含覆盖率） |
 | `--json` | 以 JSON 输出代价报告（配合 `-c`） |
 | `-r`, `--recombine` | 启用提取公因子（`a*x + a*y → a*(x+y)`） |
 | `-s`, `--safe` | 面向任意 C++ 的保守语义 |
 | `-v`, `--verbose` | 逐 pass 打印到 stderr |
 | `--dump-ir` | 打印每个 pass 前后的 IR（到 stdout） |
 | `--verify` | 检查 pass 不变量（效果保持）；违规时退出码 4 |
-| `--lattice NAME` | 代价模型使用的 lattice 集合（D2Q5、D2Q9、D3Q7、D3Q15、D3Q19、D3Q27） |
+| `--lattice NAME` | 用于解析 `LatSet::{q,d,cs2,...}` 并供代价模型使用的 lattice 集合（D2Q5、D2Q9、D3Q7、D3Q15、D3Q19、D3Q27） |
 | `-h`, `--help` | 用法 |
 
 ### 生成 FreeLB 的 `.ur.h` 特化
@@ -95,7 +97,9 @@ make clean
 必须是 `moment`、`equilibrium` 或 `force` 之一。
 
 `--cost` 报告与生成同一管线测得的优化前后 FLOP（`--json` 机器可读，
-`--lattice NAME` 可重复以限定格子集）。每次运行还会向 stderr 打印覆盖率报告
+`--lattice NAME` 可重复以限定格子集）。FreeLB 的 `make cost` 用的就是它，因此报告的
+成本始终与生成的 `.ur.h` 一致；通用的 `cse -c` 不施加生成器按结构体形状做的向量降级，
+两者不可混用。每次运行还会向 stderr 打印覆盖率报告
 （区域数 / 结构体数 / 发射与跳过数 / 特化总数），生成器无法处理的结构体会显式
 可见而不是被悄悄丢掉：
 `csegen: coverage: 7 regions, 7 structs (7 emitted, 0 skipped), 42 specializations`。
@@ -123,8 +127,8 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 4. **支配**：位于 `if`/`else`/循环内的表达式标记为 nested，绝不外提。
 5. **可投机性**：`isSpeculatable`（`analysis/purity.h`）回答的是另一个问题——
    *这个求值能不能放到源码不会执行它的位置？* 它与"能否重复求值"只在陷阱处分歧：
-   `1/k` 可以重复求值（值相同）但不可投机（`k=0` 时 trap）。这是
-   `k ? 1/k : 0` 的修复：该除法曾被提到条件之外，`k=0` 时直接崩溃。
+   `1/k` 可以重复求值（值相同）但不可投机（`k=0` 时 trap）。它保证
+   `k ? 1/k : 0` 不会在 `k = 0` 时求值那个除法。
    守卫操作数（三元的两臂、`&&`/`||` 的右操作数）只有在可投机时才提取；
    提取**整个**条件表达式始终安全（它保留内部短路），所以只需检查条件/左操作数。
 6. **作用域**：遮蔽变量做 alpha-rename，同名但无关的声明不会被误合并。
@@ -146,6 +150,17 @@ FreeLB 通过 `third_party/cse` submodule 使用本工具：集成方式、构�
 代数规则按授权类型分开：交换律/结合律用 `assumeNumericCommutative` /
 `assumeNumericAssociative`，浮点重排（加法重结合、乘法链重排）用 `allowFpReassoc`，
 特殊值/符号零恒等（`x*0`、`x-x`、`0/x`、`x/x`、`x+0`、`0-x`）用 `allowUnsafeFpIdentities`。
+
+零恒等式替换的是**整个表达式**，所以替换出的常量必须携带表达式的 int/float 类型：
+源码算的是 double，却发射整型 `0`，会把外层 `/ 4` 变成整除。load 的类型无法证明，
+因此由 `assumeFloatOperands`（FreeLB profile 开启，`-s` 关闭）声明"无法证明的操作数
+按浮点处理"，这正是 `0 * cell[i]` 得以折叠的原因。**可证明的整型始终优先**，
+所以 `(0 * k + 2) / 4` 仍然是整数除法。
+
+有一条规则无条件开启，因为它逐位精确：符号规范化（`a * (-b) -> -(a * b)`）。
+它唯一的偏差是 `0 * inf` 产生的 **NaN 符号位**——那不是 IEEE-754 的可观察值，
+而把它放进门控会让保守档丢掉 equilibrium kernel 正反方向共享的收益。
+`verify_exact_identities.cpp` 同时钉住这份精确性与这个例外。
 
 ## 测试
 
@@ -170,7 +185,7 @@ helper 经 FreeLB 钩子计价（`getnorm2` → `2d-1` 等），DAG 子表达式
 
 示例结果（before → after）：`basic_cse` 11 → 10、`features` 52 → 51、
 `equilibrium_d3q19` 323 → 84 FLOPs（−74.0%）、`safety_cases` 24 → 21、
-`cost_nested` 478 → 355（`const` 形参不再视为只读根后的保守计数）、
+`cost_nested` 478 → 355（保守计数：`const` 形参不视为只读根）、
 `cost_descending` 35 → 35。
 
 ## 仓库结构
@@ -193,8 +208,6 @@ docs/           架构文档与移植状态
   （按引用计费、向量加权、钩子）
 - [docs/freelb_port_status.md](docs/freelb_port_status.md) — FreeLB 集成状态、
   未完成 TODO 与通用/FreeLB 边界
-- [docs/cse-round6-audit.md](docs/cse-round6-audit.md) — 最近一轮全仓库架构
-  审计（缺陷、修复、backlog 处置；不入版本控制）
 
 ## 已知局限
 

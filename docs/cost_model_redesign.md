@@ -1,217 +1,180 @@
-# CSE Cost Model — Redesign
+# CSE Cost Model
 
-Status: implemented (this document describes the target model and the
-decisions taken while replacing the original ad-hoc FLOP counter).
+`analyzeCost` (`src/analysis/cost_model.{h,cpp}`) estimates the work the
+generated code executes for one IR module. It is analysis-only: it does not
+change the IR or select passes. `flops`, `vectorOps` and `memOps` are charged
+**per reference** to a DAG node, scaled by the number of executions of the
+enclosing loop context; `totalNodes` remains the distinct-node count. That
+distinction matters because codegen re-prints a shared, unmaterialized node at
+every use site, while a CSE-materialized temporary reaches the IR as one
+definition whose uses are cheap variable references.
 
-## Motivation
+## Result
 
-The original `analyzeCost` (see `src/analysis/cost_model.{h,cpp}`) counted a
-single `BinaryOp` as one FLOP and ignored everything else. For FreeLB code
-that is a poor approximation; several constructs were mis-evaluated:
+`CostResult` (`src/analysis/cost_model.h`) aggregates one module:
 
-1. **Vector arithmetic was counted as scalar.**
-   `createFreeLBConfig` populated `vectorDim`/`isVectorType` but never enabled
-   `lowerVectors`, and the cost model ignored vector-ness entirely. A
-   `Vector<T, d>` op (`u_value += latset::c<LatSet>(i) * cell[i]`,
-   `u_value /= rho_value`, `f_alpha * T{0.5}`) compiled to `d` scalar ops but
-   scored 1.
-2. **Opaque pure helpers scored 0.** `getnorm2`, `getnorm`, `dot`, `getsum`,
-   `latset::c/w`, `clear`, field getters are `Call` nodes. The architecture doc
-   already admitted `u.getnorm2()` hid 5 FLOPs.
-3. **Loop trip counting was broken by the `latticeQ` guard.** `loopTripCount`
-   returned `0` whenever a counted loop's bound `!= q` and a lattice was set,
-   collapsing the nested `alpha/beta < LatSet::d` moment loops
-   (`src/lbm/moment.h`) to one iteration (undercount ~3–6x). Non-resolved
-   bounds were silently counted once.
-4. **Shared subexpressions were over-counted.** `visited` was cleared per
-   statement, so a DAG node reused by several statements was charged once per
-   statement, contradicting the CSE-materialized temporaries in the output.
-5. **No coverage signal.** Unknown loops and unmodeled calls were silently
-   folded into the numbers with no way to tell when a figure was unreliable.
-6. **Driver double-work.** `plugins/freelb/cse_main.cpp` re-ran
-   `optimizeRegion` for every region just to collect per-function costs even
-   though `functionCosts` was already available.
+| Field | Meaning |
+|-------|---------|
+| `flops` | scalar FLOPs, vector ops weighted by lane count |
+| `vectorOps` | operations with at least one vector operand |
+| `memOps` | loads (array/member/arrow) per reference, plus one per complex-lvalue store |
+| `totalNodes` | distinct DAG nodes reached, not reference-weighted |
+| `stmts` | executed statements, loop-scaled |
+| `vars` | executed declarations, loop-scaled |
+| `unknownLoops` | loops whose iteration count could not be resolved |
+| `unmodeledCalls` | calls with no cost-model entry |
 
-## Decisions (agreed semantics)
+`unknownLoops` and `unmodeledCalls` count distinct constructs, not references.
+A non-zero value marks an approximation; `flops` is then a lower bound
+(`src/analysis/cost_model.h`).
 
-| Topic | Decision |
-|-------|----------|
-| FLOP unit | **Scalar FLOPs, vector-weighted**: a vector op costs its lane count; a vector·vector product is a dot = `2d-1`. |
-| Helper/intrinsic calls | **Known-weight hook**: the FreeLB plugin supplies per-callee costs; unknown calls are flagged unmodeled. |
-| Shared subexpressions | **Per reference (use site)**: each reference to a node is charged, so a shared, unmaterialized node costs once per use site (codegen re-prints it); a CSE-materialized temporary costs only its definition. `totalNodes` stays the distinct-node count. |
-| Memory | **Separate `memOps`** metric: unique loads (`array`/`member`/`arrow` accesses) plus one per complex-lvalue store. |
+## Counting rules
 
-Loop multiplicity is *dynamic*: a reference inside a loop is charged once per
-execution, i.e. `cost × (number of enclosing loop iterations)`. Combined with
-the per-reference rule, a CSE temp computed once outside a loop is charged once
-(its single definition), while a reference in a loop body is charged per
-iteration.
+Statements are visited in program order. Every expression slot contributes one
+reference to its node per execution of the current loop context. The references
+to a node are summed and propagated to its operands
+(`mult[operand] += mult[parent]`), so a shared subgraph is expanded
+arithmetically instead of re-walked. Each reachable node is then charged
+`cost(node) × mult[node]` in parents-before-children topological order
+(O(V+E)). `if`/`else` sums both branches (worst case).
 
-## Model
+Per-node cost:
 
-`CostResult` (`src/analysis/cost_model.h`):
+* `BinaryOp` with `+ - * /`: FLOPs from `binaryOpCost` (which writes the FLOP
+  count and returns the result lane count); without the hook, 1 FLOP and a
+  scalar result. `vectorOps` is incremented per reference when either operand
+  has a positive lane count.
+* `UnaryOp` `+`/`-` and `++`/`--`: lane-count FLOPs (vector) or 1. An
+  increment/decrement is one add/subtract of the constant 1; `!`/`~` are not
+  charged. `vectorOps` is incremented when the operand has a positive lane
+  count.
+* `ArrayAccess`/`MemberAccess`/`ArrowAccess`: one mem op per reference.
+* `Assign` with a complex lvalue (`targetExpr`): one mem op for the store per
+  execution. The lvalue's base/index operands are counted as references, not as
+  an extra load.
+* `Call`: `callCost(callee, argLanes)`; a non-negative result adds FLOPs, a
+  negative one charges 0 and increments `unmodeledCalls` once for that node.
+  Without the hook a call costs 0 and is not flagged. The callee expression slot
+  is not traversed.
+* `Ternary`/`Cast`: no direct cost; their operands are counted normally.
 
-```cpp
-struct CostResult {
-  long long flops = 0;          // scalar, vector-weighted
-  long long vectorOps = 0;      // ops with at least one vector operand
-  long long memOps = 0;         // loads (per use site) + stores
-  long long totalNodes = 0;     // unique DAG nodes (not reference-weighted)
-  long long stmts = 0;          // executed statements (loop-scaled)
-  long long vars = 0;           // executed declarations (loop-scaled)
-  long long unknownLoops = 0;   // trip count could not be resolved
-  long long unmodeledCalls = 0; // no cost entry for the callee
-};
-```
+## Lane inference
 
-### Counting rules
+`vecDim` is attached by `IRBuilder` to parameters and declared locals from their
+declared types through `CSEConfig::vectorLanes` (`src/ir/ir_builder.cpp`). It is
+derived metadata and is not part of the structural hash
+(`CSE_DAGNODE_IDENTITY_FIELDS` in `src/ir/dag_node.h`), so it does not affect CSE
+deduplication.
 
-* Traverse statements in program order, recording every expression slot as a
-  *reference* to its node scaled by `execCount` (the number of executions of
-  the current loop context). A node's total multiplicity is the sum of the
-  references to it; references propagate multiplicatively down the DAG
-  (`mult[operand] += mult[parent]`), so a shared subgraph is expanded
-  arithmetically rather than re-walked. Each distinct node is then charged
-  `perExecCost(node) × mult[node]` in a parents-first topological pass
-  (O(V+E)). `totalNodes` counts the distinct nodes, not the references.
-* `perExecCost`:
-  * `BinaryOp` with `+ - * /`: lanes come from operand lanes; the FreeLB
-    `binaryOpCost` hook returns `{flops, resultLanes}`. Default (no hook):
-    1 FLOP, scalar result.
-  * `UnaryOp +/-` and `++`/`--`: lane-count FLOPs (vector) or 1. (An
-    increment/decrement is one add/sub of the constant 1; `!`/`~` are not
-    charged.)
-  * `ArrayAccess`/`MemberAccess`/`ArrowAccess`: `memOps += 1` (unique loads).
-  * `Assign` with a complex lvalue (`targetExpr`): `memOps += 1` per execution
-    (stores); its base/index operands are traversed as usual.
-  * `Call`: `callCost(callee, argLanes)`; `>= 0` adds FLOPs, `< 0` marks
-    unmodeled. No `callCost` hook (generic mode) charges 0 without flagging.
-  * `Ternary`/`Cast`: recurse into operands, no direct cost.
-* `if/else` sums both branches (worst case), unchanged.
+`LaneAnalyzer` (`src/analysis/cost_model.cpp`) computes lanes for compound
+expressions on the fly:
 
-### Lane inference
+* `Variable` → stored `vecDim`; if absent, a forward pass (`inferVarLanes`)
+  infers lanes from the variable's initializer or assigned value in program
+  order. CSE places definitions before uses, so one pass suffices.
+* `Call` → `callResultLanes(callee)`, else
+  `isVectorProducingCall(callee) ? vectorDim : 0`.
+* `BinaryOp` → the result lane count returned by `binaryOpCost`; scalar without
+  the hook.
+* `UnaryOp`/`Cast` → the operand's lanes.
+* `Ternary` → the maximum of the two arms' lanes.
 
-`vecDim` metadata is attached to `DAGNode` by `IRBuilder` (from declared
-parameter/local types via `CSEConfig::vectorLanes`). Compound expression lanes
-are computed on the fly by the cost model:
+FreeLB (`plugins/freelb/config.h`) supplies the lane hooks:
 
-* `Variable` → stored `vecDim`.
-* `Call` → `callResultLanes(callee)` (FreeLB parses `D<n>Q<q>` and falls back
-  to the configured lattice dimension).
-* `BinaryOp` → hook; default scalar.
-* `UnaryOp`/`Cast`/`Ternary` → propagate.
+* `vectorLanes` parses the numeric size of `Vector<..., N>`; a non-numeric size
+  falls back to the configured lattice dimension.
+* `callResultLanes` treats only lattice direction accessors
+  (`latset::…::c`, `lattice::…::c`) as vector-valued: it parses `D<n>` from the
+  callee, else returns the lattice dimension. Other callees are scalar.
 
-`vecDim` is **not** part of the structural hash (`recomputeHash`), so CSE
-deduplication is unaffected.
+## Loop iteration counting
 
-### Loop iteration counting
+A stack of `LoopDesc {var, start, bound, step, inclusive}` is maintained during
+traversal. Counted loops are recognized in both directions — ascending
+(`<`/`<=` with `++`/`+=k`) and descending (`>`/`>=` with `--`/`-=k`) — and the
+step sign must agree with the comparison direction.
 
-A stack of canonical `LoopDesc {var, start, bound, step, inclusive}` is
-maintained during traversal. Both ascending (`<`/`<=`, `++`/`+=k`) and
-descending (`>`/`>=`, `--`/`-=k`) counted loops are recognized; the step sign
-must agree with the comparison direction. `execCount` computes the number of
-executions of the current context:
+`execCount` returns the number of executions of the current loop context:
 
 * **Rectangular nests** take a fast path: when no loop extent references an
   enclosing loop variable, the count is the product of the per-loop trip counts.
 * **Dependent nests** (e.g. the triangular `for (b = a; b < N; ++b)` inside
-  `a`) are enumerated exactly:
+  `a`) are enumerated exactly, binding each loop variable in the environment:
 
   ```
   execCount(stack, i):
     if i == len(stack): return 1
-    for v in [start_i, bound_i) step step_i:
-        bind(var_i, v); count += execCount(stack, i+1)
-    return count
+    total = 0
+    for v in start_i .. bound_i (respecting step_i and inclusive_i):
+        bind(var_i, v); total += execCount(stack, i + 1)
+    return total
   ```
 
-  Enumeration is bounded by `kMaxEnum` (1e6). A larger nest stops multiplying
-  at the overflow point and falls back to that *partial* product, so the result
-  is a **lower bound**, never an over-count -- and the loop is counted in
-  `unknownLoops` so the approximation is visible. (`for (i < 2e6)` used to
-  report 2 FLOPs with `unknownLoops = 0`: neither the real cost nor labelled.
-  The counter is incremented once per loop nest, not once per statement slot.)
-* Loops whose bounds/steps cannot be resolved, or whose sign/direction
-  disagree, are charged once and increment `unknownLoops`.
+  The product probe caps enumeration at `kMaxEnum` (1e6). A nest over the cap
+  stops at the overflow point and returns the partial product instead of
+  enumerating; the loop is counted in `unknownLoops` so the approximation is
+  visible.
 
-Because `unknownLoops > 0` marks a truncation, both are a **lower bound** on
-the real cost -- the contract `CostResult` documents and the CLI prints.
+A loop that `recognizeLoop` rejects, or whose start/bound references a variable
+not bound by an enclosing loop, is charged once per execution of the enclosing
+context and increments `unknownLoops`.
+The counter is incremented once per loop construct, not once per statement slot.
+When `unknownLoops > 0`, `flops` is a lower bound on the real cost — the
+contract documented by `CostResult` and printed by the CLI.
 
-This is cheap for the FreeLB dim (`d<=3`) and lattice (`q<=27`) loops.
+## Hooks
 
-### Hooks (`src/frontend/cse_config.h`)
+The model reads all project semantics from optional hooks in
+`src/frontend/cse_config.h`:
 
-```cpp
-std::function<int(const std::string& type)> vectorLanes;               // declared type -> lanes
-std::function<int(const std::string& callee)> callResultLanes;         // callee -> result lanes
-std::function<long long(const std::string& callee,
-                        const std::vector<int>& argLanes)> callCost;   // -1 = unmodeled
-std::function<int(OpCode op, int aLanes, int bLanes, long long& flops)> binaryOpCost;
-```
+| Hook | Meaning |
+|------|---------|
+| `vectorLanes(type)` | declared type → lane count |
+| `callResultLanes(callee)` | callee → result lane count |
+| `callCost(callee, argLanes)` | scalar FLOP cost; negative = unmodeled |
+| `binaryOpCost(op, aLanes, bLanes, flops)` | writes FLOPs, returns result lanes |
 
-`plugins/freelb/config.h` wires these from the active `LatticeConfig`:
+`plugins/freelb/config.h` wires them from the active `LatticeConfig`:
 
-* `vectorLanes`: parse `Vector<..., N>` (numeric) or use the lattice dimension
-  for `Vector<T, LatSet::d>`.
-* `callResultLanes`: parse `D<n>Q<q>` from the callee, else lattice dimension.
-* `callCost`: `getnorm2 -> 2d-1`, `getnorm -> 2d`, `getsum -> max(0, d-1)`,
-  `dot -> 2d-1`, `latset::*`/`lattice::*`/`clear`/`get*` -> 0, builtin math -> 1,
-  otherwise `-1`. Vector-valued `getnorm*`/`dot`/`getsum` need a known lane
-  count (`d > 0`, from a lattice dimension or a numeric `Vector<..., N>`); with
-  no lane information they are treated as unmodeled (`-1`).
-* `binaryOpCost`: `*` = dot when both operands are vectors (`2d-1`, scalar
-  result) else scaling (lane count); `+ - /` = componentwise (max lanes).
+* `callCost`: `getnorm2 → 2d-1`, `getnorm → 2d`, `getsum → max(0, d-1)`,
+  `dot → 2d-1`, `latset::*`/`lattice::*`/`clear`/`get*` → 0, builtin scalar math
+  (`sqrt`, `pow`, …) → 1, otherwise `-1`. Here `d` is the larger of the lattice
+  dimension and the argument lane counts. Vector-valued
+  `getnorm*`/`dot`/`getsum` need `d > 0` (from a lattice dimension or a numeric
+  `Vector<..., N>`); with no lane information they are unmodeled (`-1`).
+* `binaryOpCost`: `*` is a dot product (`2d-1`, scalar result) when both operands
+  are vectors, otherwise scaling by the lane count; `+ - /` are componentwise
+  (max lane count).
 
-Generic `createFreeLBConfig()` default (empty lattice) still parses numeric
+The generic `createFreeLBConfig()` default (empty lattice) still parses numeric
 `Vector<..., N>` lane counts, so self-contained fixtures are weighted without
 passing `--lattice`.
 
-## Driver / reporting
+## Boundary
 
-`plugins/freelb/cse_main.cpp` (the generic `cse -c` entry point):
+Lattice tables and helper-call weights live in `plugins/freelb/config.h`; the
+cost model reaches them only through `CSEConfig` hooks. With null hooks it is
+scalar and calls cost 0 without being flagged.
 
-* accumulate `functionCosts` from the first `optimizeRegion` pass and drop the
-  duplicate re-optimization loop;
-* print `flops / vectorOps / memOps / nodes / stmts / vars` plus
-  `unknownLoops` / `unmodeledCalls` warnings in text and JSON;
-* `--lattice` selects the lattice for loop dims, lane counts **and** the
-  `LatticeResolvePass` alias/name, so `latset::c<LatSet>(k)` is resolved to
-  scalar components.
+## Verification
 
-`plugins/freelb/ur_emit.cpp` (the `csegen` generator) reports cost itself:
+`tests/run_tests.sh` pins post-pass FLOP counts for a set of fixtures, with
+default, `-r` and `-s` stages. `tests/verify/verify_cost.cpp` pins the
+per-reference rule on shapes where it differs from unique-node counting,
+including a shared node across statements, a duplicate operand in one statement,
+a materialized temporary, loop scaling and an over-cap loop.
+`tests/verify/verify_cost_descending.cpp` pins descending/stepped loops. The
+`cost_nested` fixture covers a triangular nest, an unresolved bound, vector
+weighting and a helper call; `cost_descending` covers negative steps. A
+`csegen --cost` smoke check verifies the generator's cost path. The fixture
+inventory is `tests/README.md`.
 
-* `csegen --cost [--json] [--lattice NAME]... <in> <out>` measures
-  before/after on the **exact** per-struct pipeline it uses to emit `.ur.h`
-  (`lowerVectors`, `CounterPropPass`, and the generator's recombine setting),
-  so the numbers cannot drift from the generated code;
-* `UrGenerateOptions::report` / `lattices` carry the collection and filter;
-* `tools/cse/Makefile` `make cost` drives this, not `cse -c`.
-
-Rationale: a per-call `--lower-vectors` flag on the generic `cse` tool would
-have to duplicate `classifyStruct`'s policy and could rot as new struct shapes
-appear. Measuring inside the generator keeps a single source of truth.
-
-## Tests
-
-`tests/run_tests.sh` pins post-pass FLOP counts, so the per-reference and
-call/vector accounting changes re-baseline those numbers; `tests/verify/verify_cost.cpp`
-pins the counting rule itself on shapes where it differs from unique-node
-counting. New fixtures cover
-vector arithmetic, nested `dim` loops, descending loops, helper calls,
-unknown-bound loops and memory ops. A `csegen --cost` smoke check verifies the
-generator's cost path.
+The CLI and generator print these fields; their wiring (`cse -c`,
+`csegen --cost`, `make cost`) is documented in `README.md` and
+`docs/architecture.md`.
 
 ## Non-goals
 
-* Full type inference / generic operator overloading semantics — lane rules
-  are project hooks.
+* Full type inference / generic operator-overloading semantics — lane rules are
+  project hooks.
 * Modeling branch probabilities or memory-hierarchy costs.
-
-## Layering
-
-`src/` stays project-agnostic: it contains no FreeLB names or policy. All
-domain semantics enter through `CSEConfig` hooks (`vectorLanes`,
-`callResultLanes`, `callCost`, `binaryOpCost`, `resolveName`, …) supplied by
-`plugins/freelb/config.h`; lattice tables, helper-call weights and the CUDA
-token filter live under `plugins/freelb/`. The cost model is behavior-neutral
-when those hooks are null (scalar, calls charged 0).

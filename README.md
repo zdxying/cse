@@ -4,7 +4,7 @@
 
 CSE analyzes the functions you mark with `//@cse`, finds redundant computation
 across statements, and rewrites the region with the duplicates removed. It is a
-standalone C++17 tool built on an LLVM-inspired three-stage pipeline —
+standalone C++17 tool built on an LLVM-inspired four-stage pipeline —
 **Frontend → IR → Passes → Backend** — and ships as a library plus two
 executables.
 
@@ -53,7 +53,9 @@ plugin slots and the full safety model are documented in
 
 - GNU make
 - A C++17 compiler (`g++` by default, override with `CXX=...`)
-- Python 3 (only for the latset checks inside `make test`)
+- Python 3 for `make test`: the twin harness, the generative fuzzer and several
+  checkers are Python, so the suite does not run without it. The lattice drift
+  guard and the FreeLB verifiers additionally need a FreeLB checkout.
 
 ## Build
 
@@ -76,10 +78,11 @@ make clean
 ./bin/cse input.cpp -s -c --json
 ```
 
-A region starts at a line that begins with `//@cse` (leading whitespace
-allowed) and runs to the end of the next balanced `{ ... }` body. Everything
-outside the region is copied through unchanged, and the output file is always
-`<input>.cse` next to the source.
+A region starts at a line whose first token is `//@cse` (leading indentation and
+whitespace between `//` and `@cse` are allowed) and runs to the end of the next
+balanced `{ ... }` body or, for a declaration, the next top-level `;`.
+Everything outside the region is copied through unchanged, and the output file
+is always `<input>.cse` next to the source.
 
 | Option | Effect |
 |--------|--------|
@@ -90,7 +93,7 @@ outside the region is copied through unchanged, and the output file is always
 | `-v`, `--verbose` | print each pass to stderr |
 | `--dump-ir` | print the IR before and after each pass (to stdout) |
 | `--verify` | check pass invariants (effect preservation); exit 4 on violation |
-| `--lattice NAME` | lattice set for the cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27) |
+| `--lattice NAME` | lattice set used to resolve `LatSet::{q,d,cs2,...}` and for the cost model (D2Q5, D2Q9, D3Q7, D3Q15, D3Q19, D3Q27) |
 | `-h`, `--help` | usage |
 
 ### Generate FreeLB `.ur.h` specializations
@@ -150,12 +153,12 @@ preserves behavior through eight mechanisms:
 4. **Dominance** — expressions computed inside `if`/`else`/loops are marked
    nested and never lifted out.
 5. **Speculation** — `isSpeculatable` (`analysis/purity.h`) answers a different
-   question from purity: *may this run where the source did not run it?* It is
-   the fix for `k ? 1/k : 0`, whose division used to be hoisted out of the
-   conditional and trap at `k = 0`. A guarded operand (a ternary arm, the right
-   side of `&&`/`||`) is extracted only when it is speculatable. Hoisting the
-   *whole* conditional is always safe — it keeps its internal short-circuit —
-   so only the condition / left operand has to be speculatable.
+   question from purity: *may this run where the source did not run it?* It
+   keeps `k ? 1/k : 0` from evaluating the division when `k = 0`. A guarded
+   operand (a ternary arm, the right side of `&&`/`||`) is extracted only when
+   it is speculatable. Hoisting the *whole* conditional is always safe — it
+   keeps its internal short-circuit — so only the condition / left operand has
+   to be speculatable.
 6. **Scopes** — shadowing variables are alpha-renamed so unrelated declarations
    with the same name are never merged. The rename also fires when the region
    *reads* a name it never declares (`double s = t;` where `t` is a global): the
@@ -223,8 +226,8 @@ lower bound. See `docs/cost_model_redesign.md`.
 
 Sample results (before → after): `basic_cse` 11 → 10, `features` 52 → 51,
 `equilibrium_d3q19` 323 → 84 FLOPs (−74.0%), `safety_cases` 24 → 21,
-`cost_nested` 478 → 355 (conservative since `const` parameters stopped being
-assumed read-only roots), `cost_descending` 35 → 35.
+`cost_nested` 478 → 355 (conservative: `const` parameters are not read-only
+roots), `cost_descending` 35 → 35.
 
 ## Repository layout
 
@@ -246,9 +249,6 @@ docs/           architecture and port status
   accounting model (per-reference FLOPs, vector weighting, hooks)
 - [docs/freelb_port_status.md](docs/freelb_port_status.md) — FreeLB integration
   status, open TODOs and the generic/FreeLB boundary
-- [docs/cse-round6-audit.md](docs/cse-round6-audit.md) — the latest full
-  architecture audit (defects found, fixes landed, backlog dispositions;
-  not version-controlled)
 
 ## Known limitations
 

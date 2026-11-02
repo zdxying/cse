@@ -1,217 +1,126 @@
 # FreeLB 移植状态
 
-本文档汇总 `cse` 引擎为 FreeLB 所做的移植工作与待办事项，以及配套的 FreeLB 侧
-集成（`~/FreeLB` 分支 `dev`）。
+本文档是 FreeLB 移植状态的唯一权威副本；FreeLB 侧没有对应的状态文件。
 
-> **唯一权威副本**：本文档是移植状态的单一来源。FreeLB 侧无对应的状态文件，
-> 集成状态一律以本文件为准。
+## 1. FreeLB 如何消费引擎
 
-> **分支状态**：`main` 是"通用引擎 + FreeLB 插件 + `.ur.h` 生成器"的集成分支，
-> 历史集成提交在 `main` 上可达；后续重构与优化在 `dev` 上推进。
+`cse` 分为通用核心 `src/` 与 FreeLB 插件 `plugins/freelb/`，产出
+`libcse.a/.so`、`bin/cse`（通用 `//@cse` CLI）和 `bin/csegen`（`.ur.h` 生成器）。
 
-## 1. 目标与架构
+FreeLB 的接入：
 
-把通用 DAG-CSE 引擎用于生成 FreeLB 的“展开循环”特化头（`.ur.h`），替换
-FreeLB `tools/cse` 中原有的旧解释器/优化器。
+- `third_party/cse` 是 submodule，`.gitmodules` 跟踪 `branch = main`。
+- `tools/cse/` 只保留接线与验证：`make` 构建引擎并复制 `csegen`，`make gen`
+  生成 `generated/lbm/{moment,equilibrium,force}.ur.h`，`make verify` 跑三个
+  数值校验，`make cost` 用 `csegen --cost` 测成本。`tools/cse/reference/` 是
+  冻结的手写 `.ur.h` 对比基准，从不上包含路径。
+- `make.mk` 在 `-D_UNROLLFOR` 且 `csegen` 存在时加
+  `-D_FLB_UR_CSE -I$(GEN_DIR)`，并按需从 `src/lbm/*.h` 生成 `.ur.h`；`csegen`
+  缺失时告警并回退到 `src/lbm` 的循环版（`make.mk:85-101`）。
+- FreeLB CI（`.github/workflows/ci.yml`）两个 job：`engine` 构建并跑 pinned
+  submodule 的 `make test`；`unrollfor` 构建 csegen、跑
+  `make -C tools/cse verify`，断言 dry-run 带
+  `-D_FLB_UR_CSE -I../../generated`，并在有/无 xcore 下各编译一次
+  `examples/cavity3d`。断言是必需的一环：回退路径让“构建成功”本身不证明
+  生成头被使用。
 
-分层：
+## 2. 验证状态
 
-- **引擎（本仓库）**：通用前端/IR/passes/CodeGen + FreeLB 专用插件
-  （`plugins/freelb/`），产出 `libcse.a/.so` 与两个可执行文件：
-  - `bin/cse`：通用 CSE CLI（`//@cse` 函数区域）。
-  - `bin/csegen`：FreeLB `.ur.h` 生成器（`csegen <input.h> <output.h>`）。
-- **驱动（FreeLB 仓库）**：`third_party/cse` submodule + `tools/cse/` 薄接线，
-  `make.mk` 在 `-D_UNROLLFOR` 时调用 `csegen` 到 `generated/` 影子包含目录。
+| 项 | 当前结果 / 入口 |
+|----|----------------|
+| FreeLB `verify_moment.py` | 60/60（对 `generated/lbm/moment.ur.h` 逐项数值比对） |
+| FreeLB `verify_force.py` | ALL PASSED（12 个特化） |
+| FreeLB `verify_equilibrium.py` | PASS |
+| 引擎回归 | `make test`：FLOP 钉（default / `-r` / `-s`）、数值校验器、扫描 oracle、`csegen` 冒烟；夹具与钉值清单见 `tests/README.md` |
+| 引擎 sanitizer | `make sanitize`（ASan/UBSan） |
+| `csegen` 冒烟 | `tests/csegen/*.h` 生成并检查代表特化；每次运行向 stderr 报告覆盖率；生成头断言无 `a[i] = a[i];` |
 
-引擎集成里程碑（P0–P2 已合入 `main`）：
+`make test` 在存在 FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时追加
+`check_lattice.py` 与三个 `verify_*.py`，否则跳过。
 
-| 仓库 | 关键提交 |
-|------|----------|
-| `cse` | `edd01e8`(P0) → `6dd89a1`(P1) → `f9921d9`+`9dece9a`(P2) |
-| `FreeLB` | P0→P1→P2 集成工作以 squash 提交合入 |
-| FreeLB submodule | `third_party/cse` 跟踪 `branch = main`，指针随每次引擎提交同步 bump |
+## 3. 接口与关键配置
 
-## 2. 已完成
+`CSEConfig` 字段、通用扩展点、默认管线插槽与 `csegen` 的输入约定见
+`docs/architecture.md`「配置系统」「插件注入」。FreeLB 侧只需记住：
 
-### P0 — equilibrium（提交 `edd01e8`）
-- `csegen <in.h> <out.h>`：按 `// @cse` 标记解析模板结构体，逐 latset 实例化，
-  运行引擎管线，发射 `.ur.h`（`#pragma once` / include / `#ifdef _UNROLLFOR` /
-  namespace / `CELL<T,LatSet<T>,TypePack>` 偏特化 / 6 个 latset）。
-- 前端保真：保留 `static`/`inline`/`const` 与引用 `&`（lexer 增 `Amp`，
-  `parseType` 修复前缀与引用）。
-- per-latset 上下文：`plugins/freelb/config.h` 的 `LatticeConfig`
-  （`alias/name/dim/q/cs2`）经 `createFreeLBConfig(latCfg)` 注入钩子，
-  `<LatSet>::q/d/cs2/InvCs2/InvCs4` 折叠为常量。**`CSEConfig` 本身不含任何 latset 字段**
-  （见第 7 节）。
-- `plugins/freelb/lattice_resolve`：全部 6 个 latset、按别名解析
-  `latset::c<LatSet>/w<LatSet>`、权重符号规范化为 `latset::w<LatSet>(k)`。
-- `CodeGen::generateBody`：仅发射方法体。
-- 验证：`verify_equilibrium.py` 6/6（D2Q5/D2Q9/D3Q7/D3Q15/D3Q19/D3Q27）。
+- `csegen [--cost] [--json] [--lattice NAME]... <input.h> <output.h>`：输入
+  basename 必须是 `moment.h` / `equilibrium.h` / `force.h`；`--lattice` 可重复；
+  每次运行向 stderr 打印区域/结构体/发射/跳过覆盖率。
+- `LatticeConfig`（`plugins/freelb/config.h`）承载 `alias/name/dim/q/cs2`；
+  `createFreeLBConfig(latCfg)` 把它注入 `resolveName`、向量降级与成本钩子。
+  `CSEConfig` 本身没有 latset 字段。
+- **`noAlias`**：`const T*` / `const T&` 形参都可能与另一个实参指向同一对象
+  （`f(x, x)`），所以通用默认 `false`，引用形参的 load 不跨写共享。FreeLB
+  kernel 的 cell / momenta / force 缓冲互不别名，profile 显式置 `true`。
+  实测 `csegen --cost` 的 `force.h`：`noAlias=true` 时 D3Q19/D2Q9 的 After 为
+  353/150；临时关闭该许可（同一管线）退到 671/224。`bin/cse -s` 保持关闭。
 
-### P1 — force（提交 `6dd89a1`）
-- 向量降级（`CSEConfig.lowerVectors`）：`Vector<T,LatSet::d>` 的分量式
-  `+ - * /`、点积、常量分量索引、`latset::c<LatSet>(k)` 方向向量。
-- 非类型模板参数：`CSEConfig.constBindings`（如 `ScalarForcePopImpl` 的 `d`）。
-- 驱动按模板形参分类：`<CELL>` / `<T,LatSet>` / `<T,LatSet,非类型>`，
-  非类型形态按 `d=0..dim-1` 逐个实例化。
-- 修复符号常量折叠：`ConstantFold` / `AlgebraicSimplify::normalizeProduct`
-  不再把 `latset::w<LatSet>(k)` 的数值折掉、丢失符号。
-- 验证：`verify_force.py`（`ForcePopImpl` + `ScalarForcePopImpl`）6/6。
+## 4. 未完成 / 已知限制
 
-### P2 — moment（提交 `f9921d9`、`9dece9a`）
-- 前端：`T{}` 值初始化、`x.template f<...>()`、`if constexpr`、
-  模板/限定类型局部声明（`looksLikeVarDecl` 前瞻）、声明处 `{}` 初始化。
-- 向量：向量局部按分量降级并登记；向量赋值 / 元素存储 / 整向量存储；
-  记录可索引基节点，使 `latset::c<LatSet>(k)[alpha]` 保留到 `alpha` 变常量。
-- 循环展开：支持非零起点（三角循环 `for (beta=alpha;...)`）；对可变/不纯局部
-  按迭代重命名（`name__u<i>`）；`freshen` 让每迭代获得独立的不纯 load；
-  递归展开由代入而暴露的内层循环；用当前子树重新计算使用数（避免陈旧计数）。
-- 常量/语句：比较运算常量折叠（`== != < > <= >=`）；`substitute` 保留
-  `++`/`--` 并重建 `Cast`/`Ternary`；`++`/`--` 标记为不纯。
-- 新增 `CounterPropPass`：直线计数器解析（`tensor[i]→tensor[0],…`）、
-  降级向量局部索引（`unew[1]→unew_1`）、常量条件折叠（`if (alpha==beta)`）。
-- `if constexpr` 单语句无花括号发射（贴合 FreeLB 风格/验证脚本）。
-- 验证：`verify_moment.py` **60/60**（`reference` 共 11 结构体 × 6 latset = 66 个
-  特化，脚本解析正则当前覆盖其中 60 个，逐项数值比对全通过）。
+- **前端子集**：
+  - `if constexpr` 条件保持不透明（不折叠）；FreeLB 管线里的 `CounterPropPass`
+    会折叠普通 `if` 的常量条件（`plugins/freelb/counter_prop.cpp`）。
+  - 循环展开只支持常量起点与常量上界（`for (k=a; k<N; ++k)`，最多 64 次）；
+    上界为命名或表达式时不展开（`src/passes/loop_unroll.cpp`）。
+  - `Vector` 只覆盖分量式 `+ - * /`、点积、常量分量索引和 `latset::c` 触发；
+    无矩阵/张量运算，无通用构造。
+  - `opp` 等未登记的调用按不透明/不纯处理；`getOmega`、`template get<>` /
+    `hasField<>`、`getnorm2` / `getsum` / `getnorm` / `dot` 已由
+    `isFreeLBPureFunction` 登记为纯函数，可去重和提取。
+  - 符号索引（如 `u_value[ForceScheme::scalardir]`）按原文发射；索引变成常量
+    后才解析。
+- **`CounterProp` 的向量局部映射**依赖 `vectorLocalName` 的命名约定
+  （`unew[1] → unew_1`），是启发式；作用域变复杂时需改为显式映射。
+- **submodule 工作流**：引擎每次改动需要“引擎提交 + FreeLB 指针 bump”两步。
+- **单消费者**：目前只有 FreeLB 使用；未提供 pkg-config 或 SONAME。
+- **latset 覆盖**：`.ur.h` 仅覆盖 D2Q5/D2Q9/D3Q7/D3Q15/D3Q19/D3Q27；
+  D1Q3/D2Q4 不在生成覆盖内。
+- **`verify_force.py` 的语义**：忽略 reference 参数，只读生成文件并按内置公式
+  校验；另外两个脚本对新旧文件逐项数值比较。
+- **collision / MRT 不在覆盖内**：`tools/cse/Makefile` 记录原因（C 数组声明、
+  `unsigned int`、stride-2 bounce-back）；手写展开版本仍作为普通头文件使用。
 
-### FreeLB 侧（`dev`）
-- `third_party/cse` submodule；`tools/cse/` 旧解释器（约 2886 行）删除，
-  `Makefile` 改为“构建引擎 → 复制 `csegen` → `gen/verify/install`”。
-- `make.mk`：`-D_UNROLLFOR` 时 `UR_CSE_BASES ?= lbm/moment lbm/equilibrium lbm/force`
-  生成到 `generated/` 并用 `-Igenerated` 影子包含；未列出的手写 `.ur.h` 回退。
-  构建系统对可选依赖做 wildcard 检测：`tools/cse/csegen` 缺失时告警并回退到
-  手写 `src/lbm/*.ur.h`；`src/xcore` 静态库缺失时告警并以 `-DXCORE_ENABLED`
-  未定义的方式回退 `std::allocator`（`buffer_type` 定义集中在 `utils/alias.h`）。
-- `tools/cse/verify_{moment,equilibrium,force}.py` 保留并接入 `make verify`。
+## 5. 构建与验证
 
-### 验证矩阵（当前）
-| 项 | 结果 |
-|----|------|
-| `verify_moment.py` | 60/60 |
-| `verify_force.py` | ALL PASSED（对生成文件按解析公式校验） |
-| `verify_equilibrium.py` | PASS |
-| 引擎 FLOP 回归 `tests/fixtures/*`（默认档） | `basic_cse` 10 / `features` 51 / `namespace_case` 4 / `equilibrium_d3q19` 84 / `safety_cases` 21 / `parens` 19 / `cost_nested` 355 / `cost_descending` 35 flops（向量加权、按引用次数计费的成本模型；另有 `mixed_ops`、`write_visibility`、`effect_duplication`、`loop_control`、`member_purity`、`const_typing` 等其余夹具） |
-| 引擎 FLOP 回归（`-r` 档） | `recombine` 24 flops |
-| 引擎 FLOP 回归（`-s` 档） | `parens` 19 / `store_aware` 21（别名敏感，移入此档）/ `float_identities` 8 / `ref_alias` 1 / `mixed_ops` 8 / `constant_edges` 6 等 |
-| 引擎数值校验 `tests/verify/verify_*.cpp` | equilibrium / safety / recombine / parens / store_aware / float_identities 等全通过；`verify_config.cpp` 覆盖库层 `CSEConfig` 契约 |
-| `csegen tests/csegen/*.h` 冒烟 | equilibrium / force / moment 各检出代表特化；`csegen --cost` 输出 Total；每次运行向 stderr 打印覆盖率（emitted/skipped） |
-| `examples/cavity3d -D_UNROLLFOR` | 编译通过（0 error） |
+引擎（本仓库根）：
 
-> FreeLB 头文件成本由 `csegen --cost`（`make cost`）测量，与生成 `.ur.h` 走同一
-> 管线；`cse -c` 仅供通用引擎夹具使用。
-
-以上由引擎 `make test`（`tests/run_tests.sh`）一次执行；FreeLB 段仅在存在
-FreeLB checkout（`FREELB=` 或 `~/FreeLB`）时运行。
-
-## 3. 已实现的接口/配置（供扩展参考）
-
-- CLI：`csegen <input.h> <output.h>`；`input` basename 决定 include/namespace
-  （仅 `moment.h`/`equilibrium.h`/`force.h`）。支持 `--cost`（与生成同管线的
-  FLOP 报告，`--json` 机器可读）与 `--lattice NAME`（限定 latset，可重复）；
-  每次运行向 stderr 打印覆盖率报告（区域/结构体/发射/跳过）。
-- `CSEConfig`（`src/frontend/cse_config.h`，通用，无 FreeLB 语义）：
-  - `assumeNumericCommutative/Associative`、`allowFpReassoc`、`allowUnsafeFpIdentities`、
-    `noAlias`、`isPureFunction`
-  - **FreeLB profile 显式置 `noAlias = true`**：引用别名修复（`&` 形参与 `*`/`[` 同一条
-    规则）后，`const Vector&` / `CELL&` 形参的 load 不再跨写共享，force 特化会从
-    353/150 退到 671/224 flops；FreeLB kernel 的实参（cell / momenta / force 缓冲）
-    从不互为别名，因此在调用点断言并打开该许可。通用默认仍为 `false`。
-  - 钩子：`resolveName`、`lowerVectors` + `vectorDim/isVectorType/isVectorProducingCall`、
-    `vectorLocalName`、`constBindings`
-- `plugins/freelb/config.h`：`LatticeConfig`、`resolveLatsetConst`、
-  `createFreeLBConfig(latCfg)`，把 latset 上下文经上述钩子注入。
-- `PassManager::createDefault(config, recombine, resolvePass, postAlgebraPass)`：
-  插件在此注入 `LatticeResolvePass` 与 `CounterPropPass`。
-- `plugins/freelb/ur_emit.{h,cpp}`：`generateUrHeader(in,out)`、`detectUrConfig`。
-- `plugins/freelb/lattice_resolve.{h,cpp}`：`createLatticeResolvePass(alias, setName)`
-  （默认两者皆空；`csegen` 传 `("LatSet", lat.name)`）。
-- 结构体分类（`ur_emit.cpp`）：`Cell` / `CellType` / `TLatSet` / `TLatSetD`。
-
-## 4. 未完成 / TODO
-
-### 中优先级
-1. **CI**：FreeLB 侧在 `-D_UNROLLFOR` 下至少编译一个示例。引擎侧回归已接入
-   `.github/workflows/ci.yml`（`make test` + `make sanitize`），FreeLB 侧仍未接。
-
-### 低优先级 / 已知限制
-2. **前端子集限制**：
-   - `if constexpr` 条件保持不透明（不折叠）；只有普通 `if` 的常量条件会折叠。
-   - 循环展开仅支持常量上下界（`for (k=0;k<N;…)`，含非零起点）；命名/表达式
-     上界不展开。
-   - `Vector` 语义仅覆盖点积与分量运算，无矩阵/张量运算、无通用构造。
-   - `opp`、`hasField`、`getOmega`、`getnorm2` 等当作不透明调用（不去重/不外提）。
-   - 向量元素符号索引（如 `u_value[ForceScheme::scalardir]`）仅按原文发射。
-3. **`CounterProp` 的向量局部映射**依赖命名约定（`unew[1]→unew_1`），
-   属启发式；若后续引入更复杂作用域需改为显式映射。
-4. **submodule 工作流摩擦**：引擎每次改动需“引擎提交 + FreeLB 指针 bump”两步。
-5. **多消费者支持**：目前只有 FreeLB 一个消费者；若需复用，需走安装/导出路线
-   （当前未提供 pkg-config/SONAME）。
-6. **latset 覆盖**：`.ur.h` 仅覆盖 6 个 latset（无 D1Q3/D2Q4，两者未被使用）。
-7. **`verify_force.py` 校验方式**：只读入生成文件、按内置解析公式校验
-   （reference 参数被忽略），与另两个 verify 脚本的对比语义不同。
-
-## 5. 如何构建与验证
-
-引擎：
 ```bash
-cd third_party/cse
 make                       # 生成 bin/cse, bin/csegen, libcse.a/.so
 make test                  # FLOP 回归 + 数值校验 + csegen 冒烟（含 FreeLB 段）
 ./bin/csegen tests/csegen/moment.h /tmp/moment.ur.h
 ```
 
-FreeLB（`dev`）：
+FreeLB：
+
 ```bash
 cd ~/FreeLB/tools/cse
 make                       # 构建引擎并复制 csegen
-make gen                   # 生成 out/{moment,equilibrium,force}.ur.h
+make gen                   # 生成 generated/lbm/*.ur.h
 make verify                # 三个数值验证
+make cost                  # csegen --cost，默认 LATTICES="D2Q9 D3Q19"
 # 示例（使用 generated/ 影子包含）
 cd ~/FreeLB/examples/cavity3d && make
 ```
 
 ## 6. 相关文件
 
-引擎（`main`）——`src/` 为通用核心，`plugins/freelb/` 为 FreeLB 集成：
-- `src/frontend/{cse_config.h,lexer.cpp,parser.cpp,parser.h,ast.h,token.h}`
-- `src/ir/{ir_builder.h,ir_builder.cpp,ir_utils.h,statement.h}`
-- `src/backend/codegen.{h,cpp}`
-- `src/passes/{loop_unroll.cpp,pass_manager.cpp,value_prop.cpp,dce.cpp,algebraic_simplify.cpp}`
-- `plugins/freelb/{config.h,lattice_resolve.{h,cpp},counter_prop.{h,cpp}}`
-  （配置钩子 + latset 解析 + 计数器传播——`counter_prop` 是 FreeLB 注入的
-  post-algebra pass，其唯一消费者在本插件内，故归入插件树）
-- `plugins/freelb/{cse_main.cpp,ur_emit.{h,cpp},ur_emit_main.cpp}`（`bin/cse` 与 `bin/csegen` 驱动）
-- `tests/csegen/{moment.h,force.h,equilibrium.h}`
+- 引擎目录结构、`CSEConfig` 字段、pass 管线、成本模型：`docs/architecture.md`。
+- 引擎入口与测试：`Makefile`、`tests/run_tests.sh`、`tests/README.md`。
+- FreeLB 侧：`third_party/cse`（submodule）、`tools/cse/{Makefile,reference/,verify_*.py}`、
+  `make.mk`、`.github/workflows/ci.yml`。
 
-FreeLB（`dev`）：
-- `third_party/cse`（submodule）、`.gitmodules`
-- `tools/cse/{Makefile,DESIGN.md,reference/,verify_*.py}`
-  （移植状态的唯一权威副本即本文件，FreeLB 侧无对应状态文件）
-- `make.mk`、根 `Makefile`
+## 7. 通用 / FreeLB 边界
 
-## 7. 通用 / FreeLB 边界（已完成剥离）
+`src/` 是零 FreeLB 语义的通用引擎：不 include `plugins/`，`CSEConfig` 没有
+latset 字段。判定标准是“无语义依赖”而非“零字面出现”——
+`grep -riE "freelb|latset|lattice" src/` 只命中 6 行注释，它们举例说明通用规则
+（符号常量不进身份、零方向分量、引用别名），不参与任何判断。
 
-`src/` 现为**零 FreeLB 语义的通用引擎**：`grep -riE "freelb|latset|lattice" src/`
-为空，`src/` 不再 include `plugins/`，`CSEConfig` 无 latset 字段。FreeLB 的全部
-行为经 `CSEConfig` 的通用钩子注入，由 `plugins/freelb/` 提供。
+FreeLB 的行为只经通用扩展点进入：`CSEConfig::{resolveName, lowerVectors,
+vectorDim, isVectorType, isVectorProducingCall, vectorLocalName, constBindings,
+noAlias, assumeFloatOperands}` 与 `PassManager::createDefault(..., resolvePass,
+postAlgebraPass)`。签名与语义见 `docs/architecture.md`「配置系统」；FreeLB 的
+实现全部在 `plugins/freelb/`（`config.h`、`lattice_resolve`、`counter_prop`、
+`ur_emit`、`cuda_skip` 与两个入口）。
 
-- **A. 通用引擎能力**（与 FreeLB 无关）：
-  `src/frontend/{lexer,token,parser,ast}`（引用限定符、`if constexpr`、`T{}`、
-  `T x{...}`、限定/模板类型声明前瞻、`.template f<...>()`）；
-  `src/ir/{statement,ir_utils}`（`AssignIR::targetExpr`、`IfElseIR::isConstexpr`、
-  `substitute` 重建 `Cast/Ternary` 与保留 `++/--`、比较折叠与符号常量保护）；
-  `src/backend/codegen`（`generateBody`、`if constexpr` 发射、`targetExpr` 赋值）；
-  `src/passes/{loop_unroll,dce,value_prop,algebraic_simplify,cse_pass}`；
-  `Makefile` 的 `OPT/release/install/test` 与 `tests/run_tests.sh`。
-- **B. 通用扩展点**（FreeLB 经此注入，不再内建 FreeLB 语义）：
-  `CSEConfig::resolveName`（名字→常量，FreeLB 用于 `LatSet::q/d/cs2/...`）；
-  `CSEConfig::{lowerVectors,vectorDim,isVectorType,isVectorProducingCall}`
-  （通用向量降级算法，FreeLB 提供 `Vector`/`latset::c` 触发器）；
-  `CSEConfig::vectorLocalName`（降级向量局部命名，供 `CounterPropPass`）；
-  `PassManager::createDefault(..., resolvePass, postAlgebraPass)`（插件注入 pass）。
-- **C. FreeLB 专属**（全部在 `plugins/freelb/`）：
-  `config.h`（`LatticeConfig`、`resolveLatsetConst`、`createFreeLBConfig`）、
-  `ur_emit.{h,cpp}`、`ur_emit_main.cpp`、`cse_main.cpp`、
-  `lattice_resolve.{h,cpp}`、`counter_prop.{h,cpp}`、`cuda_skip.{h,cpp}`；
-  以及 `tests/csegen/*.h`、`tests/verify/check_lattice.py`、`Makefile` 的
-  `bin/csegen` 文件目标。
+`tests/csegen/*.h` 与 `tests/verify/check_lattice.py` 是 FreeLB 专属测试。
