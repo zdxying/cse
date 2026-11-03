@@ -125,17 +125,4 @@ bool isComparisonOp(OpCode op) {
   }
 }
 
-bool isArithmeticOp(OpCode op) {
-  switch (op) {
-    case OpCode::Add:
-    case OpCode::Sub:
-    case OpCode::Mul:
-    case OpCode::Div:
-    case OpCode::Mod:
-      return true;
-    default:
-      return false;
-  }
-}
-
 }  // namespace cse

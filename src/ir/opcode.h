@@ -47,6 +47,5 @@ OpCode incDecOpCode(const std::string& spelling);
 
 bool isIncDecOp(OpCode op);
 bool isComparisonOp(OpCode op);
-bool isArithmeticOp(OpCode op);  // Add/Sub/Mul/Div/Mod
 
 }  // namespace cse

@@ -129,10 +129,6 @@ struct DAGNode {
   // IRBuilder for variables/parameters from their declared type; used by the
   // cost model to weight vector arithmetic. Deliberately NOT part of the
   // structural hash (it is type metadata, not expression structure).
-  // Vector lane count for value-typed nodes (0/1 = scalar). Populated by the
-  // IRBuilder for variables/parameters from their declared type; used by the
-  // cost model to weight vector arithmetic. Deliberately NOT part of the
-  // structural hash (it is type metadata, not expression structure).
   int vecDim = 0;
 
   // Numeric kind of the value this node denotes (see NumericKind above).

@@ -73,8 +73,8 @@
 | `effect_for_update` | for-update 槽推进非计数器变量（`++g`）是真实效果且值不变 | 孪生差分（`twin_run`）+ 扫描 oracle | — |
 | `bitwise_ops` | 位算子（`\|` `^` `~` `%=` `&=` …）词法/优先级 | 见下 | — |
 
-`bitwise_ops` 不钉成本，由 `verify_lexer`（token 普查：无字节被静默丢弃、多字符算子
-单 token）与第三层扫描 oracle 覆盖。`pp_directives` 未登记成本钉，成本阶段为 `—`；
+`bitwise_ops` 不钉成本，由第三层 round-trip 扫描 oracle 覆盖；`verify_lexer` 用硬编码
+token 串做主算子普查，不读取该夹具。`pp_directives` 未登记成本钉，成本阶段为 `—`；
 其判据是 `verify_pp_directives` 与"预处理器指令"形状检查（含"仅注释里出现 `#`
 的区域必须被优化"）。
 
